@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request
 
@@ -24,6 +25,8 @@ from or_audit.cloud.models import (
     JobRequest,
     JobStatus,
     MachineSize,
+    UsageEvent,
+    UsageSource,
 )
 from or_audit.cloud.store import JobStore
 from or_audit.errors import TaskContractError
@@ -701,3 +704,353 @@ def _wait_for_terminal(store: JobStore, job_id: str) -> JobRecord:
             return record
         time.sleep(0.05)
     raise AssertionError(f"job {job_id} did not complete")
+
+
+# --- append-only usage-event ledger ---------------------------------------
+
+
+def test_store_appends_usage_events_on_terminal_transition(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    record = store.create(JobRequest(task="task", agent="agent"))
+    completed = store.transition(
+        record.id,
+        expected=(JobStatus.QUEUED,),
+        status=JobStatus.SUCCEEDED,
+        completed_at=datetime.now(UTC),
+        provider_cost_micros=12345,
+        runtime_seconds=300,
+    )
+    events = {e.unit: e for e in completed.usage_events}
+    assert set(events) == {"seconds", "cost_micros"}
+    assert events["seconds"].quantity == 300
+    assert events["seconds"].source is UsageSource.MEASURED
+    assert events["cost_micros"].quantity == 12345
+    assert events["cost_micros"].source is UsageSource.ESTIMATED
+    assert len(completed.usage_events) == 2
+
+
+def test_usage_events_are_append_only(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    record = store.create(JobRequest(task="task", agent="agent"))
+    store.transition(
+        record.id,
+        expected=(JobStatus.QUEUED,),
+        status=JobStatus.FAILED,
+        completed_at=datetime.now(UTC),
+        provider_cost_micros=10,
+        runtime_seconds=120,
+    )
+    store.append_usage_event(
+        record.id, unit="cost_micros", quantity=7, source=UsageSource.PROVIDER_REPORTED
+    )
+    events = store.usage_events(record.id)
+    assert len(events) == 3  # prior events preserved, not overwritten
+    assert events[-1].source is UsageSource.PROVIDER_REPORTED
+    assert events[-1].quantity == 7
+
+
+def test_summarize_usage_groups_by_job_unit_source(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    first = store.create(JobRequest(task="task", agent="agent"))
+    second = store.create(JobRequest(task="task", agent="agent"))
+    store.transition(
+        first.id,
+        expected=(JobStatus.QUEUED,),
+        status=JobStatus.SUCCEEDED,
+        completed_at=datetime.now(UTC),
+        provider_cost_micros=1000,
+        runtime_seconds=60,
+    )
+    store.transition(
+        second.id,
+        expected=(JobStatus.QUEUED,),
+        status=JobStatus.SUCCEEDED,
+        completed_at=datetime.now(UTC),
+        provider_cost_micros=2500,
+        runtime_seconds=180,
+    )
+    summary = store.summarize_usage()
+    by_job = {(row["job_id"], row["unit"]): row for row in summary}
+    assert by_job[(first.id, "cost_micros")]["quantity"] == 1000
+    assert by_job[(first.id, "seconds")]["quantity"] == 60
+    assert by_job[(second.id, "cost_micros")]["quantity"] == 2500
+    assert by_job[(second.id, "seconds")]["quantity"] == 180
+    one = store.summarize_usage(job_id=first.id)
+    assert {row["job_id"] for row in one} == {first.id}
+
+
+def test_append_usage_event_roundtrip(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    record = store.create(JobRequest(task="task", agent="agent"))
+    event = store.append_usage_event(
+        record.id, unit="tokens", quantity=1500, source=UsageSource.MEASURED
+    )
+    assert isinstance(event, UsageEvent)
+    loaded = store.usage_events(record.id)
+    assert loaded[0].id == event.id
+    assert loaded[0].quantity == 1500
+    assert loaded[0].source is UsageSource.MEASURED
+
+
+class FailingSubmitExecutor:
+    def submit(self, job: JobRecord) -> None:
+        raise TaskContractError("provisioning sold out")
+
+    def cancel(self, job: JobRecord) -> None:
+        del job
+
+    def release(self, job: JobRecord) -> None:
+        del job
+
+    def reconcile(self, job: JobRecord) -> JobRecord:
+        raise TaskContractError("remote reconcile failed")
+
+
+def _remote_job(store: JobStore) -> JobRecord:
+    return store.create(
+        JobRequest(
+            task="seldingermed/video-nextstep@0",
+            agent="example/video-predictor@0",
+            executor=ExecutorKind.RUNPOD,
+            compute=ComputeClass.L4,
+        )
+    )
+
+
+def test_submit_job_surfaces_executor_failure_as_502(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    client = TestClient(
+        create_app(
+            store=store,
+            executors={ExecutorKind.LOCAL: FailingSubmitExecutor()},
+            artifact_root=tmp_path / "data",
+            token="secret",
+        )
+    )
+
+    response = client.post(
+        "/v1/jobs",
+        json={"task": "task", "agent": "agent"},
+        headers={"Authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 502
+
+
+def test_submit_job_refuses_unconfigured_executor(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    client = TestClient(
+        create_app(store=store, executors={}, artifact_root=tmp_path / "data", token="secret")
+    )
+
+    response = client.post(
+        "/v1/jobs",
+        json={"task": "task", "agent": "agent"},
+        headers={"Authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_cancel_job_refuses_terminal_state(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    terminal = store.create(JobRequest(task="task", agent="agent"))
+    store.transition(terminal.id, expected=(JobStatus.QUEUED,), status=JobStatus.CANCELLED)
+    client = TestClient(
+        create_app(
+            store=store,
+            executors={ExecutorKind.LOCAL: RecordingExecutor()},
+            artifact_root=tmp_path / "data",
+            token="secret",
+        )
+    )
+
+    response = client.post(
+        f"/v1/jobs/{terminal.id}/cancel", headers={"Authorization": "Bearer secret"}
+    )
+
+    assert response.status_code == 409
+
+
+def test_cancel_job_refuses_unconfigured_executor(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    remote = _remote_job(store)
+    client = TestClient(
+        create_app(store=store, executors={}, artifact_root=tmp_path / "data", token="secret")
+    )
+
+    response = client.post(
+        f"/v1/jobs/{remote.id}/cancel", headers={"Authorization": "Bearer secret"}
+    )
+
+    assert response.status_code == 400
+
+
+def test_get_job_returns_404_and_502_on_reconcile_failure(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    client = TestClient(
+        create_app(
+            store=store,
+            executors={ExecutorKind.LOCAL: FailingSubmitExecutor()},
+            artifact_root=tmp_path / "data",
+            token="secret",
+        )
+    )
+    headers = {"Authorization": "Bearer secret"}
+
+    assert client.get("/v1/jobs/missing", headers=headers).status_code == 404
+
+    local = store.create(JobRequest(task="task", agent="agent"))
+    assert client.get(f"/v1/jobs/{local.id}", headers=headers).status_code == 502
+
+
+def test_list_jobs_returns_records(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    store.create(JobRequest(task="task", agent="agent"))
+    store.create(JobRequest(task="task", agent="agent"))
+    client = TestClient(
+        create_app(store=store, executors={}, artifact_root=tmp_path / "data", token="secret")
+    )
+
+    response = client.get("/v1/jobs", headers={"Authorization": "Bearer secret"})
+
+    assert response.status_code == 200
+    assert len(response.json()) == 2
+
+
+def test_get_result_refuses_non_terminal_and_missing_file(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    pending = store.create(JobRequest(task="task", agent="agent"))
+    empty = store.create(JobRequest(task="task", agent="agent"))
+    store.transition(
+        empty.id,
+        expected=(JobStatus.QUEUED,),
+        status=JobStatus.SUCCEEDED,
+        artifact_path=str(tmp_path / "no-result"),
+    )
+    (tmp_path / "no-result").mkdir(exist_ok=True)
+    client = TestClient(
+        create_app(store=store, executors={}, artifact_root=tmp_path / "data", token="secret")
+    )
+    headers = {"Authorization": "Bearer secret"}
+
+    assert client.get(f"/v1/jobs/{pending.id}/result", headers=headers).status_code == 409
+    assert client.get(f"/v1/jobs/{empty.id}/result", headers=headers).status_code == 404
+
+
+def test_fail_callback_refuses_already_terminal_job(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    remote = _remote_job(store)
+    store.set_callback_token(remote.id, "ok")
+    store.transition(
+        remote.id,
+        expected=(JobStatus.QUEUED,),
+        status=JobStatus.SUCCEEDED,
+        artifact_path=str(tmp_path / "result"),
+    )
+    client = TestClient(
+        create_app(store=store, executors={}, artifact_root=tmp_path / "data", token="secret")
+    )
+
+    response = client.post(
+        f"/v1/internal/jobs/{remote.id}/fail",
+        json={"error": "boom"},
+        headers={"Authorization": "Bearer ok"},
+    )
+
+    assert response.status_code == 409
+
+
+def test_complete_callback_refuses_non_remote_and_bad_credentials(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    local = store.create(JobRequest(task="task", agent="agent"))
+    remote = _remote_job(store)
+    store.set_callback_token(remote.id, "hello")
+    client = TestClient(
+        create_app(store=store, executors={}, artifact_root=tmp_path / "data", token="secret")
+    )
+
+    assert (
+        client.post(
+            f"/v1/internal/jobs/{local.id}/complete",
+            content=b"",
+            headers={"X-Vector-Result-Head": "0" * 64},
+        ).status_code
+        == 409
+    )
+    assert (
+        client.post(
+            f"/v1/internal/jobs/{remote.id}/complete",
+            content=b"",
+            headers={"X-Vector-Result-Head": "0" * 64},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            f"/v1/internal/jobs/{remote.id}/complete",
+            content=b"",
+            headers={
+                "Authorization": "Bearer hello",
+                "X-Vector-Result-Head": "not-a-hex-head",
+            },
+        ).status_code
+        == 422
+    )
+
+
+def test_control_token_required_and_verified(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    client = TestClient(
+        create_app(
+            store=store,
+            executors={ExecutorKind.LOCAL: RecordingExecutor()},
+            artifact_root=tmp_path / "data",
+            token="secret",
+        )
+    )
+
+    assert client.get("/v1/jobs").status_code == 401
+    assert client.get("/v1/jobs", headers={"Authorization": "Bearer wrong"}).status_code == 401
+
+
+def test_healthz_and_anonymous_mode(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    client = TestClient(
+        create_app(
+            store=store,
+            executors={ExecutorKind.LOCAL: RecordingExecutor()},
+            artifact_root=tmp_path / "data",
+            token="",
+            allow_anonymous=True,
+        )
+    )
+
+    assert client.get("/healthz").status_code == 200
+    assert client.post("/v1/jobs", json={"task": "t", "agent": "a"}).status_code == 202
+
+
+def test_complete_callback_rejects_archive_without_result(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite")
+    remote = _remote_job(store)
+    store.set_callback_token(remote.id, "tok")
+    store.transition(remote.id, expected=(JobStatus.QUEUED,), status=JobStatus.RUNNING)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as archive:
+        info = tarfile.TarInfo("result/")
+        info.type = tarfile.DIRTYPE
+        archive.addfile(info)
+    client = TestClient(
+        create_app(store=store, executors={}, artifact_root=tmp_path / "data", token="secret")
+    )
+
+    response = client.post(
+        f"/v1/internal/jobs/{remote.id}/complete",
+        content=buf.getvalue(),
+        headers={
+            "Authorization": "Bearer tok",
+            "X-Vector-Result-Head": "0" * 64,
+        },
+    )
+
+    assert response.status_code == 422
