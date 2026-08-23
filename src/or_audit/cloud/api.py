@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import json
 import os
 import re
 import shutil
 import tarfile
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 
@@ -20,13 +23,276 @@ from or_audit.errors import TaskContractError
 from or_audit.eval.job import JobResult, verify_head
 
 from .executors import Executor, LocalExecutor, Machine0Executor, RunPodExecutor
-from .models import ExecutorKind, JobRecord, JobRequest, JobStatus
+from .models import ExecutorKind, ImportRecord, ImportRequest, JobRecord, JobRequest, JobStatus
 from .store import JobStore
 
 _MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 _MAX_MEMBER_BYTES = 100 * 1024 * 1024
 _MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 _MAX_MEMBERS = 10_000
+
+
+_MAX_IMPORT_BYTES = 200 * 1024 * 1024
+
+
+def resolve_import(request: ImportRequest, artifact_root: Path) -> tuple[str, Path]:
+    """Fetch and verify an import snapshot, returning (snapshot_sha, resolved_path).
+
+    GitHub resolves owner/repo@ref to a gzip tarball (validated as an archive).
+    Hugging Face downloads the repo snapshot through huggingface_hub into a
+    directory, then that tree is validated for a target-kind manifest. The
+    snapshot_sha is a deterministic hash over the resolved fixture.
+    """
+    if request.kind.value == "github":
+        return _resolve_github(request, artifact_root)
+    return _resolve_huggingface(request, artifact_root)
+
+
+def _resolve_github(request: ImportRequest, artifact_root: Path) -> tuple[str, Path]:
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "snapshot.tar.gz"
+        _download(_import_url(request), target, _MAX_IMPORT_BYTES)
+        _validate_tar(target, request.target_kind.value)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        destination = _import_destination(request, artifact_root, "snapshot.tar.gz")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        target.replace(destination)
+        return digest, destination
+
+
+def _resolve_huggingface(request: ImportRequest, artifact_root: Path) -> tuple[str, Path]:
+    destination = _import_destination(request, artifact_root)
+    destination.mkdir(parents=True, exist_ok=True)
+    repo_type = "dataset" if request.target_kind.value == "dataset" else "model"
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:  # pragma: no cover - deployment dependency
+        raise TaskContractError("huggingface_hub is not installed on this control plane") from exc
+    _preflight_hf_total(request, repo_type)
+    try:
+        snapshot_download(
+            repo_id=request.slug,
+            revision=request.ref,
+            repo_type=repo_type,
+            local_dir=destination,
+        )
+    except TaskContractError:
+        raise
+    except Exception as exc:
+        raise TaskContractError(f"failed to resolve Hugging Face snapshot: {exc}") from exc
+    total = _downloaded_total(destination)
+    if total > _MAX_IMPORT_BYTES:
+        raise TaskContractError("Hugging Face snapshot exceeds import size limit")
+    _validate_dir(destination, request.target_kind.value)
+    return _dir_sha256(destination), destination
+
+
+def _preflight_hf_total(request: ImportRequest, repo_type: str) -> None:
+    from huggingface_hub import HfApi
+
+    total = 0
+    for entry in HfApi().list_repo_tree(
+        request.slug, revision=request.ref, repo_type=repo_type, recursive=True
+    ):
+        size = getattr(entry, "size", None)
+        if size is not None:
+            total += size
+            if total > _MAX_IMPORT_BYTES:
+                raise TaskContractError("Hugging Face snapshot exceeds import size limit")
+
+
+def _downloaded_total(path: Path) -> int:
+    total = 0
+    for candidate in path.rglob("*"):
+        if candidate.is_file() and ".cache" not in candidate.relative_to(path).parts:
+            total += candidate.stat().st_size
+    return total
+
+
+def _import_url(request: ImportRequest) -> str:
+    owner, _, repo = request.slug.partition("/")
+    if not owner or not repo:
+        raise TaskContractError("github slug must be owner/repo")
+    return f"https://codeload.github.com/{owner}/{repo}/tar.gz/{request.ref}"
+
+
+def _download(url: str, target: Path, max_bytes: int) -> None:
+    import urllib.request
+
+    with urllib.request.urlopen(url, timeout=60) as response:
+        size = 0
+        with target.open("wb") as handle:
+            while chunk := response.read(64 * 1024):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise TaskContractError("snapshot exceeds import size limit")
+                handle.write(chunk)
+
+
+_KIND_REQUIRED: dict[str, set[str]] = {
+    "task": {"task.toml", "instruction.md"},
+    "agent": {"agent.toml"},
+}
+# dataset accepts either a v0.2 dataset dir or a canonical taskset dir
+_KIND_ANY: dict[str, set[str]] = {
+    "dataset": {"taskset.toml", "dataset.toml"},
+}
+
+
+def _check_manifests(basenames: set[str], target_kind: str) -> None:
+    required = _KIND_REQUIRED.get(target_kind, set())
+    missing = required - basenames
+    if missing:
+        raise TaskContractError(
+            f"import snapshot misses required {target_kind} files: {sorted(missing)}"
+        )
+    any_of = _KIND_ANY.get(target_kind, set())
+    if any_of and not (basenames & any_of):
+        raise TaskContractError(f"import snapshot contains no {target_kind} manifest")
+
+
+def _validate_tar(path: Path, target_kind: str) -> None:
+    import tarfile
+
+    try:
+        with tarfile.open(name=path, mode="r:gz") as archive:
+            members = archive.getmembers()
+            if not members:
+                raise TaskContractError("import snapshot archive is empty")
+            basenames = {m.name.rsplit("/", 1)[-1].lower() for m in members if m.isfile()}
+            _check_manifests(basenames, target_kind)
+    except (tarfile.TarError, EOFError, OSError) as exc:
+        raise TaskContractError("import ref is not a valid GitHub archive snapshot") from exc
+
+
+def _validate_dir(path: Path, target_kind: str) -> None:
+    files = [p for p in path.rglob("*") if p.is_file()]
+    if not files:
+        raise TaskContractError("import snapshot directory is empty")
+    basenames = {p.name.lower() for p in files}
+    _check_manifests(basenames, target_kind)
+
+
+def _safe_component(value: str, label: str) -> str:
+    cleaned = value.strip()
+    if (
+        not cleaned
+        or cleaned in {".", ".."}
+        or "/" in cleaned
+        or "\\" in cleaned
+        or "\x00" in cleaned
+    ):
+        raise TaskContractError(f"{label} is not a safe path component")
+    return cleaned
+
+
+def _import_destination(request: ImportRequest, artifact_root: Path, *parts: str) -> Path:
+    user = _safe_component(request.user_id, "user_id")
+    import_id = _safe_component(request.id, "import id")
+    destination = artifact_root / "imports" / user / import_id
+    destination = destination.joinpath(*parts) if parts else destination
+    root = artifact_root.resolve()
+    dest = destination.resolve()
+    if not dest.is_relative_to(root):
+        raise TaskContractError("resolved import path escapes artifact root")
+    return destination
+
+
+def _dir_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    for rel, file_sha in _walk_digest(path):
+        digest.update(rel.encode())
+        digest.update(b"\0")
+        digest.update(file_sha.encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _walk_digest(path: Path) -> Iterator[tuple[str, str]]:
+    for candidate in sorted(path.rglob("*")):
+        if not candidate.is_file():
+            continue
+        rel_parts = candidate.relative_to(path).parts
+        if ".cache" in rel_parts:
+            continue
+        file_sha = hashlib.sha256()
+        with candidate.open("rb") as handle:
+            while chunk := handle.read(64 * 1024):
+                file_sha.update(chunk)
+        yield "/".join(rel_parts), file_sha.hexdigest()
+
+
+@dataclass(frozen=True)
+class ResolveCallback:
+    supabase_url: str
+    publishable_key: str
+    control_token: str
+
+
+def _run_import(
+    request: ImportRequest,
+    record: ImportRecord,
+    artifact_root: Path,
+    store: JobStore,
+    callback: ResolveCallback,
+) -> None:
+    snapshot_sha = ""
+    resolved_path = ""
+    error = ""
+    try:
+        snapshot_sha, resolved = resolve_import(request, artifact_root)
+        resolved_path = str(resolved)
+    except TaskContractError as exc:
+        error = str(exc)
+    except Exception as exc:
+        error = str(exc)
+    callback_error = ""
+    try:
+        _post_resolve(request, snapshot_sha, resolved_path, error, callback)
+    except TaskContractError as exc:
+        callback_error = str(exc)
+    store.record_import_resolution(
+        record.id,
+        snapshot_sha=snapshot_sha,
+        resolved_path=resolved_path,
+        error=error or callback_error,
+    )
+
+
+def _post_resolve(
+    request: ImportRequest,
+    snapshot_sha: str,
+    resolved_path: str,
+    error: str,
+    callback: ResolveCallback,
+) -> None:
+    if not callback.supabase_url or not callback.publishable_key:
+        raise TaskContractError("resolve callback is not configured")
+    import urllib.request
+
+    payload = {
+        "p_control_token": callback.control_token,
+        "p_import_id": request.id,
+        "p_snapshot_sha": snapshot_sha,
+        "p_resolved_path": resolved_path,
+        "p_error": error,
+    }
+    body = json.dumps(payload).encode()
+    url = f"{callback.supabase_url.rstrip('/')}/rest/v1/rpc/resolve_vector_import"
+    headers = {"apikey": callback.publishable_key, "content-type": "application/json"}
+    last: OSError | None = None
+    for _attempt in range(3):
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(url, data=body, headers=headers, method="POST"),
+                timeout=30,
+            ) as resp:
+                if 200 <= resp.status < 300:
+                    return
+                last = OSError(f"resolve callback returned HTTP {resp.status}")
+        except OSError as exc:
+            last = exc
+    raise TaskContractError(f"resolve callback failed: {last}")
 
 
 class WorkerFailure(BaseModel):
@@ -41,12 +307,19 @@ def create_app(
     artifact_root: Path,
     token: str = "",
     allow_anonymous: bool = False,
+    supabase_url: str = "",
+    supabase_publishable_key: str = "",
 ) -> FastAPI:
     if not token and not allow_anonymous:
         raise TaskContractError(
             "VECTOR_CLOUD_TOKEN is required unless anonymous local development is explicit"
         )
     artifact_root.mkdir(parents=True, exist_ok=True)
+    callback = ResolveCallback(
+        supabase_url=supabase_url or os.environ.get("SUPABASE_URL", ""),
+        publishable_key=supabase_publishable_key or os.environ.get("SUPABASE_PUBLISHABLE_KEY", ""),
+        control_token=token,
+    )
     app = FastAPI(
         title="Vector Cloud",
         version="0.1.0",
@@ -95,6 +368,19 @@ def create_app(
             )
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         return store.get(record.id) or record
+
+    @app.post(
+        "/v1/imports",
+        response_model=ImportRecord,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[auth],
+    )
+    async def submit_import(
+        request: ImportRequest, background_tasks: BackgroundTasks
+    ) -> ImportRecord:
+        record = store.create_import(request)
+        background_tasks.add_task(_run_import, request, record, artifact_root, store, callback)
+        return record
 
     @app.get("/v1/jobs", response_model=list[JobRecord], dependencies=[auth])
     def list_jobs(limit: Annotated[int, Query(ge=1, le=500)] = 100) -> list[JobRecord]:

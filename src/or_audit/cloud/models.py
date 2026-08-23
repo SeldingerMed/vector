@@ -113,6 +113,8 @@ class JobRecord(BaseModel):
     completed_at: datetime | None = None
     provider_cost_micros: int = Field(default=0, ge=0)
     runtime_seconds: int = Field(default=0, ge=0)
+    # Append-only provenance evidence; billing reads the scalar columns above.
+    usage_events: tuple[UsageEvent, ...] = ()
 
     @classmethod
     def new(cls, request: JobRequest) -> JobRecord:
@@ -124,3 +126,70 @@ class JobRecord(BaseModel):
             status=JobStatus.QUEUED,
             request=request,
         )
+
+
+class UsageSource(StrEnum):
+    MEASURED = "measured"
+    PROVIDER_REPORTED = "provider_reported"
+    ESTIMATED = "estimated"
+
+
+class UsageEvent(BaseModel):
+    """One immutable usage fact (unit, quantity, provenance) for a job.
+
+    This table is PROVENANCE EVIDENCE, not the billing source of truth: it is
+    evidence associated with the job's usage/cost calculation. `source` says
+    how each quantity was obtained (wall-clock measured, directly reported by
+    the provider, or estimated from a price table) so provider-reported
+    figures are never conflated with derived estimates. Events never update
+    the authoritative scalar columns on `jobs` (`provider_cost_micros`,
+    `runtime_seconds`) and never rewrite history; a provider-reported
+    correction here is audited, not billed.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    job_id: str
+    occurred_at: datetime
+    unit: str = Field(min_length=1, max_length=64)
+    quantity: int = Field(ge=0)
+    source: UsageSource
+
+
+class ImportKind(StrEnum):
+    GITHUB = "github"
+    HUGGINGFACE = "huggingface"
+
+
+class ImportTarget(StrEnum):
+    TASK = "task"
+    AGENT = "agent"
+    DATASET = "dataset"
+
+
+class ImportRequest(BaseModel):
+    """A pending snapshot import to fetch, verify, and pin."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(min_length=1, max_length=64)
+    user_id: str = Field(min_length=1, max_length=128)
+    source_id: str = Field(min_length=1, max_length=64)
+    kind: ImportKind
+    slug: str = Field(min_length=1, max_length=500)
+    ref: str = Field(min_length=1, max_length=500)
+    target_kind: ImportTarget
+    callback_url: AnyHttpUrl | None = None
+
+
+class ImportRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    status: str
+    snapshot_sha: str = ""
+    error: str = ""
+    resolved_path: str = ""

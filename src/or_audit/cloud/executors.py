@@ -300,10 +300,10 @@ class Machine0Executor:
             )
             if request.inputs:
                 inputs_root.mkdir(parents=True, exist_ok=True)
-                for artifact in request.inputs:
+                for input_artifact in request.inputs:
                     self._download_input(
-                        str(artifact.url),
-                        inputs_root / self._safe_name(artifact.name),
+                        str(input_artifact.url),
+                        inputs_root / self._safe_name(input_artifact.name),
                     )
                 self._checked(
                     [
