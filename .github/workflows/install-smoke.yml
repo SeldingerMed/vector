@@ -41,8 +41,9 @@ jobs:
     name: audited signal citations resolve at their pins
     runs-on: ubuntu-latest
     # Lives here, not in kernel CI, for the same reason as the ladder: it
-    # fetches third-party tarballs, so it must not sit in front of a PR. It is
-    # also the only check that can catch the class of defect it was written
+    # fetches third-party source trees over the network (git, against each
+    # catalog pin), so it must not sit in front of a PR. It is also the only
+    # check that can catch the class of defect it was written
     # for - a citation pointing at code the pinned revision does not contain -
     # because a prose evidence field cannot be checked by a machine.
     #

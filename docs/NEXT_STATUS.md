@@ -147,14 +147,20 @@ These are not gaps; they are the product.
   A world the harness *steps* earns Tier 1 only with an observed `real` backend
   read from both runs' head-covered provenance; a synthetic stand-in and a
   bridge with no `engine_provenance` reporter both drop to Tier 0. The
-  `stepped_world` switch that scopes this rule is required (no default) and is
-  cross-checked against the installed adapter's declared `physics` capability,
-  so a report cannot reclassify its world to waive the requirement, and a kind
-  with no installed adapter cannot reach Tier 1 at all.
+  `stepped_world` switch that scopes this rule is required (no default), is
+  derived from the runner's actual route (`interaction_mode is closed-loop`)
+  and cross-checked against the installed adapter's declared `closed_loop`
+  capability, so a report cannot reclassify its world to waive the
+  requirement, and a kind with no installed adapter cannot reach Tier 1 at
+  all. It is deliberately not derived from `physics`, which was a proxy that
+  let a non-physics closed-loop adapter certify its own stand-in.
 - **No physical key from a world that has no physics.** The Isaac, SOFA, and
   Warp stand-ins synthesize no `max_pen`, `wall_force_n`, `tissue_stress_kpa`,
-  or `haptic_overshoot_mm`. A gate bound to a fabricated force resolves *pass*,
-  which is the most convincing available lie.
+  or `haptic_overshoot_mm`. A gate bound to a *fabricated* force — a
+  synthesized `0.0` — resolves **pass**, which is the most convincing
+  available lie. A gate bound to a key the world simply never reports now
+  abstains as unassessable, so the two cases are distinguishable: the danger
+  was never the missing key, it was the invented number standing in for it.
 - **No deserialization of an untrusted upload.** Concierge intake requires a
   tenant-signed manifest (HMAC-SHA256 over every declared field), accepts only
   non-executing weight formats or a digest-pinned tenant container, and hashes
