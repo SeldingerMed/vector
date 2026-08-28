@@ -99,6 +99,38 @@ def _verify_streams(task: TaskSpec) -> None:
             )
 
 
+def _verify_world_adapter(task: TaskSpec) -> None:
+    """Verify a declared world-adapter pin against the registered adapter.
+
+    A task that pins its world adapter is refused when the adapter is absent,
+    was published by a different module, or has different content than the pin
+    — the same discipline ``_verify_streams`` applies to modality adapters.
+    """
+    from or_audit.eval.sim import world_kind_spec  # registers built-in adapters
+
+    world = task.environment
+    if not world.adapter:
+        return
+    spec = world_kind_spec(world.kind)
+    if spec is None or not spec.adapter_id:
+        raise TaskContractError(
+            f"task {task.id} pins world adapter {world.adapter!r} for world kind "
+            f"{world.kind_key!r}, but no adapter is registered for that kind; "
+            "install the world adapter distribution"
+        )
+    if spec.adapter_id != world.adapter:
+        raise TaskContractError(
+            f"task {task.id} pins world adapter {world.adapter!r} but world kind "
+            f"{world.kind_key!r} is served by {spec.adapter_id!r}"
+        )
+    if not _safe_eq(spec.adapter_digest, world.adapter_digest):
+        raise TaskContractError(
+            f"task {task.id} world adapter {world.adapter!r} content digest mismatch "
+            f"(task pins {world.adapter_digest}, installed adapter is "
+            f"{spec.adapter_digest})"
+        )
+
+
 def load_task(path: Path | str) -> TaskSpec:
     root = _task_root(Path(path))
     data = _read_toml(root / "task.toml")
@@ -123,6 +155,7 @@ def load_task(path: Path | str) -> TaskSpec:
         raise TaskContractError(f"task {root} failed validation: {exc}") from exc
     _verify_calibrations(root, task)
     _verify_streams(task)
+    _verify_world_adapter(task)
     return task
 
 

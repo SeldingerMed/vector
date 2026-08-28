@@ -1,0 +1,20 @@
+{
+  "adapter_digest": "e2727f00a209ab8b64e3080595e587e50f6a97d6e8ccd09ffd18807c80ca2f84",
+  "adapter_id": "or_audit.eval.sim.isaac_bridge:make_isaac_bridge",
+  "adapter_identity": "or_audit.eval.sim.isaac_bridge:make_isaac_bridge+e2727f00a209ab8b64e3080595e587e50f6a97d6e8ccd09ffd18807c80ca2f84",
+  "env_id": "Isaac-Lift-Needle-PSM-v0",
+  "format_version": "1",
+  "generator": "surgeval 0.3.0a0",
+  "license": "BSD-3-Clause",
+  "metrics_only": true,
+  "next_steps": [
+    "surgeval conformance docs/examples/tasks/orbit-needle-lift",
+    "surgeval tasks validate <package>",
+    "publish only per-world rows until a shelf equivalence artifact exists"
+  ],
+  "source_repo": "https://github.com/orbit-surgical/orbit-surgical",
+  "synthetic_stub": true,
+  "task_id": "orbit-needle-lift",
+  "world_kind": "isaac-lab",
+  "world_pin": "6e47534f7d412e4be523116f250c992a63146883"
+}

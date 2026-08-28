@@ -1,0 +1,1034 @@
+# Vector world catalog (next.md N10 / §2.4 / Appendix B).
+#
+# This file is data, not marketing. Four rules govern every edit:
+#
+# 1. Nothing here is invented. Every `license` was derived by reading the
+#    upstream license *text* and identifying the SPDX expression from its
+#    clauses - never from a README badge, a paper, or GitHub's detector, which
+#    reports NOASSERTION for ORBIT-Surgical purely because the file is spelled
+#    `LICENCE`. `NOASSERTION` means upstream ships no license file at all: that
+#    is a finding (no license, no permission), not a gap to be excused.
+# 2. `disposition` is the Appendix B verdict, except where verification
+#    overturned it. Where the survey and the evidence disagree, the evidence
+#    wins and the note says so.
+# 3. `world_pin` is the full 40-char default-branch HEAD read from the GitHub
+#    API on the audit date. A branch name is not a pin.
+# 4. `metrics_only` records whether a hard safety gate could bind to a
+#    physically-grounded signal *in that codebase*, with `safety_evidence`
+#    naming the file, symbol, or command that established it. A shaped task
+#    reward is not a safety signal (§2.2), and "it uses a physics engine" is
+#    not evidence that the env exposes physics.
+#
+# Audit date: 2026-08-27. Method: GitHub API for HEAD/tags, raw license text
+# for SPDX, upstream setup/install files for strategy, and - where the platform
+# allowed - a real install into a throwaway venv on macOS arm64 (Apple M4 Max,
+# no NVIDIA GPU) with the observed result recorded verbatim. Anything that
+# needed CUDA, a compiled SOFA, or ROS was not install-tested here and says so
+# rather than implying it was.
+
+catalog_version = "2"
+
+# --------------------------------------------------------------------------
+# First-party (§2.4: Lumen shipped)
+# --------------------------------------------------------------------------
+
+[[worlds]]
+id = "lumen"
+display_name = "Seldinger Lumen"
+domain = "Endovascular navigation (continuum instrument, deformable lumen)"
+engine = "Lumen (first-party continuum/deformable physics)"
+disposition = "shipped"
+license = "unverified"
+source = ["https://github.com/SeldingerMed/seldinger-lumen"]
+world_kind = "lumen-gym"
+world_pin = "3c6bb39ecc916c73e81131b94353ad8deee62bd4"
+metrics_only = false
+determinism = "unmeasured"
+determinism_evidence = """
+Unmeasured. Blocker is our own catalog, not the engine: `lumen` has no SPDX expression \
+recorded, so `surgeval worlds install lumen` refuses and the world cannot be stepped \
+through a sanctioned install. The in-tree conformance runs use the injected CI factory, \
+which measures the harness, not this world. Unblock: record the license, then `surgeval \
+conformance <task> -a random -n 2`, which reports the class.
+"""
+safety_evidence = """
+docs/examples/tasks/lumen-nav-safe/task.toml binds hard gates to \
+`lumen.info.unsafe` and `lumen.info.max_pen`, and the in-tree conformance run \
+resolves both to pass/fail per trial rather than to an abstention.
+"""
+notes = """
+The only world we author. The `lumen-gym` adapter and the `lumen-nav-safe` \
+reference task ship in this repository; the physics package is the separate \
+first-party `seldinger-lumen` distribution, which is why this is an install \
+strategy at all rather than nothing.
+"""
+risks = """
+License stays `unverified` on purpose: the harness LICENSE (Apache-2.0) covers \
+the adapter in this repository, not the seldinger-lumen content distribution. \
+Recording our own content as audited without reading its LICENSE would be \
+exactly the fabrication this file forbids - and `license_permitted` is false \
+while it stands, so this row is not installable either.
+"""
+
+[worlds.install]
+strategy = "first-party"
+distribution = "seldinger-lumen"
+verify_import = "lumen"
+pinned_version = ""
+
+# --------------------------------------------------------------------------
+# WRAP — verified as legally and technically wrappable
+# --------------------------------------------------------------------------
+
+[[worlds]]
+id = "orbit-surgical"
+display_name = "ORBIT-Surgical (NVIDIA Isaac for Healthcare)"
+domain = "dVRK manipulation (needle handover, lift, reach, suturing subtasks)"
+engine = "Isaac Lab 1.0 / Isaac Sim 4.1 / PhysX"
+disposition = "wrap"
+license = "BSD-3-Clause"
+source = [
+    "https://github.com/orbit-surgical/orbit-surgical",
+    "https://orbit-surgical.github.io",
+    "arXiv:2404.16027",
+]
+world_kind = "isaac-lab"
+world_pin = "6e47534f7d412e4be523116f250c992a63146883"
+metrics_only = true
+determinism = "unmeasured"
+determinism_evidence = """
+Unmeasured. Isaac Lab 1.0 / Isaac Sim 4.1.0 needs an NVIDIA GPU with drivers and \
+container toolkit; `surgeval doctor --world orbit-surgical` reports the missing runtime \
+on this arm64 macOS host. PhysX is additionally only best-effort deterministic across \
+driver versions, so the honest expectation is `tolerance`, not `bitwise` - which is \
+exactly why it must be measured rather than declared.
+"""
+safety_evidence = """
+source/extensions/orbit.surgical.tasks/.../lift/lift_env_cfg.py declares shaped \
+rewards plus an `object_dropping` termination; no contact-force or collision \
+term reaches the observation or `info`. PhysX computes contact internally, \
+which is not the same as the env exposing it, so hard gates are refused until \
+an upstream PR surfaces the force channel.
+"""
+notes = """
+Highest-leverage single wrap (N2): inherits NVIDIA's asset investment and \
+active maintenance. License is BSD-3-Clause, read from the file upstream \
+spells `LICENCE` - GitHub's detector reports NOASSERTION for that reason \
+alone, and our own license resolver missed the spelling until this audit.
+"""
+risks = """
+Pins Isaac Lab 1.0.0 / Isaac Sim 4.1.0, an older generation than SonoGym's \
+2.1.0 / 4.5.0, so one Isaac bridge cannot serve both without a compatibility \
+path. Not install-tested here: needs an NVIDIA GPU and Linux.
+"""
+
+[worlds.install]
+strategy = "vendor-runtime"
+vendor = "NVIDIA"
+container = "nvcr.io/nvidia/isaac-sim:4.1.0"
+login_registry = "nvcr.io"
+eula_url = "https://docs.isaacsim.omniverse.nvidia.com/4.5.0/common/NVIDIA_Omniverse_License_Agreement.html"
+pinned_version = "4.1.0"
+
+
+[[worlds.envs]]
+env_id = "Isaac-Lift-Needle-PSM-v0"
+path = "source/extensions/orbit.surgical.tasks/orbit/surgical/tasks/surgical/lift/lift_env_cfg.py"
+note = """
+Manager-based Isaac Lab config: rewards and terminations are declared as terms, and no \
+term reads contact, force, or penetration.
+"""
+
+[[worlds.envs.signals]]
+key = "object_dropping"
+kind = "geometric"
+line = 179
+note = """
+DoneTerm(root_height_below_minimum, minimum_height=-0.05): a height threshold.
+"""
+
+[[worlds.envs.signals]]
+key = "time_out"
+kind = "bookkeeping"
+line = 177
+note = """
+Episode length.
+"""
+
+[[worlds]]
+id = "sonogym"
+display_name = "SonoGym"
+domain = "Robotic ultrasound (spine; US-guided surgery)"
+engine = "Isaac Lab 2.1 / Isaac Sim 4.5"
+disposition = "wrap"
+license = "MIT"
+source = [
+    "https://github.com/SonoGym/SonoGym",
+    "https://sonogym.github.io",
+    "arXiv:2507.01152",
+]
+world_kind = "isaac-lab"
+world_pin = "e67be58334d1a5274f0913af36f56e4b0b7ffe5a"
+metrics_only = true
+determinism = "unmeasured"
+determinism_evidence = """
+Unmeasured. Same NVIDIA GPU blocker as orbit-surgical, at Isaac Sim 4.5.0, plus a ~1.51 \
+GB CC-BY-4.0 anatomical asset bundle that must be fetched before any episode can step.
+"""
+safety_evidence = """
+source/spinal_surgery/spinal_surgery/tasks/robot_US_guided_surgery/robotic_US_guided_surgery.py \
+publishes a geometric soft-constraint cost in step extras (`extras['cost']`, \
+line 974) for the surgery task only; there is no probe contact-force channel \
+and no force-limit termination. The cost is `logical_and(not safe_close, \
+safety_critical)` (line 893) - a proximity predicate over drill-tip pose, not \
+a physical safety measurement - so this wraps metrics-only. PATH CORRECTED \
+2026-08: the earlier citation read `robot_US_guided_surgery.py`, transcribing \
+the directory name; the file is `robotIC_...` and the old path resolved to \
+nothing at the pin.
+"""
+notes = """
+Freshest codebase in the survey (HEAD 2025-12-03) and the best current match \
+for a modern Isaac Lab bridge. License MIT, again read from a `LICENCE` file. \
+Anatomical assets are a separate ~1.51 GB Hugging Face bundle under CC-BY-4.0, \
+derived from TotalSegmentator patient CT - that bundle is attribution-only and \
+must not be redistributed inside a curated artifact without its notice.
+"""
+risks = """
+Isaac Sim 4.5.0 pin diverges from ORBIT-Surgical's 4.1.0. Not install-tested \
+here: needs an NVIDIA GPU and Linux.
+"""
+
+[worlds.install]
+strategy = "vendor-runtime"
+vendor = "NVIDIA"
+container = "nvcr.io/nvidia/isaac-sim:4.5.0"
+login_registry = "nvcr.io"
+eula_url = "https://docs.isaacsim.omniverse.nvidia.com/4.5.0/common/NVIDIA_Omniverse_License_Agreement.html"
+pinned_version = "4.5.0"
+
+
+[[worlds.envs]]
+env_id = "robot_US_guided_surgery"
+path = "source/spinal_surgery/spinal_surgery/tasks/robot_US_guided_surgery/robotic_US_guided_surgery.py"
+note = """
+Filename is robotIC_US_guided_surgery.py inside the robot_US_guided_surgery/ directory; \
+the earlier citation transcribed the directory name and did not resolve.
+"""
+
+[[worlds.envs.signals]]
+key = "cost"
+kind = "geometric"
+line = 974
+note = """
+unsafe = logical_and(not safe_close, safety_critical) (line 893): a proximity predicate \
+over drill-tip pose vs the planned trajectory, not a measured force or penetration.
+"""
+
+[[worlds.envs.signals]]
+key = "human_to_tip_pos"
+kind = "geometric"
+line = 980
+unit = "m"
+note = """
+Tip pose relative to the anatomy.
+"""
+
+[[worlds.envs.signals]]
+key = "safe_height"
+kind = "geometric"
+line = 982
+unit = "m"
+note = """
+The threshold itself, republished per step.
+"""
+
+[[worlds]]
+id = "steve"
+display_name = "stEVE (+ stEVE_bench)"
+domain = "Endovascular guidewire/catheter"
+engine = "SOFA + BeamAdapter"
+disposition = "wrap"
+license = "MIT"
+source = [
+    "https://github.com/lkarstensen/stEVE",
+    "https://github.com/lkarstensen/stEVE_bench",
+    "arXiv:2410.01956",
+]
+world_kind = "sofa"
+world_pin = "f909e7122d846a3c2fec91eedddaa0ba88b6391d"
+metrics_only = true
+determinism = "unmeasured"
+determinism_evidence = """
+Unmeasured. Requires a user-built SOFA <= v23.06 with SofaPython3 and BeamAdapter; no \
+binary path exists, and the catalog hands the build to the user by design. Expect \
+nondeterminism to matter here: the only safety-adjacent signal upstream computes is a \
+NaN guard (`simulation_error`), which is itself a solver-instability event.
+"""
+safety_evidence = """
+eve/truncation/simerror.py binds `SimError.truncated` to a `simulation_error` \
+NaN-tracking flag - a solver-instability signal, not a tissue-contact one - and \
+examples/function_check.py runs with TargetReached + MaxSteps only. \
+BeamAdapter's collision/LCP stack computes contact in \
+eve/intervention/simulation/sofabeamadapter.py but nothing exports a wall-force \
+channel to `info`, so no hard gate can bind yet.
+"""
+notes = """
+Purpose-built modular toolbox with a published benchmark repo, so gate mapping \
+starts from existing task definitions. Direct Lumen overlap is the point: this \
+is the §2.6 endovascular equivalence shelf. Package name is `eve`, which is \
+*not* the `eve` on PyPI - installing by that name would fetch an unrelated \
+project.
+"""
+risks = """
+Upstream states SOFA binaries v23.06 or earlier; BeamAdapter scenes drift on \
+v23.12+. Optional VMR anatomy downloads carry per-model licenses from \
+vascularmodel.com that must be audited separately before any asset ships. \
+Determinism class unmeasured - the N3 conformance suite must classify it before \
+any replay claim. Not install-tested here: requires a compiled SOFA.
+"""
+
+[worlds.install]
+strategy = "source-build"
+repo = "https://github.com/lkarstensen/stEVE"
+commit = "f909e7122d846a3c2fec91eedddaa0ba88b6391d"
+build_docs = "https://github.com/lkarstensen/stEVE#installation"
+requires = ["SOFA <= v23.06", "SofaPython3", "BeamAdapter"]
+runtime_licenses = ["LGPL-2.1", "LGPL-2.1"]
+verify_import = "eve"
+
+
+[[worlds.envs]]
+env_id = "eve.env:Env"
+path = "eve/env.py"
+note = """
+info is a pluggable Info object (env.py:47), so what reaches info is caller-configured; \
+the signal below is the only safety-adjacent flag upstream computes.
+"""
+
+[[worlds.envs.signals]]
+key = "simulation_error"
+kind = "diagnostic"
+path = "eve/intervention/simulation/sofabeamadapter.py"
+line = 178
+note = """
+Set when np.any(np.isnan(tracking[0])) - a NaN guard that resets the devices. Solver \
+instability, not vessel contact: a run that trips it is invalid, not unsafe. Surfaced as \
+SimError.truncated (eve/truncation/simerror.py:11).
+"""
+
+[[worlds]]
+id = "lapgym"
+display_name = "LapGym / sofa_env"
+domain = "Laparoscopic (14 scenes: rope, tissue retraction, ligating loop, ...)"
+engine = "SOFA"
+disposition = "wrap"
+license = "MIT"
+source = [
+    "https://github.com/ScheiklP/sofa_env",
+    "https://github.com/ScheiklP/lap_gym",
+    "arXiv:2302.09606",
+]
+world_kind = "sofa"
+world_pin = "85bf7e05dd088b824794dda0046679df13b13e6e"
+metrics_only = false
+determinism = "unmeasured"
+determinism_evidence = """
+Unmeasured, and the most valuable measurement outstanding: this is the one wrap target \
+whose audited env publishes a gate-eligible physical signal, so its reproducibility \
+decides whether a force gate on it is replayable. Blocker is upstream's own packaging: \
+setup.py hard-requires x86_64 and Python 3.10 and downloads a SOFA v24.06.00 x86_64 zip, \
+so it cannot be built on arm64 macOS at all.
+"""
+safety_evidence = """
+Per-scene, and the only WRAP row where a hard gate can honestly bind today: \
+grasp_lift_touch_env.py exposes `dynamic_force_on_gallbladder` (a scalar \
+internal force) plus contact counts in `info`; tissue_dissection_env.py exposes \
+`collision_with_board` and `unstable_deformation`; pick_and_place_env.py exposes \
+gripper collision counts and workspace violations. These are per-scene, so \
+gate eligibility is per-task and not a property of the world: scenes without \
+those keys (e.g. magnetic_continuum_robot, workspace-violation only) publish \
+metrics-only. SOFA contact-force *vectors* stay engine-internal - the \
+ContactListener API is documented but not wired into any env.
+"""
+notes = """
+Parameterizable, well-documented, JMLR-published, and the `sofa_bridge` seam \
+already exists. `ScheiklP/sofa_env` is the env package that matters; \
+`ScheiklP/lap_gym` is the paper umbrella (HEAD 2023-12-25) and \
+`ScheeleAlex/lap_gym` is a 404.
+"""
+risks = """
+Strategy corrected from prebuilt-container to source-build: upstream setup.py \
+hard-requires x86_64 and Python 3.10 and downloads a SOFA v24.06.00 x86_64 zip, \
+so there is no arm64 path at all, and the runtime closure is copyleft (SOFA \
+core LGPL-2.1, SofaPython3/BeamAdapter LGPL-2.1, SoftRobots/Cosserat LGPL-3.0, \
+ModelOrderReduction GPL-2.0), which forbids us publishing an image containing \
+it. Not install-tested here: refused by upstream on this architecture.
+"""
+
+[worlds.install]
+strategy = "source-build"
+repo = "https://github.com/ScheiklP/sofa_env"
+commit = "85bf7e05dd088b824794dda0046679df13b13e6e"
+build_docs = "https://github.com/ScheiklP/sofa_env#installation"
+requires = ["SOFA v24.06.00 (x86_64)", "Python 3.10", "SofaPython3"]
+runtime_licenses = ["LGPL-2.1", "LGPL-3.0", "GPL-2.0"]
+verify_import = "sofa_env"
+
+
+[[worlds.envs]]
+env_id = "grasp_lift_touch"
+path = "sofa_env/scenes/grasp_lift_touch/grasp_lift_touch_env.py"
+note = """
+step() -> _get_info() splats **reward_features into info (line 453), so these keys are \
+readable by a verifier.
+"""
+
+[[worlds.envs.signals]]
+key = "dynamic_force_on_gallbladder"
+kind = "physical"
+line = 782
+unit = "scaled-N"
+note = """
+gallbladder.get_internal_force_magnitude() * gallbladder_force_scaling_factor. A real \
+SOFA internal force, but scaled by a constructor factor, so a threshold must cite the \
+scaling it assumes rather than claiming newtons.
+"""
+
+[[worlds.envs.signals]]
+key = "collision_cauter_gallbladder"
+kind = "physical"
+line = 728
+unit = "contacts"
+note = """
+ContactListener.getNumberOfContacts() - a counted contact, not a force vector.
+"""
+
+[[worlds.envs]]
+env_id = "tissue_dissection"
+path = "sofa_env/scenes/tissue_dissection/tissue_dissection_env.py"
+
+[[worlds.envs.signals]]
+key = "collision_with_board"
+kind = "physical"
+line = 391
+unit = "contacts"
+requires_parameters = { with_board_collision = true }
+note = """
+PHYSICAL ONLY WHEN with_board_collision=True. Line 394 falls back to cauter_position[2] \
+< 0.0, a pose predicate, so the same key silently changes kind with a constructor flag: \
+a gate on it must pin the flag too.
+"""
+
+[[worlds.envs.signals]]
+key = "unstable_deformation"
+kind = "diagnostic"
+line = 343
+note = """
+np.amax(connective_tissue velocity) > 500: a solver-instability heuristic.
+"""
+
+[[worlds.envs.signals]]
+key = "workspace_violation"
+kind = "geometric"
+line = 383
+note = """
+cauter.last_set_state_violated_workspace_limits - a robot limit, not tissue.
+"""
+
+[[worlds.envs]]
+env_id = "pick_and_place"
+path = "sofa_env/scenes/pick_and_place/pick_and_place_env.py"
+
+[[worlds.envs.signals]]
+key = "gripper_jaw_peg_collisions"
+kind = "physical"
+line = 379
+unit = "contacts"
+note = """
+Summed getNumberOfContacts() over the jaw contact listeners.
+"""
+
+[[worlds.envs.signals]]
+key = "unstable_deformation"
+kind = "diagnostic"
+line = 389
+note = """
+Torus velocity heuristic.
+"""
+
+[[worlds]]
+id = "surrol"
+display_name = "SurRoL / SurRoL-v2"
+domain = "dVRK manipulation, 14 tasks"
+engine = "PyBullet"
+disposition = "wrap"
+license = "MIT"
+source = [
+    "https://github.com/med-air/SurRoL",
+    "https://med-air.github.io/SurRoL",
+    "arXiv:2108.13035",
+]
+world_kind = "pybullet"
+world_pin = "aa430af5ca3ee62a69d677d2c8dfd031efe20204"
+metrics_only = true
+determinism = "unmeasured"
+determinism_evidence = """
+Unmeasured. Install-tested on this host and blocked: pybullet 3.2.7 publishes no macOS \
+wheel for any Python version, and its sdist fails to compile against Xcode clang 21 on \
+arm64 (`error: expected identifier or '('` in the bundled zlib). SurRoL-v2 additionally \
+compiles vendored ext/bullet3 and targets Python 3.7 on Ubuntu.
+"""
+safety_evidence = """
+surrol/gym/surrol_env.py returns `info` containing only `is_success` (or \
+`achieved_goal`), and reward is task-only. surrol/tasks/psm_env.py *does* call \
+`p.getContactPoints` in `_step_callback`/`_activate`, but purely for grasp \
+logic, and workspace clipping in `_set_action` silently corrects rather than \
+reporting a violation - so nothing physical is observable to a gate.
+"""
+notes = """
+Most-adopted dVRK RL platform, and `GymnasiumBridge` already handles PyBullet. \
+`hding2455/SurRoL-v2` is a stale fork. PIN CORRECTED 2026-08: the previous pin \
+was HEAD of the *default* branch (`SR-VPPV`), which is a VPPV research \
+monorepo carrying six divergent vendored copies of `surrol/` (psm_env.py \
+ranges 559-1212 lines across them) and no top-level package - so it did not \
+identify a world at all, and the cited paths did not exist in it. The 14-task \
+platform this row is about lives on the `SurRoL-v2` branch, whose HEAD commit \
+is pinned here; `surrol/gym/surrol_env.py` and `surrol/tasks/psm_env.py` both \
+resolve at it. Being a commit, the pin is immutable regardless of where the \
+branch moves next.
+"""
+risks = """
+Strategy corrected from pip-extra: `surrol` is not on PyPI (404), so the \
+previous row named a package that could never resolve. Install-tested here and \
+blocked upstream: pybullet 3.2.7 publishes no macOS wheel for any Python \
+version, and its sdist fails to compile against Xcode clang 21 on arm64 \
+(`error: expected identifier or '('` in the bundled zlib). SurRoL-v2 \
+additionally compiles vendored `ext/bullet3` and targets Python 3.7 on Ubuntu.
+"""
+
+[worlds.install]
+strategy = "source-build"
+repo = "https://github.com/med-air/SurRoL"
+commit = "aa430af5ca3ee62a69d677d2c8dfd031efe20204"
+build_docs = "https://github.com/med-air/SurRoL#installation"
+requires = ["pybullet (source build; no macOS wheels)", "Linux x86_64 recommended"]
+runtime_licenses = ["Zlib"]
+verify_import = "surrol"
+
+
+[[worlds.envs]]
+env_id = "surrol.gym.surrol_env:SurRoLEnv"
+path = "surrol/gym/surrol_env.py"
+note = """
+Base env shared by every registered SurRoL task id, so the surface below is the ceiling \
+for all of them.
+"""
+
+[[worlds.envs.signals]]
+key = "is_success"
+kind = "bookkeeping"
+line = 121
+note = """
+The only info key: info = {'is_success': ...} or {'achieved_goal': None}.
+"""
+
+[[worlds.envs.signals]]
+key = "getContactPoints"
+kind = "physical"
+path = "surrol/tasks/psm_env.py"
+line = 262
+unit = "contacts"
+published = false
+note = """
+p.getContactPoints() IS called, but only to build a grasp constraint, and the result is \
+discarded. Unpublished, so no gate can bind: this row is why the 'published' flag \
+exists.
+"""
+
+[[worlds]]
+id = "surgicai"
+display_name = "SurgicAI"
+domain = "dVRK fine-grained suturing subtask hierarchy"
+engine = "AMBF"
+disposition = "wrap"
+license = "MIT"
+source = [
+    "https://github.com/surgical-robotics-ai/SurgicAI",
+    "arXiv:2406.13865",
+]
+world_kind = "ambf"
+world_pin = "b7ce5465ec0be897beeecb24791c0eaf7045abae"
+metrics_only = true
+determinism = "unmeasured"
+determinism_evidence = """
+Unmeasured. AMBF is a user-built ROS/Linux runtime with no upstream license file \
+(NOASSERTION) and no macOS path; the row is a wrap target on its metric definitions, not \
+on a runnable install.
+"""
+safety_evidence = """
+next.md's claim that SurgicAI "arrives with metric definitions, the easiest \
+gate mapping" is OVERSTATED, and this row records the correction: the metrics \
+are task-progress scalars - pose error, subtask success rate, trajectory \
+length, timestep count - with no needle-tissue contact force, no penetration \
+depth, and no instrument-collision channel. Easiest *metric* mapping, not \
+easiest gate mapping.
+"""
+notes = """
+NeurIPS 2024 D&B with a clean subtask decomposition, and our AMBF-ecosystem \
+entry point. `world_kind = "ambf"` is the intended kind; no adapter is \
+registered until the wrap lands, and `surgeval doctor` reports it as \
+unregistered.
+"""
+risks = """
+The env repo is MIT, but the AMBF runtime it needs (WPI-AIM/ambf) ships no \
+license file at all on its default branch, so the runtime's redistribution \
+status is NOASSERTION - which is why this stays source-build rather than a \
+container we publish. ROS-heavy build; not install-tested here.
+"""
+
+[worlds.install]
+strategy = "source-build"
+repo = "https://github.com/surgical-robotics-ai/SurgicAI"
+commit = "b7ce5465ec0be897beeecb24791c0eaf7045abae"
+build_docs = "https://github.com/surgical-robotics-ai/SurgicAI#installation"
+requires = ["AMBF (no upstream license file)", "ROS", "Linux"]
+runtime_licenses = ["NOASSERTION"]
+verify_import = "surgicai"
+
+
+[[worlds.envs]]
+env_id = "surgicai.RL.Approach_env:SRC_approach"
+path = "RL/Approach_env.py"
+
+[[worlds.envs.signals]]
+key = "is_success"
+kind = "bookkeeping"
+line = 47
+note = """
+info = {'is_success': False}, flipped by task logic only.
+"""
+
+[[worlds.envs]]
+env_id = "surgicai.RL.Low_level_env_complete:SRC_low_level"
+path = "RL/Low_level_env_complete.py"
+
+[[worlds.envs.signals]]
+key = "is_success"
+kind = "bookkeeping"
+line = 135
+note = """
+Same single key; set True at line 279 on task completion.
+"""
+
+[[worlds]]
+id = "surgical-gym"
+display_name = "Surgical Gym"
+domain = "dVRK/STAR arm control"
+engine = "Isaac Gym (omni.isaac.gym, Isaac Sim 2022.2.1)"
+disposition = "wrap"
+license = "MIT"
+source = [
+    "https://github.com/SamuelSchmidgall/SurgicalGym",
+    "arXiv:2310.04676",
+]
+world_kind = ""
+world_pin = "57fd88d296f63cc9bebc30c5b332ceba70a04ff6"
+metrics_only = true
+determinism = "unmeasured"
+determinism_evidence = """
+Unmeasured. Isaac Gym (omni.isaac.gym, Isaac Sim 2022.2.1) needs an NVIDIA GPU; \
+`surgeval doctor --world surgical-gym` reports it. Moot for gate purposes either way: \
+the audited env publishes nothing, so a determinism class would describe a reward curve, \
+not a safety signal.
+"""
+safety_evidence = """
+surgicalgym/tasks/psm.py computes an L2 distance-to-target reward, terminates \
+on episode length only, and disables collision on the target geometry \
+outright. There is nothing physical to gate on, and disabled collision means \
+even a synthesized contact signal would be meaningless.
+"""
+notes = """
+Wrapped on capacity: drop first under schedule pressure. `world_kind` is now \
+empty rather than `isaac-lab`, which was wrong: this targets the legacy \
+`omni.isaac.gym` API on Isaac Sim 2022.2.1 and cannot ride the Isaac Lab \
+bridge that serves ORBIT-Surgical and SonoGym.
+"""
+risks = """
+Legacy Isaac Sim 2022.2.1 needs its own bridge, so the "cheap because it shares \
+the N2 bridge" premise does not hold. Not install-tested here: needs an NVIDIA \
+GPU and Linux.
+"""
+
+[worlds.install]
+strategy = "vendor-runtime"
+vendor = "NVIDIA"
+container = "nvcr.io/nvidia/isaac-sim:2022.2.1"
+login_registry = "nvcr.io"
+eula_url = "https://docs.isaacsim.omniverse.nvidia.com/4.5.0/common/NVIDIA_Omniverse_License_Agreement.html"
+pinned_version = "2022.2.1"
+
+# --------------------------------------------------------------------------
+# WATCH — recorded, not shelved
+# --------------------------------------------------------------------------
+
+
+[[worlds.envs]]
+env_id = "surgicalgym.tasks.psm:PSM"
+path = "surgicalgym/tasks/psm.py"
+note = """
+Audited and empty on purpose: there is no extras[...] assignment anywhere in the task, and \
+the target geometry has collision explicitly disabled (line 134), so even a synthesized \
+contact signal would be meaningless. The two absence_markers below are the reward and \
+termination sites that reading was based on; they are checked at the pin like any other \
+citation, so this emptiness is stated rather than inferred from an absent signals table.
+"""
+
+[[worlds.envs.absence_markers]]
+key = "rew_buf"
+kind = "bookkeeping"
+line = 266
+published = false
+note = """
+calculate_metrics writes an L2 distance-to-target reward into rew_buf and nothing else. A \
+reward tensor is not published to extras and is not a measurement.
+"""
+
+[[worlds.envs.absence_markers]]
+key = "progress_buf"
+kind = "bookkeeping"
+line = 273
+published = false
+note = """
+is_done resets on progress_buf >= max_episode_length - 1 only: no contact, force, or \
+penetration term participates in termination.
+"""
+
+[[worlds]]
+id = "ambf-rl"
+display_name = "AMBF-RL + Surgical Robotics Challenge"
+domain = "dVRK (debris removal, needle passing)"
+engine = "AMBF"
+disposition = "watch"
+license = "NOASSERTION"
+source = [
+    "https://surgical-robotics-ai.github.io",
+    "https://github.com/WPI-AIM/ambf",
+]
+world_kind = ""
+world_pin = "d816d708ed868bc0bbf82f936ec7371584b6a991"
+metrics_only = true
+safety_evidence = """
+Not assessed for gate eligibility: the license question blocks it first. \
+Recorded so the reason survives rather than being rediscovered.
+"""
+notes = """
+Active academic community and the challenge recurs. SurgicAI covers the AMBF \
+path first; revisit if the challenge community shows pull. The pin is HEAD of \
+WPI-AIM/ambf's default branch, which is `ambf-3.0`, not `main`.
+"""
+risks = """
+WPI-AIM/ambf, the surgical_robotics_challenge assets, ambf_rl, and docker_SRC \
+all lack a root license file, so their redistribution status is NOASSERTION - \
+no license means no permission. That must be resolved with upstream before any \
+wrap, not assumed permissive because the code is public.
+"""
+
+[worlds.install]
+strategy = "source-build"
+repo = "https://github.com/WPI-AIM/ambf"
+commit = ""
+build_docs = ""
+requires = ["ROS", "Linux"]
+runtime_licenses = ["NOASSERTION"]
+verify_import = ""
+
+[[worlds]]
+id = "sofagym"
+display_name = "SofaGym"
+domain = "Generic SOFA->Gym wrapper (soft robotics)"
+engine = "SOFA"
+disposition = "watch"
+license = "NOASSERTION"
+source = ["https://github.com/SofaDefrost/SofaGym"]
+world_kind = ""
+world_pin = "f5ad4e44a0dc522d8018c184245b7aa630292118"
+metrics_only = true
+safety_evidence = """
+sofagym/AbstractEnv.py returns `info={}` unconditionally, so there is no safety \
+channel to a policy or a gate at all. Only CartStemContact exposes contact \
+*positions* (not forces) in its observation.
+"""
+notes = """
+Infrastructure, not a medical env: it overlaps our own `sofa_bridge`. The right \
+move is consuming it inside the bridge, not listing it as catalog content - \
+recorded here so that decision stays visible.
+"""
+risks = """
+No root license file (NOASSERTION), and requires a source-built SOFA v23.06. \
+Listing it as a world would misrepresent infrastructure as shelf content.
+"""
+
+[worlds.install]
+strategy = "source-build"
+repo = "https://github.com/SofaDefrost/SofaGym"
+commit = ""
+build_docs = ""
+requires = ["SOFA v23.06"]
+runtime_licenses = ["LGPL-2.1"]
+verify_import = ""
+
+[[worlds]]
+id = "vr-caps"
+display_name = "VR-Caps"
+domain = "Active capsule endoscopy"
+engine = "Unity + ML-Agents"
+disposition = "watch"
+license = "unverified"
+source = ["https://github.com/CapsuleEndoscope/VirtualCapsuleEndoscopy"]
+world_kind = ""
+world_pin = ""
+metrics_only = true
+safety_evidence = "Not assessed: outside this audit's scope (no GI design partner yet)."
+notes = """
+The only open capsule-endoscopy env. Wrap on the first design partner in GI.
+"""
+risks = """
+Unity/ML-Agents runtime is heavy and its own distribution channel; repo is old \
+(2020).
+"""
+
+[worlds.install]
+strategy = "source-build"
+repo = "https://github.com/CapsuleEndoscope/VirtualCapsuleEndoscopy"
+commit = ""
+build_docs = ""
+requires = ["Unity", "ML-Agents"]
+runtime_licenses = []
+verify_import = ""
+
+[[worlds]]
+id = "room"
+display_name = "ROOM"
+domain = "Bronchoscopy continuum robot"
+engine = "Physics-based (2025)"
+disposition = "watch"
+license = "unverified"
+source = ["https://github.com/iamsalvatore/room"]
+world_kind = ""
+world_pin = ""
+metrics_only = true
+safety_evidence = "Cannot assess: no reachable code."
+notes = """
+Downgraded from "young, may mature" to "no artifact": the paper cites \
+github.com/iamsalvatore/room and that URL returns 404. Until code exists, this \
+is a citation, not a wrap candidate, and it is not evidence that the \
+bronchoscopy gap is closing.
+"""
+risks = "Repository referenced by the paper does not resolve."
+
+[worlds.install]
+strategy = "source-build"
+repo = ""
+commit = ""
+build_docs = ""
+requires = []
+runtime_licenses = []
+verify_import = ""
+
+[[worlds]]
+id = "ai-co-pilot-bronchoscope-robot"
+display_name = "AI-Co-Pilot-Bronchoscope-Robot"
+domain = "Bronchoscopy"
+engine = "Bespoke sim"
+disposition = "watch"
+license = "NOASSERTION"
+source = ["https://github.com/ai-co-pilot/AI-Co-Pilot-Bronchoscope-Robot"]
+world_kind = ""
+world_pin = ""
+metrics_only = true
+safety_evidence = """
+No airway-wall contact force or collision signal identified, so it could not \
+support the gate our own broncho-airway-nav task uses even if licensed.
+"""
+notes = """
+Open training code but a bespoke, thinly documented sim. It is evidence for the \
+"thin bronchoscopy landscape" claim rather than a shelf item.
+"""
+risks = """
+The default branch carries no license file (NOASSERTION); only the Zenodo \
+publish branch is CC-BY-4.0, and a data-only license on one branch does not \
+grant rights to the code on another.
+"""
+
+[worlds.install]
+strategy = "source-build"
+repo = ""
+commit = ""
+build_docs = ""
+requires = []
+runtime_licenses = []
+verify_import = ""
+
+[[worlds]]
+id = "bronchocopilot"
+display_name = "BronchoCopilot"
+domain = "Bronchoscopy"
+engine = "Bespoke sim"
+disposition = "watch"
+license = "unverified"
+source = ["arXiv:2403.01683"]
+world_kind = ""
+world_pin = ""
+metrics_only = true
+safety_evidence = "Cannot assess: no public code."
+notes = "Paper-first; no public repository found during the audit."
+risks = "No public code artifact exists to wrap."
+
+[worlds.install]
+strategy = "source-build"
+repo = ""
+commit = ""
+build_docs = ""
+requires = []
+runtime_licenses = []
+verify_import = ""
+
+[[worlds]]
+id = "spine-pedicle-screw-safe-rl"
+display_name = "Spine pedicle-screw safe-RL"
+domain = "Orthopedic drilling"
+engine = "Bespoke"
+disposition = "watch"
+license = "unverified"
+source = ["arXiv:2305.05354"]
+world_kind = ""
+world_pin = ""
+metrics_only = true
+safety_evidence = "Cannot assess: no public code located."
+notes = """
+The one orthopedic candidate the survey found. Orthopedics otherwise has no \
+open env - a future Tier-2 conversation, but outside our §2.3 competence test \
+(rigid, not continuum). SonoGym now covers spine anatomy under Isaac, which is \
+the nearer-term path to this domain.
+"""
+risks = "Code availability unverified."
+
+[worlds.install]
+strategy = "source-build"
+repo = ""
+commit = ""
+build_docs = ""
+requires = []
+runtime_licenses = []
+verify_import = ""
+
+# --------------------------------------------------------------------------
+# SKIP — reason given; not a shelf item (recorded so the reason survives)
+# --------------------------------------------------------------------------
+
+[[worlds]]
+id = "cathsim"
+display_name = "CathSim"
+domain = "Endovascular"
+engine = "MuJoCo / dm-control"
+disposition = "skip"
+license = "CC-BY-NC-SA-4.0"
+source = [
+    "https://github.com/airvlab/cathsim",
+    "arXiv:2208.01455",
+]
+world_kind = ""
+world_pin = "adfabb2f291e31e6d656e66d0052269f38db01bd"
+metrics_only = true
+safety_evidence = """
+Technically the best safety instrumentation in the survey, which is what makes \
+the license loss real rather than academic. Verified by running it: \
+`info["forces"]` and `info["contact_forces"]` carry live contact-force \
+magnitudes (observed series 0.5564, 0.3580, 0.2629, 0.0, 0.0, 0.8761 N over 10 \
+random steps; 7/10 non-zero), produced by Navigate.get_total_force / \
+get_contact_forces in src/cathsim/dm/env.py. Both are opt-in \
+(`use_force=True`, `use_contact_forces=True`, `return_info=True`; all default \
+False), and termination is success-only.
+"""
+notes = """
+Disposition changed from `wrap` to `skip`, and the reason is the license, not \
+the code. Upstream LICENSE is the CC-BY-NC-SA-4.0 text ("NonCommercial means \
+not primarily intended for or directed towards commercial advantage"), the \
+pyproject classifier says "License :: Free for non-commercial use", and a \
+separate TERMS.md adds field-of-use restrictions. That is a reviewed refusal in \
+§2.4's denylist, so no amount of engineering makes it shippable here. This \
+repository's existing CathSim firewall for Lumen stands.
+"""
+risks = """
+Also technically broken as a pip target, which the previous `pip-extra` row \
+would have promised: `cathsim` is not on PyPI (404), `pip install git+...` \
+yields a namespace package whose `dm/config/env.yaml` is missing so no env can \
+be constructed, `pympler` is imported but undeclared, and upstream is \
+incompatible with Gymnasium 1.x (`wrappers.FrameStack` removed) so it needs \
+`gymnasium==0.29.1`. A working local run required a source checkout plus both \
+fixes. Recorded because someone will otherwise retry this and lose the day.
+"""
+
+[worlds.install]
+strategy = "source-build"
+repo = "https://github.com/airvlab/cathsim"
+commit = "adfabb2f291e31e6d656e66d0052269f38db01bd"
+build_docs = "https://github.com/airvlab/cathsim#installation"
+requires = ["Python <= 3.12 (labmaze has no cp313 wheel)", "gymnasium==0.29.1", "pympler"]
+runtime_licenses = ["CC-BY-NC-SA-4.0"]
+verify_import = "cathsim"
+
+[[worlds]]
+id = "dvrl"
+display_name = "dVRL"
+domain = "dVRK reach/pick"
+engine = "V-REP/CoppeliaSim"
+disposition = "skip"
+license = "unverified"
+source = ["https://github.com/ucsdarclab/dVRL"]
+world_kind = ""
+world_pin = ""
+metrics_only = true
+safety_evidence = "Not assessed: superseded before gate mapping was worth doing."
+notes = """
+Historically first (2019) but superseded by SurRoL on the same tasks; the V-REP \
+runtime is not worth a shelf slot. Credited in the shelf's lineage notes rather \
+than wrapped.
+"""
+risks = "V-REP/CoppeliaSim runtime distribution."
+
+[worlds.install]
+strategy = "source-build"
+repo = "https://github.com/ucsdarclab/dVRL"
+commit = ""
+build_docs = ""
+requires = ["V-REP / CoppeliaSim"]
+runtime_licenses = []
+verify_import = ""
+
+[[worlds]]
+id = "rl-cataract"
+display_name = "RL_cataract / surgeon-in-the-loop ophthalmic apprentice"
+domain = "Ophthalmic"
+engine = "Unity/bespoke"
+disposition = "skip"
+license = "unverified"
+source = []
+world_kind = ""
+world_pin = ""
+metrics_only = true
+safety_evidence = "Cannot assess: no runnable open artifact identified."
+notes = """
+One-off research artifacts, unmaintained. No credible open ophthalmic env \
+exists: recorded as a genuine coverage gap, not a wrap target.
+"""
+risks = "Unmaintained; no runnable open artifact identified."
+
+[worlds.install]
+strategy = "source-build"
+repo = ""
+commit = ""
+build_docs = ""
+requires = []
+runtime_licenses = []
+verify_import = ""

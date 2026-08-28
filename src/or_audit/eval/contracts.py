@@ -232,6 +232,14 @@ class RuntimeDescriptor(_Frozen):
     image: str = ""
     image_digest: str = ""
     timeout_sec: Annotated[float, Field(gt=0.0)] = 120.0
+    #: Identity of the intake gate that admitted this runtime (N11 capability 0).
+    #: Empty for locally authored packages; populated for a hosted-concierge
+    #: runtime so the scorecard's execution identity names the intake-passed
+    #: artifact (format, digests, sandbox report) rather than a bare upload.
+    intake_identity: str = ""
+    #: Digest of the sandbox policy the intake ran under, so a run cannot claim
+    #: an intake that happened under weaker isolation.
+    sandbox_policy_digest: str = ""
 
     @model_validator(mode="after")
     def _identity_is_pinned(self) -> Self:

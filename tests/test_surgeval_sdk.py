@@ -9,6 +9,10 @@ import pytest
 
 import surgeval as se
 from or_audit.cli import build_parser, main
+from or_audit.errors import TaskContractError
+from or_audit.eval.bind import assert_bind
+from or_audit.eval.contracts import InteractionMode
+from or_audit.eval.loader import load_task
 from surgeval.decorators import agent
 from surgeval.integrations import wrap_gym_policy, wrap_hf, wrap_pytorch
 
@@ -117,8 +121,6 @@ def test_cli_prog_name() -> None:
 def test_evaluate_temp_dir_and_task_dir() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     task_dir = repo_root / "docs/examples/tasks/laparoscopic-cholec-cvs"
-    from or_audit.eval.loader import load_task
-
     task_obj = load_task(task_dir)
     # Evaluate with out=None (temp dir) and explicit task_dir
     result = se.evaluate(DummyCvsModel(), task_obj, task_dir=task_dir, n=2)
@@ -193,3 +195,76 @@ def test_sdk_bundle_has_no_host_paths(tmp_path: Path) -> None:
     se.evaluate(DummyCvsModel(), task_dir, out=out, n=1)
     runner_code = (out / "bundle" / "agent" / "runner.py").read_text()
     assert "/Users/" not in runner_code, "runner.py must not embed absolute host paths"
+
+
+# --------------------------------------------------------------------------
+# to_agent_package: one package, one runtime identity
+# --------------------------------------------------------------------------
+
+
+@agent(interface="video-predict", agent_id="sdk/dual")
+class SdkDualModel:
+    """Implements both wire protocols, so it has two runtime identities."""
+
+    def predict(self, item: dict[str, Any]) -> dict[str, Any]:
+        del item
+        return {"cvs_achieved": True, "critical_structure": "cystic_duct"}
+
+    def act(self, observation: Any, *, step: int = 0) -> list[float]:
+        del observation, step
+        return [0.0]
+
+
+def test_to_agent_package_refuses_a_dual_mode_class_without_a_mode() -> None:
+    """A package names one entrypoint, so it must not claim the other's modes."""
+    with pytest.raises(TaskContractError, match="mode="):
+        SdkDualModel.to_agent_package()  # type: ignore[attr-defined]
+
+
+def test_to_agent_package_publishes_only_the_predictor_identity() -> None:
+    pkg = SdkDualModel.to_agent_package(mode="single-turn")  # type: ignore[attr-defined]
+    assert pkg.kind == "frozen-model"
+    assert pkg.runtime is not None
+    assert pkg.runtime.entrypoint == "runner.py:load_predictor"
+    modes = pkg.capabilities[0].interaction_modes
+    assert InteractionMode.CLOSED_LOOP not in modes
+    assert InteractionMode.SINGLE_TURN in modes
+    # The package a predictor task is handed must actually bind, kind included.
+    repo_root = Path(__file__).resolve().parent.parent
+    assert_bind(load_task(repo_root / "docs/examples/tasks/video-nextstep"), pkg)
+
+
+def test_to_agent_package_publishes_only_the_policy_identity() -> None:
+    pkg = SdkDualModel.to_agent_package(mode="closed-loop")  # type: ignore[attr-defined]
+    assert pkg.kind == "policy"
+    assert pkg.runtime is not None
+    assert pkg.runtime.entrypoint == "runner.py:load_policy"
+    assert pkg.capabilities[0].interaction_modes == (InteractionMode.CLOSED_LOOP,)
+
+
+def test_to_agent_package_refuses_a_mode_the_class_cannot_drive() -> None:
+    with pytest.raises(TaskContractError, match="not one of the modes"):
+        DummyCvsModel.to_agent_package(mode="closed-loop")  # type: ignore[attr-defined]
+
+
+def test_to_agent_package_keeps_the_interface_override_positional() -> None:
+    """Single-identity classes need no mode: the ordinary path stays one call."""
+    pkg = DummyCvsModel.to_agent_package("gym-policy")  # type: ignore[attr-defined]
+    assert pkg.capabilities[0].interface == "gym-policy"
+    assert pkg.kind == "frozen-model"
+    assert pkg.runtime is not None
+    assert pkg.runtime.entrypoint == "runner.py:load_predictor"
+
+
+def test_dual_mode_class_still_evaluates_with_no_mode_argument(tmp_path: Path) -> None:
+    """The trial path is unchanged: the task's required mode picks the identity.
+
+    ``se.evaluate`` resolves kind and entrypoint from the mode the task asks for
+    (``surgeval.client._resolve_synthesis``), so a dual-mode class needs no mode
+    from the user. Only publication - which has no task in hand - has to choose.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    task_dir = repo_root / "docs/examples/tasks/laparoscopic-cholec-cvs"
+    result = se.evaluate(SdkDualModel(), task_dir, out=tmp_path / "dual-trial", n=2)
+    assert result.n == 2
+    assert result.trials[0].vector.gates[0].status == "pass"

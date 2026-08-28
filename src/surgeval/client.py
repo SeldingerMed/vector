@@ -11,16 +11,79 @@ import hashlib
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import cloudpickle
 
+from or_audit.errors import TaskContractError
 from or_audit.eval.agent import AgentPackage
-from or_audit.eval.contracts import InteractionMode
+from or_audit.eval.contracts import CapabilitySpec, InteractionMode
 from or_audit.eval.job import JobResult
 from or_audit.eval.loader import load_agent, load_task, load_taskset
 from or_audit.eval.runner import run_job
 from or_audit.eval.task import TaskSpec
+from surgeval.decorators import (
+    agent_kind_for,
+    binding_for,
+    capability_toml,
+    entrypoint_symbol_for,
+    is_agent,
+)
+
+
+class _Synthesis(NamedTuple):
+    """What the synthesized package must declare for one in-memory model."""
+
+    capability: CapabilitySpec
+    agent_id: str
+    version: str
+    kind: str
+    entrypoint: str
+
+
+def _resolve_synthesis(
+    agent_obj: Any,
+    interface_id: str,
+    required_mode: InteractionMode,
+) -> _Synthesis:
+    """Resolve what a synthesized package declares for an in-memory model.
+
+    A decorated class carries an inferred capability; anything else (a raw
+    wrapper, a bare object with ``predict``) has declared nothing the kernel can
+    check, so it binds as an explicit wildcard.
+    """
+    entrypoint = entrypoint_symbol_for(required_mode)
+    if is_agent(agent_obj):
+        binding = binding_for(agent_obj)
+        if not binding.supports(required_mode):
+            needed = (
+                "act(observation, step=...)"
+                if required_mode is InteractionMode.CLOSED_LOOP
+                else "predict(item)"
+            )
+            raise TaskContractError(
+                f"{binding.cls_name} implements {', '.join(binding.methods)}, which cannot "
+                f"drive a {required_mode.value} task. Implement {needed}, or narrow the "
+                "task selection to a mode this class supports."
+            )
+        return _Synthesis(
+            capability=binding.capability_for_interface(interface_id),
+            agent_id=binding.agent_id,
+            version=binding.version,
+            kind=binding.kind_for(required_mode),
+            entrypoint=entrypoint,
+        )
+    return _Synthesis(
+        capability=CapabilitySpec(
+            interface=interface_id,
+            interaction_modes=(required_mode,),
+            schema_wildcard=True,
+        ),
+        agent_id="",
+        version="0",
+        kind=agent_kind_for(required_mode),
+        entrypoint=entrypoint,
+    )
 
 
 def _synthesize_agent_bundle(
@@ -28,10 +91,23 @@ def _synthesize_agent_bundle(
     interface_id: str,
     interaction_mode: InteractionMode,
     target_dir: Path,
+    *,
+    strict_schemas: bool = False,
 ) -> tuple[AgentPackage, Path]:
     """Synthesize a complete local AgentPackage directory for an in-memory model."""
     agent_dir = target_dir / "synthesized_agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
+
+    synthesis = _resolve_synthesis(agent_obj, interface_id, interaction_mode)
+    if strict_schemas and synthesis.capability.schema_wildcard:
+        raise TaskContractError(
+            f"strict_schemas=True refuses a wildcard binding for "
+            f"{type(agent_obj).__name__} on interface {interface_id!r}: the model "
+            "declares no schemas, so nothing verifies that it speaks this task's "
+            "data shapes. Decorate the class with @surgeval.agent(...) and declare "
+            "observations / actions / outputs / features as class attributes, or "
+            "drop strict_schemas to accept an unverified wildcard binding."
+        )
 
     # Force cloudpickle to serialize the class definition inline rather than
     # by reference, so the bundle is self-contained and portable.
@@ -47,19 +123,7 @@ def _synthesize_agent_bundle(
 
     (agent_dir / "model.pkl").write_bytes(model_bytes)
 
-    to_pkg = getattr(agent_obj, "to_agent_package", None)
-    if callable(to_pkg):
-        base_pkg = to_pkg(override_interface=interface_id)
-        agent_id = base_pkg.id
-        agent_version = base_pkg.agent_version
-    else:
-        agent_id = f"custom/sdk-agent-{weights_pin[:12]}"
-        agent_version = "0"
-
-    entrypoint_func = (
-        "load_policy" if interaction_mode is InteractionMode.CLOSED_LOOP else "load_predictor"
-    )
-    kind_str = "policy" if interaction_mode is InteractionMode.CLOSED_LOOP else "frozen-model"
+    agent_id = synthesis.agent_id or f"custom/sdk-agent-{weights_pin[:12]}"
     runner_code = """import os
 import sys
 from pathlib import Path
@@ -100,29 +164,40 @@ def load_policy(*, root=None, weights_path=None, weights=None):
 """
     (agent_dir / "runner.py").write_text(runner_code, encoding="utf-8")
 
-    agent_toml = f"""format_version = "2"
-id = "{agent_id}"
-agent_version = "{agent_version}"
-kind = "{kind_str}"
-weights_pin = "{weights_pin}"
-weights_path = "model.pkl"
-
-[[capabilities]]
-interface = "{interface_id}"
-interaction_modes = ["{interaction_mode.value}"]
-protocol_versions = ["1"]
-schema_wildcard = true
-
-[runtime]
-kind = "local"
-protocol_version = "1"
-entrypoint = "runner.py:{entrypoint_func}"
-timeout_sec = 120.0
-"""
+    agent_toml = "\n".join(
+        [
+            'format_version = "2"',
+            f'id = "{agent_id}"',
+            f'agent_version = "{synthesis.version}"',
+            f'kind = "{synthesis.kind}"',
+            f'weights_pin = "{weights_pin}"',
+            'weights_path = "model.pkl"',
+            "",
+            capability_toml(synthesis.capability),
+            "[runtime]",
+            'kind = "local"',
+            'protocol_version = "1"',
+            f'entrypoint = "runner.py:{synthesis.entrypoint}"',
+            "timeout_sec = 120.0",
+            "",
+        ]
+    )
     (agent_dir / "agent.toml").write_text(agent_toml, encoding="utf-8")
 
     agent_pkg = load_agent(agent_dir)
     return agent_pkg, agent_dir
+
+
+def _assert_declared_schemas(agent_pkg: AgentPackage, interface_id: str) -> None:
+    """Refuse a wildcard capability when the caller asked for a verified binding."""
+    capability = agent_pkg.capability_for(interface_id)
+    if capability is not None and capability.schema_wildcard:
+        raise TaskContractError(
+            f"strict_schemas=True refuses a wildcard binding: agent {agent_pkg.id} "
+            f"declares schema_wildcard on interface {interface_id!r}, so nothing "
+            "verifies that it speaks this task's data shapes. Declare "
+            "observations / actions / outputs / features on the capability."
+        )
 
 
 def evaluate(
@@ -133,6 +208,7 @@ def evaluate(
     out: Path | str | None = None,
     n: int | None = None,
     interface_id: str | None = None,
+    strict_schemas: bool = False,
 ) -> JobResult:
     """Evaluate an agent or model policy on a procedural task.
 
@@ -143,6 +219,10 @@ def evaluate(
         out: Directory to store replayable evaluation artifacts.
         n: Number of evaluation episodes (defaults to task specification).
         interface_id: Interface ID override if agent is a raw policy.
+        strict_schemas: Refuse instead of binding a wildcard capability. The
+            zero-config on-ramp synthesizes a wildcard binding for a model that
+            declares no schemas; set this when you want the kernel to prove the
+            agent speaks the task's data shapes before a single trial runs.
 
     Returns:
         JobResult containing verifiable trial vectors, hard gate outcomes,
@@ -171,9 +251,13 @@ def evaluate(
             agent_path = Path(agent).resolve()
             agent_pkg = load_agent(agent_path)
             agent_dir = agent_path if agent_path.is_dir() else agent_path.parent
+            if strict_schemas:
+                _assert_declared_schemas(agent_pkg, interface_id or task.interface.id)
         elif isinstance(agent, AgentPackage):
             agent_pkg = agent
             agent_dir = None
+            if strict_schemas:
+                _assert_declared_schemas(agent_pkg, interface_id or task.interface.id)
         else:
             # In-memory Python instance or wrapper
             iface = interface_id or task.interface.id
@@ -182,6 +266,7 @@ def evaluate(
                 interface_id=iface,
                 interaction_mode=task.interface.interaction_mode,
                 target_dir=Path(agent_tmp),
+                strict_schemas=strict_schemas,
             )
 
         if out is not None:

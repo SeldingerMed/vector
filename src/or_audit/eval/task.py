@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import re
 from typing import Annotated, Any, Self
 
 from pydantic import (
@@ -39,12 +40,19 @@ from or_audit.eval.enums import (
     VerifierRealizationKind,
     WorldKind,
 )
+from or_audit.eval.worlds import (
+    WorldCapabilities,
+    resolve_world_capabilities,
+    world_kind_key,
+)
 
 Slug = Annotated[
     str, StringConstraints(min_length=1, max_length=80, pattern=r"^[a-z0-9][a-z0-9_-]*$")
 ]
 NonEmpty = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 Instruction = Annotated[str, StringConstraints(min_length=1, max_length=20_000)]
+#: 64-char lowercase hex content pin, matched where a digest is declared.
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 _BOOLEAN_METRICS = {
     "abstained",
@@ -61,6 +69,130 @@ _BOOLEAN_METRICS = {
     "harm_after_failure",
     "handoff_accepted",
 }
+
+
+#: Ordering operators, whose operands the DSL reads as numbers.
+_ORDERING_SYMBOLS: dict[type[ast.cmpop], str] = {
+    ast.Lt: "<",
+    ast.LtE: "<=",
+    ast.Gt: ">",
+    ast.GtE: ">=",
+}
+_ORDERING_OPS = tuple(_ORDERING_SYMBOLS)
+#: Literal spellings of a boolean in ``fail_when``: TOML/JSON authors write
+#: ``true``/``false`` (parsed as names, resolved by the evaluator), Python
+#: authors write ``True``/``False`` (parsed as bool constants).
+_BOOLEAN_LITERALS = frozenset({"true", "false"})
+
+
+def numeric_boundaries(tree: ast.Expression, *, gate_id: str = "") -> set[float]:
+    """Every numeric boundary an expression compares against, sign folded.
+
+    Reads the operands of each :class:`ast.Compare` rather than walking every
+    constant, so each boundary is counted exactly once. A blind constant walk
+    double-counts a negative bound - ``-0.05`` yields both the ``UnaryOp`` and
+    its inner ``0.05`` - and de-duplicating afterwards silently swallows a
+    genuine two-sided predicate like ``x > 0.05 or x < -0.05``, which enforces
+    two numbers while citing one.
+
+    ``bool`` is not a number *in an equality*: it subclasses ``int``, so a
+    naive numeric check reads ``True`` in ``unsafe == true`` as the number 1
+    and would refuse an honest boolean gate. Under an *ordering* operator the
+    same operand is a number - Python orders ``False`` as 0 - and cannot be
+    extracted as one, so it is refused outright by
+    :func:`_assert_no_boolean_ordering` rather than silently dropped.
+    """
+    found: set[float] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        _assert_no_boolean_ordering(node, gate_id=gate_id)
+        for operand in (node.left, *node.comparators):
+            value = _literal_number(operand)
+            if value is not None:
+                found.add(value)
+    return found
+
+
+def _assert_no_boolean_ordering(node: ast.Compare, *, gate_id: str = "") -> None:
+    """Refuse an ordering comparison against a boolean operand.
+
+    ``x > false`` is an uncited numeric boundary at 0 wearing whatever
+    citation the gate carries: the extractor cannot report it as a number
+    without breaking the honest ``unsafe == true`` gate, and the DSL evaluates
+    Python ordering, where ``False`` is 0 and ``True`` is 1. A gate declaring
+    ``threshold=1.5`` with ``fail_when="x > false or x > 1.5"`` therefore
+    failed at 0.5 while publishing 1.5. Equality keeps the boolean reading;
+    ordering is refused.
+    """
+    operands = (node.left, *node.comparators)
+    for index, operand in enumerate(operands):
+        shape = _boolean_shape(operand)
+        if shape is None:
+            continue
+        # ``ops[i]`` joins ``operands[i]`` and ``operands[i + 1]``, so an
+        # operand is ordered by the op before it or the op after it.
+        adjacent = [op for i, op in enumerate(node.ops) if i in (index - 1, index)]
+        ordering = next((op for op in adjacent if isinstance(op, _ORDERING_OPS)), None)
+        if ordering is None:
+            continue
+        prefix = f"gate {gate_id}: " if gate_id else ""
+        raise TaskContractError(
+            f"{prefix}fail_when {ast.unparse(node)!r} orders "
+            f"{ast.unparse(operand)!r} ({shape}) with "
+            f"{_ORDERING_SYMBOLS[type(ordering)]!r}. The DSL evaluates Python ordering, "
+            "where false is 0 and true is 1, so this enforces a numeric boundary no "
+            "threshold or basis describes - and the boundary is invisible to the "
+            "threshold check, which must read a boolean as a boolean. Fix: compare "
+            "against the declared threshold number, or use == / != if the operand "
+            "really is a boolean."
+        )
+
+
+def _boolean_shape(node: ast.expr) -> str | None:
+    """How an operand is guaranteed to produce a boolean, else ``None``.
+
+    Only shapes that *always* yield a bool are named. A bare signal name may
+    hold one at runtime, but refusing that would refuse every numeric gate,
+    and its boundary still has to be a cited literal to pass the threshold
+    check.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        return "boolean literal"
+    if isinstance(node, ast.Name) and node.id in _BOOLEAN_LITERALS:
+        return "boolean literal"
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return "not-expression"
+    if isinstance(node, ast.Compare):
+        return "comparison result"
+    if isinstance(node, ast.BoolOp):
+        return "and/or result"
+    return None
+
+
+def _literal_number(node: ast.expr) -> float | None:
+    """A numeric literal, sign folded, or ``None`` if the operand is not one.
+
+    Isaac Lab's ``minimum_height=-0.05`` is why the fold exists: a negative
+    bound is a ``UnaryOp`` over a positive constant, never a negative literal.
+
+    The ``bool`` rejection is first and deliberate: it subclasses ``int``, so
+    reading it as a number turns ``unsafe == true`` into a comparison against
+    1 and would refuse an honest boolean gate. Ordering a boolean is refused
+    by :func:`_assert_no_boolean_ordering` before this ever returns ``None``.
+    """
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub | ast.UAdd):
+        inner = _literal_number(node.operand)
+        if inner is None:
+            return None
+        return -inner if isinstance(node.op, ast.USub) else inner
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int | float):
+            return float(value)
+    return None
 
 
 class _Frozen(BaseModel):
@@ -101,12 +233,36 @@ class PhiSpec(_Frozen):
 
 
 class WorldSpec(_Frozen):
-    """Pinned procedural world and its task-owned inputs."""
+    """Pinned procedural world and its task-owned inputs.
 
-    kind: WorldKind
+    ``kind`` is open (``WorldKind | Slug``) so a third-party world publishes
+    through a plugin-registered adapter without a core release. Eligibility —
+    physics oracle, closed-loop interaction, which fields the world requires —
+    comes from :mod:`or_audit.eval.worlds`, never from an enum-set branch here.
+    """
+
+    kind: WorldKind | Slug
     gym_id: str = ""
     world_pin: str = ""
     parameters: dict[str, bool | int | float | str] = Field(default_factory=dict)
+    #: Adapter identity this package was authored against: ``module:symbol`` of
+    #: the world adapter factory. Declared like ``StreamSpec.adapter``, verified
+    #: at load against the registered adapter, and stamped into the head-covered
+    #: ``JobResult.world_engine`` — so a patched or swapped third-party adapter
+    #: cannot run under the same task and world pin unnoticed.
+    adapter: str = ""
+    #: SHA-256 of the adapter's module content. Required with ``adapter``.
+    adapter_digest: str = ""
+    #: World metadata a package declares so it stays loadable where the adapter
+    #: is absent. Cross-checked against an installed adapter; a task cannot
+    #: grant itself eligibility the adapter withholds.
+    capabilities: WorldCapabilities | None = None
+    #: Tier-0 honesty label (§2.2): this wrapped world's instrumentation does
+    #: not report safety state, so the package ships metrics-only — no hard
+    #: gates, not safety-critical, and every artifact says so. Whether a world
+    #: *actually* reports the state its gates bind to is verified per env by the
+    #: conformance suite, not assumed from the world kind.
+    metrics_only: bool = False
     synthetic_stub: bool = Field(
         default=False,
         description=(
@@ -120,12 +276,48 @@ class WorldSpec(_Frozen):
     labels_path: str = ""
     contract_path: str = ""
 
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _normalize_kind(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            normalized = value.replace("_", "-").lower()
+            try:
+                return WorldKind(normalized)
+            except ValueError:
+                return normalized
+        return value
+
+    @property
+    def kind_key(self) -> str:
+        """Registry / provenance key for this world kind."""
+        return world_kind_key(self.kind)
+
+    @property
+    def resolved_capabilities(self) -> WorldCapabilities:
+        """Capabilities the kernel gates on for this world."""
+        return resolve_world_capabilities(self.kind, self.capabilities)
+
     @model_validator(mode="after")
     def _required_paths(self) -> Self:
-        if self.kind in {WorldKind.LUMEN_GYM, WorldKind.GYM} and not self.gym_id:
-            raise TaskContractError(f"a {self.kind.value} world must name gym_id")
-        if self.kind is WorldKind.ANGIOSTRESS_CONTRACT and not self.contract_path:
-            raise TaskContractError("an angiostress-contract world must name contract_path")
+        capabilities = self.resolved_capabilities
+        if capabilities.requires_gym_id and not self.gym_id:
+            raise TaskContractError(f"a {self.kind_key} world must name gym_id")
+        if capabilities.requires_contract and not self.contract_path:
+            raise TaskContractError(f"a {self.kind_key} world must name contract_path")
+        return self
+
+    @model_validator(mode="after")
+    def _adapter_pin_is_complete(self) -> Self:
+        if bool(self.adapter) != bool(self.adapter_digest):
+            raise TaskContractError(
+                "environment.adapter and environment.adapter_digest must be declared "
+                "together: an adapter id without a content digest is not a pin"
+            )
+        if self.adapter_digest and not _SHA256_HEX.fullmatch(self.adapter_digest):
+            raise TaskContractError(
+                f"environment.adapter_digest must be 64 lowercase hex characters, "
+                f"got {self.adapter_digest!r}"
+            )
         return self
 
 
@@ -280,8 +472,35 @@ class GateSpec(_Frozen):
                 f"gate {self.id}: threshold {self.threshold} lacks a threshold_basis "
                 "(cite a normative source or reference a calibration artifact)"
             )
+        if (
+            self.threshold is not None
+            and self.threshold_basis is not None
+            and self.threshold_basis.value != self.threshold
+        ):
+            raise TaskContractError(
+                f"gate {self.id}: threshold {self.threshold} does not match its own basis "
+                f"value {self.threshold_basis.value}. The basis is what the number is "
+                "justified by, so a gate that cites one number and declares another has no "
+                "justified threshold at all."
+            )
+        if self.threshold_basis is not None and self.unit != self.threshold_basis.unit:
+            # Compared unconditionally: guarding on both sides being truthy let
+            # a gate drop the dimension (unit="" against a basis in N) or invent
+            # one (unit="N" against a dimensionless basis) while keeping the
+            # cited value. Two empty strings still agree - a dimensionless
+            # threshold is legal.
+            raise TaskContractError(
+                f"gate {self.id}: publishes unit {self.unit!r} but its basis is stated in "
+                f"{self.threshold_basis.unit!r}. A threshold is only a physical quantity in "
+                "one unit; two disagreeing units - including an empty one, which drops or "
+                "invents the dimension - mean the cited source does not justify the number "
+                "as published. Fix: state both in the unit the evidence is measured in "
+                "(both empty only for a genuinely dimensionless threshold), or convert the "
+                "number explicitly and cite the conversion."
+            )
         if is_scalar and self.fail_when:
             self._validate_fail_when_names(bindings)
+            self._assert_threshold_is_enforced()
         return self
 
     def _validate_fail_when_names(self, bindings: dict[str, str]) -> None:
@@ -302,6 +521,44 @@ class GateSpec(_Frozen):
             raise TaskContractError(
                 f"gate {self.id}: fail_when references unknown signal(s) "
                 f"{sorted(unknown)}; must be literal keywords or declared inputs"
+            )
+
+    def _assert_threshold_is_enforced(self) -> None:
+        """The cited number must be the number ``fail_when`` actually applies.
+
+        A gate carries three numbers that can drift apart: ``threshold``, its
+        ``threshold_basis.value``, and whatever literal the predicate compares
+        against. Only the last one changes a verdict. Before this check, a
+        package could cite a real normative source at 1.5 N and enforce
+        ``contact_force_n > 999`` - a gate that never fires, wearing a
+        citation, published as a safety claim. Scorecards, ``wrap.json``, and
+        the rendered verifier docstring would all have shown 1.5.
+        """
+        tree = ast.parse(self.fail_when, mode="eval")
+        literals = numeric_boundaries(tree, gate_id=self.id)
+        if self.threshold is None:
+            if literals:
+                raise TaskContractError(
+                    f"gate {self.id}: fail_when {self.fail_when!r} compares against "
+                    f"{sorted(literals)} but the gate declares no threshold, so the number "
+                    "deciding the verdict is uncited. Declare it as threshold with a "
+                    "threshold_basis, or write a boolean gate over the signal alone."
+                )
+            return
+        mismatched = sorted(value for value in literals if value != self.threshold)
+        if mismatched:
+            raise TaskContractError(
+                f"gate {self.id}: threshold {self.threshold} is cited, but fail_when "
+                f"{self.fail_when!r} enforces {mismatched}. The published threshold would "
+                "describe a boundary no run applies. Fix: compare against "
+                f"{self.threshold}, or declare the number the predicate uses."
+            )
+        if not literals:
+            raise TaskContractError(
+                f"gate {self.id}: threshold {self.threshold} is declared, but fail_when "
+                f"{self.fail_when!r} never compares against a number, so the threshold and "
+                "its basis are decoration. Fix: use it in the predicate, or drop both and "
+                "write a boolean gate."
             )
 
     @property
@@ -492,27 +749,41 @@ class TaskSpec(_Frozen):
             )
         if self.metadata.safety_critical and not self.verifier.gates:
             raise TaskContractError(f"safety_critical task {self.id} must declare hard gates")
-        physics_worlds = {
-            WorldKind.LUMEN_GYM,
-            WorldKind.LUMEN_REPLAY,
-            WorldKind.GYM,
-            WorldKind.SOFA,
-            WorldKind.WARP,
-            WorldKind.ISAAC_LAB,
-            WorldKind.PYBULLET,
-        }
-        if self.oracle.kind is OracleKind.PHYSICS and self.environment.kind not in physics_worlds:
-            raise TaskContractError("a physics oracle requires a gym, sim, or replay world")
+        capabilities = self.environment.resolved_capabilities
+        if self.oracle.kind is OracleKind.PHYSICS and not capabilities.physics:
+            raise TaskContractError(
+                f"a physics oracle requires a world declaring physics capability; "
+                f"{self.environment.kind_key} does not"
+            )
         if self.interface.interaction_mode is InteractionMode.CLOSED_LOOP and (
-            self.environment.kind not in physics_worlds
+            not capabilities.closed_loop
         ):
             raise TaskContractError(
-                f"{self.interface.id} closed-loop tasks require a gym, sim, or replay world"
+                f"{self.interface.id} closed-loop tasks require a world declaring "
+                f"closed-loop capability; {self.environment.kind_key} does not"
             )
         if self.interface.interaction_mode is InteractionMode.COUNTERFACTUAL and (
-            self.environment.kind is not WorldKind.COUNTERFACTUAL
+            not capabilities.counterfactual
         ):
-            raise TaskContractError("counterfactual interfaces require a counterfactual world")
+            raise TaskContractError(
+                f"counterfactual interfaces require a world declaring counterfactual "
+                f"capability; {self.environment.kind_key} does not"
+            )
+        if self.environment.metrics_only:
+            if self.verifier.gates:
+                raise TaskContractError(
+                    f"task {self.id} declares environment.metrics_only, so it must not "
+                    "declare hard gates: a metrics-only wrap is a world whose "
+                    "instrumentation does not report the safety state a gate would need, "
+                    "and synthesizing one is the §2.2 failure this label exists to "
+                    "prevent"
+                )
+            if self.metadata.safety_critical:
+                raise TaskContractError(
+                    f"task {self.id} is metrics-only and cannot also be "
+                    "metadata.safety_critical; a metrics-only row is explicitly not "
+                    "safety-attested"
+                )
         metric_ids = {metric.id for metric in self.verifier.metrics}
         if "safe_success" in metric_ids and self.verifier.headline == "raw_success":
             raise TaskContractError(
@@ -521,15 +792,8 @@ class TaskSpec(_Frozen):
         return self
 
     def assert_runnable(self) -> None:
-        physics_worlds = {
-            WorldKind.LUMEN_GYM,
-            WorldKind.GYM,
-            WorldKind.SOFA,
-            WorldKind.WARP,
-            WorldKind.ISAAC_LAB,
-            WorldKind.PYBULLET,
-        }
-        if self.environment.kind in physics_worlds and not (self.environment.world_pin):
+        capabilities = self.environment.resolved_capabilities
+        if capabilities.requires_world_pin and not self.environment.world_pin:
             raise TaskContractError(f"task {self.id} has no world_pin")
         if not self.verifier.entrypoint:
             raise TaskContractError(f"task {self.id} has no verifier entrypoint")
@@ -554,7 +818,7 @@ class TaskSpec(_Frozen):
             f"Task {self.id}@{self.task_version} ({self.metadata.title})\n"
             f"  interface  {self.interface.id} ({self.harness.interaction_mode.value})\n"
             f"  port       {self.port.id.value if self.port else self.interface.id}\n"
-            f"  world      {self.environment.kind.value} pin={pin}\n"
+            f"  world      {self.environment.kind_key} pin={pin}\n"
             f"  subject    {self.subject.kind.value}  phi={self.phi.class_.value}"
             "  human det. refused\n"
             f"  oracle     {self.oracle.kind.value}\n"

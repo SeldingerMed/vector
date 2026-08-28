@@ -1,9 +1,24 @@
 """NVIDIA Warp and Isaac Lab Simulation Bridge for GPU-Accelerated Rollouts.
 
-Provides high-throughput parallel physics simulation for surgical robotics,
-guidewire dynamics, and large-batch policy evaluation. A synthetic stand-in exists
-for headless CI, but it is refused unless the task opts in, and it is stamped into
-every artifact it touches.
+Provides GPU physics for surgical robotics and guidewire dynamics under the
+scalar :class:`SimulationEngine` contract: one observation, one reward, one
+terminated flag, one info dict per step.
+
+This bridge is *single-environment*. It advertised "large-batch policy
+evaluation" and accepted ``environment.parameters.num_envs``, but nothing here
+ever batched: ``num_envs`` was only stamped into the stand-in's observation
+dict, which reported one 7-element joint vector and one scalar reward whatever
+the number said, and the real backend's step tuple was returned verbatim
+through a ``-> tuple[Any, float, bool, bool, dict]`` signature. A batched engine
+therefore reached the rollout loop unreduced, where ``bool(terminated)`` on a
+non-empty list of per-env flags is unconditionally ``True`` — every episode
+ended after one step with a list where the reward belonged, and nothing raised.
+``num_envs != 1`` is now refused; parallel *trials* come from
+``environment.n_eval_episodes`` and the seed policy, which score independently
+instead of collapsing into one number.
+
+A synthetic stand-in exists for headless CI, but it is refused unless the task
+opts in, and it is stamped into every artifact it touches.
 """
 
 from __future__ import annotations
@@ -17,10 +32,14 @@ from or_audit.eval.sim.base import (
     BACKEND_SYNTHETIC_STUB,
     BaseSimulationBridge,
     SimulationEngine,
+    missing_world_errors,
     module_distribution_version,
-    world_kind_key,
+    refuse_unbuildable_world,
+    require_single_env,
+    require_step_scalar,
 )
 from or_audit.eval.task import TaskSpec
+from or_audit.eval.worlds import world_kind_key
 
 _WARP_MODULES = "'warp' / 'isaaclab'"
 
@@ -49,22 +68,28 @@ class WarpBridge(BaseSimulationBridge):
         *,
         parameters: dict[str, Any] | None = None,
         world_pin: str = "",
-        num_envs: int = 1,
         warp_env: Any = None,
         allow_synthetic: bool = False,
         backend_version: str = "",
         world_kind: WorldKind | str | None = None,
+        max_steps: int = 100,
     ) -> None:
         kind = world_kind if world_kind is not None else self.world_kind
         if warp_env is None and not allow_synthetic:
             raise TaskContractError(_refuse_synthetic_warp(world_kind_key(kind)))
         self.world_kind = kind
         self.env_name = env_name
-        self.parameters = parameters or {}
+        self.parameters = dict(parameters or {})
         self.world_pin = world_pin
-        self.num_envs = int(parameters.get("num_envs", num_envs)) if parameters else num_envs
+        self.num_envs = require_single_env(
+            self.parameters.get("num_envs", 1), world=env_name or "(unnamed)"
+        )
         self._env = warp_env
         self._backend_version = backend_version
+        #: Harness step limit, passed by the factory from ``task.harness.max_steps``.
+        #: Only the synthetic stand-in consults it; a real engine terminates itself.
+        self.max_steps = max_steps
+
         self._step_count = 0
 
     def engine_provenance(self) -> dict[str, Any]:
@@ -83,7 +108,7 @@ class WarpBridge(BaseSimulationBridge):
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
-        """Reset Warp vectorized simulation."""
+        """Reset the single-environment Warp simulation, or the stand-in."""
         self._step_count = 0
         if self._env is not None and hasattr(self._env, "reset"):
             return self._env.reset(seed=seed, options=options)  # type: ignore[no-any-return]
@@ -93,24 +118,41 @@ class WarpBridge(BaseSimulationBridge):
             "robot_joint_pos": [0.0] * 7,
             "tool_ee_pos": [0.0, 0.0, 0.0],
         }
+        # Same invariant as the Isaac and SOFA stand-ins: no physical safety key
+        # is synthesized. `max_pen` and `haptic_overshoot_mm` are penetration
+        # and haptic measurements, and an unsolved GPU scene has neither.
         info = {
             "warp_initialized": True,
             "gpu_device": self.parameters.get("device", "cuda:0"),
             "world_pin": self.world_pin,
             "seed": seed,
-            "max_pen": 0.0,
-            "haptic_overshoot_mm": 0.0,
             "backend": BACKEND_SYNTHETIC_STUB,
         }
         return obs, info
 
     def step(self, action: Any) -> tuple[Any, float, bool, bool, dict[str, Any]]:
-        """Execute one parallel Warp / PhysX 5 step."""
+        """Execute one Warp / PhysX 5 step, refusing a batch rather than leaking it."""
         self._step_count += 1
         if self._env is not None and hasattr(self._env, "step"):
-            return self._env.step(action)  # type: ignore[no-any-return]
+            obs, reward, terminated, truncated, info = self._env.step(action)
+            # The engine tuple used to be returned verbatim through this
+            # `-> float, bool, bool` signature, so a batched Warp env leaked
+            # straight into the rollout loop, where `bool(terminated)` on a list
+            # of per-env flags is always True. Refuse the batch, and coerce only
+            # what is genuinely scalar so the annotation is true.
+            return (
+                obs,
+                float(require_step_scalar(reward, field="reward", world=self.env_name)),
+                bool(require_step_scalar(terminated, field="terminated", world=self.env_name)),
+                bool(require_step_scalar(truncated, field="truncated", world=self.env_name)),
+                info if isinstance(info, dict) else {},
+            )
 
-        max_steps = int(self.parameters.get("max_steps", 100))
+        # Step budget comes from the harness, not from `environment.parameters`:
+        # that dict is forwarded verbatim to a real engine's constructor, so a
+        # magic `max_steps` key there is both an invalid kwarg for most envs and
+        # a second source of truth for a limit the harness already owns.
+        max_steps = self.max_steps
         terminated = self._step_count >= max_steps
         truncated = False
         reward = 1.0 if terminated else 0.0
@@ -123,11 +165,7 @@ class WarpBridge(BaseSimulationBridge):
         }
         info = {
             "step": self._step_count,
-            "safe_success": terminated,
             "raw_success": terminated,
-            "diverged": False,
-            "max_pen": 0.0,
-            "haptic_overshoot_mm": 0.05,
             "backend": BACKEND_SYNTHETIC_STUB,
         }
         return obs, reward, terminated, truncated, info
@@ -150,7 +188,15 @@ class WarpBridge(BaseSimulationBridge):
 
 
 def _acquire_warp_env(task: TaskSpec) -> tuple[Any, str]:
-    """Best-effort acquisition of a real Warp/Isaac Lab env: returns (env, version)."""
+    """Acquire a real Warp/Isaac Lab env: returns ``(env, version)``.
+
+    "Best-effort" only covers a runtime that is *absent*. A world that is
+    registered and still fails to build is a configuration failure and is
+    refused, because the old bare ``except Exception`` made the two
+    indistinguishable: a task with ``synthetic_stub = true`` then measured
+    stand-in numbers under a real world's name and the only trace was a backend
+    field nobody reads.
+    """
     try:
         import warp
     except ImportError:
@@ -165,10 +211,20 @@ def _acquire_warp_env(task: TaskSpec) -> tuple[Any, str]:
     except ImportError:
         return None, detected
     kwargs: dict[str, Any] = dict(task.environment.parameters)
+    # The harness owns the step limit. `parameters` is forwarded verbatim to the
+    # engine constructor, where a stray `max_steps` is an unexpected keyword:
+    # Isaac's acquisition already popped it, and not popping it here is how a
+    # correctly-pinned world became "no backend" and then a silent stand-in.
+    kwargs.pop("max_steps", None)
     try:
         return gymnasium.make(env_id, **kwargs), detected
-    except Exception:  # Isaac Lab raises engine-specific errors for an unknown env id
+    except missing_world_errors(gymnasium):
+        # The world is genuinely not registered here. That is an honest
+        # no-backend condition; the constructor's synthetic-stub refusal decides
+        # whether a stand-in is acceptable for this task.
         return None, detected
+    except Exception as exc:
+        raise TaskContractError(refuse_unbuildable_world("Warp/Isaac Lab", env_id, exc)) from exc
 
 
 def make_warp_bridge(task: TaskSpec) -> SimulationEngine:
@@ -182,4 +238,5 @@ def make_warp_bridge(task: TaskSpec) -> SimulationEngine:
         allow_synthetic=task.environment.synthetic_stub,
         backend_version=backend_version,
         world_kind=task.environment.kind,
+        max_steps=task.harness.max_steps,
     )

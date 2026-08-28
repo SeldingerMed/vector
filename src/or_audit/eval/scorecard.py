@@ -12,6 +12,7 @@ from or_audit.eval.job import JobResult
 from or_audit.eval.sim.base import BACKEND_SYNTHETIC_STUB, BACKEND_UNKNOWN
 
 STUB_HEADLINE = "NOT PHYSICAL EVIDENCE - SYNTHETIC STAND-IN"
+METRICS_ONLY_HEADLINE = "METRICS-ONLY - NOT SAFETY-ATTESTED"
 
 
 def _engine_labels(world_engine: dict[str, Any] | None) -> tuple[str, str]:
@@ -20,6 +21,13 @@ def _engine_labels(world_engine: dict[str, Any] | None) -> tuple[str, str]:
         str(engine.get("engine") or BACKEND_UNKNOWN),
         str(engine.get("backend") or BACKEND_UNKNOWN),
     )
+
+
+def _metrics_only(result: JobResult, world_engine: dict[str, Any] | None) -> bool:
+    """Whether this row carries the Tier-0 metrics-only label (§2.2)."""
+    if result.world_engine is not None:
+        return result.world_engine.metrics_only
+    return bool((world_engine or {}).get("metrics_only"))
 
 
 def scorecard_data(
@@ -96,6 +104,7 @@ def scorecard_data(
         "gates": gates,
         "metrics": metrics,
         "claim_footer": result.claim_footer,
+        "metrics_only": _metrics_only(result, world_engine),
         "head": result.head,
     }
 
@@ -119,6 +128,17 @@ def render_markdown(
                 "> observation, safety margin, gate outcome, and metric below was produced",
                 "> by a placeholder and is not evidence about physical behaviour.",
                 "> `export-rl` refuses this job.",
+                "",
+            ]
+        )
+    if data["metrics_only"]:
+        lines.extend(
+            [
+                f"> **{METRICS_ONLY_HEADLINE}.** This world's instrumentation",
+                "> does not report the safety state a hard gate would bind to, so this",
+                "> package declares `environment.metrics_only` and ships no gates. The",
+                "> metrics below describe task behaviour only; nothing here attests",
+                "> safety (§2.2 Tier 0).",
                 "",
             ]
         )
@@ -191,16 +211,25 @@ def render_html(
     markdown = render_markdown(result, world_engine=world_engine)
     payload = html.escape(json.dumps(data, indent=2))
     engine_name, backend = _engine_labels(data["world_engine"])
-    banner = ""
+    banners: list[str] = []
     if backend == BACKEND_SYNTHETIC_STUB:
         # The wording, not the border colour, has to carry the refusal (WCAG 2.2 AA 1.4.1).
-        banner = (
+        banners.append(
             f'<p class="stub" role="note"><strong>{STUB_HEADLINE}.</strong> This job ran '
             f"against a synthetic stand-in for the "
             f"<code>{html.escape(engine_name)}</code> world, not a physics backend. Its "
             "observations, safety margins, gates, and metrics are placeholders and are not "
             "evidence about physical behaviour. <code>export-rl</code> refuses this job.</p>"
         )
+    if data["metrics_only"]:
+        banners.append(
+            f'<p class="stub" role="note"><strong>{METRICS_ONLY_HEADLINE}.</strong> The '
+            f"<code>{html.escape(engine_name)}</code> world's instrumentation does not "
+            "report the safety state a hard gate would bind to, so this package declares "
+            "<code>environment.metrics_only</code> and ships no gates. The metrics below "
+            "describe task behaviour only and attest nothing about safety.</p>"
+        )
+    banner = "".join(banners)
     return (
         '<!doctype html><html lang="en"><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'

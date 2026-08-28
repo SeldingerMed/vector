@@ -18,8 +18,10 @@ from or_audit.eval.job import (
     resolve_bundle_path,
 )
 from or_audit.eval.loader import load_task
+from or_audit.eval.provenance import assert_public_leaderboard_eligible
 from or_audit.eval.reconstitute import assert_trajectory_matches_vector
 from or_audit.eval.scorecard import scorecard_data
+from or_audit.eval.task import TaskSpec
 
 
 def _result_paths(paths: list[Path]) -> list[Path]:
@@ -63,7 +65,7 @@ def _metric_display(metric: Mapping[str, Any]) -> str:
     return "—"
 
 
-def _verified_result(job_dir: Path) -> JobResult:
+def _verified_result(job_dir: Path) -> tuple[JobResult, TaskSpec]:
     config = read_job_config(job_dir)
     result = read_job_result(job_dir)
     if compute_head(result) != result.head:
@@ -90,14 +92,21 @@ def _verified_result(job_dir: Path) -> JobResult:
         result=result,
         config=config,
     )
-    return result
+    # A public leaderboard row is an ingestion, so the quarantine is enforced at
+    # the one choke point every row passes through, and by refusal: a silently
+    # dropped adaptation would be an unstated absence.
+    assert_public_leaderboard_eligible(task_dir)
+    # The task travels back with the result: a row's gate *set* is a property of
+    # the task that ran, not of the outcome, and downstream surfaces cannot tell
+    # "no gate failed" from "nothing was gated" without it.
+    return result, task
 
 
 def leaderboard_data(paths: list[Path]) -> dict[str, Any]:
     """Load verified jobs and return deterministic task-scoped rows."""
     rows: list[dict[str, Any]] = []
     for job_dir in _result_paths(paths):
-        result = _verified_result(job_dir)
+        result, task = _verified_result(job_dir)
         metrics = _metric_summary(result)
         headline = metrics[result.headline]
         assessed = result.headline_true + result.headline_false
@@ -121,6 +130,19 @@ def leaderboard_data(paths: list[Path]) -> dict[str, Any]:
                     else None
                 ),
                 "any_gate_failed": result.any_gate_failed,
+                # The hard gates the task declares, so a consumer can tell a
+                # passing gate set from an empty one. Sorted for determinism.
+                "gate_specs": [
+                    {"gate_id": gate.id, "unit": gate.unit}
+                    for gate in sorted(task.verifier.gates, key=lambda gate: gate.id)
+                ],
+                # Head-covered engine provenance, or ``None`` when the bundle
+                # recorded none. Absent is *unattested*, never "real".
+                "world_engine": (
+                    result.world_engine.model_dump(mode="json")
+                    if result.world_engine is not None
+                    else None
+                ),
                 "metrics": metrics,
                 "head": result.head,
             }

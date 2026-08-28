@@ -32,8 +32,14 @@ from or_audit.eval.plugins import (
     load_verifier_runtime,
 )
 from or_audit.eval.predict import index_items, load_claim_footer, load_items
+from or_audit.eval.provenance import assert_scoreable_package
 from or_audit.eval.reconstitute import assert_trajectory_matches_vector
-from or_audit.eval.sim import BACKEND_UNKNOWN, get_simulation_engine
+from or_audit.eval.sim import (
+    BACKEND_UNKNOWN,
+    get_simulation_engine,
+    world_kind_key,
+    world_kind_spec,
+)
 from or_audit.eval.task import TaskSpec
 from or_audit.eval.trace import ProceduralTrace
 from or_audit.eval.vector import project
@@ -42,7 +48,7 @@ from or_audit.eval.verifier import score_context
 SAFETY_MAX_PEN = 0.3
 
 
-def _stream_adapters(task: TaskSpec) -> dict[str, Any]:
+def stream_adapters(task: TaskSpec) -> dict[str, Any]:
     """Resolve every stream's adapter, keyed by stream id (raises on unknown)."""
     from or_audit.eval.adapters import require_adapter
 
@@ -72,7 +78,7 @@ def _get_source(item: dict[str, Any], locator: str) -> Any:
     return cur
 
 
-def _preprocess_observation(
+def preprocess_observation(
     task: TaskSpec, adapters: dict[str, Any], item: dict[str, Any]
 ) -> dict[str, Any]:
     """Compose each stream's processed source slice into a fresh payload.
@@ -112,18 +118,37 @@ def _close(runtime: object | None) -> None:
 
 
 def _engine_provenance(task: TaskSpec, env: object | None) -> dict[str, Any]:
-    """Attest which engine produced the observations; an absent reporter is not omission."""
-    reporter = getattr(env, "engine_provenance", None)
-    if callable(reporter):
-        reported = reporter()
-        if isinstance(reported, dict):
-            return {str(key): value for key, value in reported.items()}
-    return {
-        "engine": task.environment.kind.value,
+    """Attest which engine produced the observations; an absent reporter is not omission.
+
+    Adapter identity is taken from the kernel's world-kind registry, never from
+    the bridge's own report, so a bridge cannot understate or misname the
+    adapter that ran. The values land in the head-covered
+    ``JobResult.world_engine``.
+
+    Every field here describes what was *observed*, so an absent reporter
+    leaves them empty. ``world_pin`` in particular used to default to
+    ``task.environment.world_pin``: the field conformance reads as evidence
+    was being populated from the declaration it is evidence about, which is
+    self-certification with extra steps. The declared pin stays available on
+    ``JobResult.world_pin``; unobserved is spelled ``""`` and read as "cannot
+    verify", never as "matches".
+    """
+    reported: dict[str, Any] = {
+        "engine": world_kind_key(task.environment.kind),
         "backend": BACKEND_UNKNOWN,
         "backend_version": "",
-        "world_pin": task.environment.world_pin,
+        "world_pin": "",
     }
+    reporter = getattr(env, "engine_provenance", None)
+    if callable(reporter):
+        from_bridge = reporter()
+        if isinstance(from_bridge, dict):
+            reported = {str(key): value for key, value in from_bridge.items()}
+    spec = world_kind_spec(task.environment.kind)
+    reported["adapter_id"] = spec.adapter_id if spec else ""
+    reported["adapter_digest"] = spec.adapter_digest if spec else ""
+    reported["metrics_only"] = task.environment.metrics_only
+    return reported
 
 
 def builtin_random_agent(interface_id: str = "gym-policy") -> AgentPackage:
@@ -154,6 +179,10 @@ def run_job(
 ) -> JobResult:
     assert_bind(task, agent)
     task.assert_runnable()
+    # A package presenting concierge provenance must still be the package that was
+    # frozen: an adaptation whose verifier, gates, or projection moved after
+    # freezing would otherwise be hashed here as a brand-new task and scored.
+    assert_scoreable_package(task_dir)
     task_package_digest = tree_digest(task_dir)
     agent_package_digest = (
         tree_digest(agent_dir) if agent_dir is not None else digest(agent.model_dump(mode="json"))
@@ -265,7 +294,7 @@ def _run_closed_loop(
         env = sim_engine if sim_engine is not None else make_gym(task)
     provenance = _engine_provenance(task, env)
     identity = agent_identity(agent)
-    adapters = _stream_adapters(task)
+    adapters = stream_adapters(task)
     unwrapped = getattr(env, "unwrapped", env)
     nested = getattr(unwrapped, "_env", unwrapped)
     safety = float(getattr(nested, "safety_max_pen", SAFETY_MAX_PEN))
@@ -308,7 +337,7 @@ def _run_closed_loop(
             ) -> Any:
                 if policy is None:
                     return sample_action(world, seed=episode_seed, step=step)
-                return policy.act(_preprocess_observation(task, adapters, observation), step=step)
+                return policy.act(preprocess_observation(task, adapters, observation), step=step)
 
             info, steps = run_gym_episode(
                 env,
@@ -398,14 +427,14 @@ def _run_predictions(
     )
     verifier = load_verifier_runtime(task_dir, task.verifier.entrypoint)
     identity = agent_identity(agent)
-    adapters = _stream_adapters(task)
+    adapters = stream_adapters(task)
     trials = []
     try:
         for seed, item in enumerate(inputs[:n]):
             item_id = str(item["id"])
             if item_id not in labels:
                 raise TaskContractError(f"task {task.id} has no label for item {item_id!r}")
-            agent_input = _preprocess_observation(task, adapters, item)
+            agent_input = preprocess_observation(task, adapters, item)
             prediction = predictor.predict(agent_input)
             context_kind = (
                 "counterfactual" if mode is InteractionMode.COUNTERFACTUAL else "video-predict"

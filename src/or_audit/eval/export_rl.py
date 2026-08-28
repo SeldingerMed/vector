@@ -54,10 +54,13 @@ def _spec_for_task(task: TaskSpec, projection_id: ProjectionId | str) -> Project
         raise TaskContractError(
             f"task {task.id} has no declared projection or diverged gating rule"
         )
-    if task.projection.id != requested:
-        raise TaskContractError(
-            f"task {task.id} declares {task.projection.id!r}, not {requested!r}"
-        )
+    declared = (
+        task.projection.id.value
+        if isinstance(task.projection.id, ProjectionId)
+        else task.projection.id
+    )
+    if declared != requested:
+        raise TaskContractError(f"task {task.id} declares {declared!r}, not {requested!r}")
     return task.projection
 
 
