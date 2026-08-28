@@ -29,3 +29,15 @@ jobs:
           factory_api_key: ${{ secrets.FACTORY_API_KEY }}
           automatic_review: true
           automatic_security_review: true
+          # Pin the review models. The action's default review depth selects
+          # gpt-5.2, whose tool set omits Edit/Create ("Tool 'Edit' skipped
+          # (GPT-5.2 uses ApplyPatch instead)"), and Droid Exec then exits 1
+          # immediately after init - every attempt, on every retry, emitting no
+          # analysis at all. That failure is silent in the worst way: the job
+          # goes red for what looks like a review finding, so a real review is
+          # neither performed nor obviously absent. Observed on PR #27 across
+          # two full runs; reruns cannot fix it because the model choice is
+          # what breaks. Note this workflow does not run on `synchronize`, so
+          # a push will not retrigger it - reopen the PR, or toggle draft.
+          review_model: claude-sonnet-4-5-20250929
+          security_model: claude-sonnet-4-5-20250929
