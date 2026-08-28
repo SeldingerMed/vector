@@ -9,7 +9,10 @@ structural consequences:
   formatting, which is the thing this command exists to replace.
 * An unprobeable condition reports ``unknown``, never ``ok`` and never
   ``fail``. We cannot prove a GPU is absent from inside a shell with no
-  ``nvidia-smi``, so we say so instead of guessing in either direction.
+  ``nvidia-smi``, so we say so instead of guessing in either direction. An
+  ``unknown`` on a *required* check still fails the command: the label stays
+  honest about what we learned, and the exit code stays honest about the fact
+  that we did not learn it. An unprobed requirement is not a satisfied one.
 
 Optional worlds are advisory by default: a bare CPU machine with no SOFA and
 no Isaac is a *healthy* machine for the quickstart path, so scanning the whole
@@ -21,7 +24,9 @@ has asserted they want it working.
 from __future__ import annotations
 
 import importlib.util
+import re
 import shutil
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -43,11 +48,7 @@ from or_audit.install.catalog import (
     WorldPackage,
     load_catalog,
 )
-from or_audit.install.installer import (
-    CONTAINER_RUNTIMES,
-    default_container_runtime,
-    plan_refusal,
-)
+from or_audit.install.installer import CONTAINER_RUNTIMES, plan_refusal
 from or_audit.version import PACKAGE_VERSION
 
 #: Minimum interpreter the distribution declares in ``pyproject.toml``.
@@ -108,7 +109,15 @@ class DoctorCheck:
 
     @property
     def blocking(self) -> bool:
-        return self.required and self.status is CheckStatus.FAIL
+        """Whether this check fails the command.
+
+        ``unknown`` blocks a required check. The caller named this world, so
+        "we could not probe it" is not a pass: reporting success for a check
+        that verified nothing is the failure mode this command exists to
+        prevent. Advisory unknowns stay advisory, so a bare CPU machine
+        scanning the whole shelf still exits 0.
+        """
+        return self.required and self.status in {CheckStatus.FAIL, CheckStatus.UNKNOWN}
 
     def render(self) -> str:
         line = f"[{self.status.value:>7}] {self.id}: {self.detail}"
@@ -134,7 +143,7 @@ class DoctorReport:
 
     @property
     def failures(self) -> tuple[DoctorCheck, ...]:
-        """Required checks that failed — the ones that set the exit code."""
+        """Required checks that failed or went unproven — they set the exit code."""
         return tuple(check for check in self.checks if check.blocking)
 
     @property
@@ -151,7 +160,7 @@ class DoctorReport:
         return not self.failures
 
     def exit_code(self) -> int:
-        """0 when every required check passed, 1 otherwise."""
+        """0 when every required check was proven, 1 otherwise."""
         return 0 if self.ok else 1
 
     def render(self) -> str:
@@ -159,7 +168,7 @@ class DoctorReport:
         if self.ok:
             lines.append(f"doctor: ok ({len(self.advisories)} advisory)")
         else:
-            lines.append(f"doctor: {len(self.failures)} required check(s) failed")
+            lines.append(f"doctor: {len(self.failures)} required check(s) not satisfied")
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
@@ -210,6 +219,64 @@ def _module_present(module: str) -> bool:
         return importlib.util.find_spec(module) is not None
     except (ImportError, ValueError):
         return False
+
+
+#: Seconds one local image inspection may take. A runtime that cannot answer a
+#: metadata question in this long has not shown the image is there, and the
+#: doctor's job is to report that rather than to wait for it.
+IMAGE_INSPECT_TIMEOUT_S = 20.0
+
+#: A runtime that cannot reach its own daemon exits nonzero exactly as it does
+#: for a genuinely absent image. Reading absence out of that would be inventing
+#: evidence, so these phrases downgrade the answer to "unprobeable".
+_RUNTIME_UNREACHABLE = re.compile(
+    r"cannot connect|connection refused|permission denied|is the docker daemon running"
+    r"|daemon is not running|no such file or directory",
+    re.IGNORECASE,
+)
+
+
+def _available_container_runtime() -> str | None:
+    """Path of the first container runtime on PATH, or ``None`` when there is none.
+
+    Unlike :func:`or_audit.install.installer.default_container_runtime`, which
+    names ``docker`` so a plan is printable anywhere, this refuses to name a
+    runtime it did not find: the doctor is asking whether one exists.
+    """
+    for runtime in CONTAINER_RUNTIMES:
+        found = shutil.which(runtime)
+        if found is not None:
+            return found
+    return None
+
+
+def _image_present(runtime: str, reference: str) -> bool | None:
+    """Whether ``runtime`` already holds ``reference`` locally, or ``None``.
+
+    ``image inspect`` is a local metadata read, so this stays inside the
+    offline-after-fetch contract: the doctor diagnoses, it never pulls. Argv is
+    built from catalog data, never from user strings.
+
+    ``None`` means the question could not be asked at all - no daemon, no
+    permission, exec failure, timeout - which is a different claim from the
+    runtime answering "no such image", and the two get different statuses.
+    """
+    argv = [runtime, "image", "inspect", reference]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=IMAGE_INSPECT_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode == 0:
+        return True
+    if _RUNTIME_UNREACHABLE.search(completed.stderr or ""):
+        return None
+    return False
 
 
 def _python_check() -> DoctorCheck:
@@ -335,6 +402,57 @@ def _install_fix(pkg: WorldPackage, *, dry_run: bool = False) -> str:
     return f"surgeval worlds install {pkg.id}{suffix}"
 
 
+def _image_probe_check(
+    pkg: WorldPackage,
+    *,
+    check_id: str,
+    runtime: str,
+    reference: str,
+    what: str,
+    required: bool,
+) -> DoctorCheck:
+    """Grade a container world on whether ``reference`` is actually present.
+
+    Tool presence is not image presence. This check used to report ``ok`` as
+    soon as ``docker`` was on PATH, which claimed an install it had never
+    looked for; the runtime is now asked, offline, about the exact tag or
+    digest the catalog names.
+    """
+    present = _image_present(runtime, reference)
+    runtime_name = Path(runtime).name
+    if present:
+        return DoctorCheck(
+            check_id,
+            CheckStatus.OK,
+            f"{runtime_name} has {what} {reference}",
+            required=required,
+        )
+    if present is None:
+        return DoctorCheck(
+            check_id,
+            CheckStatus.UNKNOWN,
+            f"{runtime_name} could not be asked whether {what} {reference} is present",
+            fix=(
+                f"make {runtime_name} usable (`{runtime_name} info` must succeed), then re-run "
+                f"`surgeval doctor --world {pkg.id}`"
+            ),
+            required=required,
+        )
+    if required:
+        return DoctorCheck(
+            check_id,
+            CheckStatus.FAIL,
+            f"{runtime_name} does not have {what} {reference}",
+            fix=_install_fix(pkg),
+        )
+    return DoctorCheck(
+        check_id,
+        CheckStatus.SKIPPED,
+        f"{what} not pulled (optional; run `surgeval doctor --world {pkg.id}` for the fix)",
+        required=False,
+    )
+
+
 def _world_check(pkg: WorldPackage, *, required: bool) -> DoctorCheck:
     """One best-effort probe per world, chosen by install strategy."""
     check_id = f"world:{pkg.id}"
@@ -396,7 +514,7 @@ def _world_check(pkg: WorldPackage, *, required: bool) -> DoctorCheck:
             required=False,
         )
     if isinstance(spec, PrebuiltContainerInstall):
-        runtime = shutil.which(default_container_runtime())
+        runtime = _available_container_runtime()
         if runtime is None:
             return DoctorCheck(
                 check_id,
@@ -419,10 +537,12 @@ def _world_check(pkg: WorldPackage, *, required: bool) -> DoctorCheck:
                 ),
                 required=required,
             )
-        return DoctorCheck(
-            check_id,
-            CheckStatus.OK,
-            f"container runtime present ({runtime}); pinned image {spec.reference}",
+        return _image_probe_check(
+            pkg,
+            check_id=check_id,
+            runtime=runtime,
+            reference=spec.reference,
+            what="pinned image",
             required=required,
         )
     if isinstance(spec, VendorRuntimeInstall):
@@ -438,11 +558,40 @@ def _world_check(pkg: WorldPackage, *, required: bool) -> DoctorCheck:
                 ),
                 required=required,
             )
-        return DoctorCheck(
-            check_id,
-            CheckStatus.OK,
-            f"GPU driver tooling present; {vendor} runtime pin "
-            f"{spec.pinned_version or '(unpinned in catalog)'}",
+        # A vendor-runtime world *is* the vendor's container, so a GPU driver
+        # that answered is a prerequisite met, not the world found. Without a
+        # container runtime there is nothing here that could hold the image.
+        runtime = _available_container_runtime()
+        if runtime is None:
+            return DoctorCheck(
+                check_id,
+                CheckStatus.UNKNOWN,
+                f"GPU driver tooling present, but no container runtime, so the {vendor} "
+                f"runtime image cannot be checked",
+                fix=(
+                    f"install one of {', '.join(CONTAINER_RUNTIMES)} (plus the {vendor} "
+                    f"container toolkit) and re-run `surgeval doctor --world {pkg.id}`"
+                ),
+                required=required,
+            )
+        if not spec.pinned:
+            return DoctorCheck(
+                check_id,
+                CheckStatus.UNKNOWN,
+                f"container runtime present ({runtime}) but the catalog names no pinned "
+                f"{vendor} runtime version, so no image reference can be verified",
+                fix=(
+                    f"record the pinned {vendor} runtime version, named in its container "
+                    f"reference, for {pkg.id} in catalog.toml"
+                ),
+                required=required,
+            )
+        return _image_probe_check(
+            pkg,
+            check_id=check_id,
+            runtime=runtime,
+            reference=spec.container,
+            what=f"{vendor} runtime {spec.pinned_version} image",
             required=required,
         )
     raise TaskContractError(f"unhandled install strategy for world {pkg.id!r}")

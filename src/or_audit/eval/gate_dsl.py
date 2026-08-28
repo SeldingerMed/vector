@@ -24,7 +24,13 @@ from typing import Any
 
 from or_audit.domain.enums import GateStatus
 from or_audit.eval.enums import VerifierRealizationKind
-from or_audit.eval.evidence import _MISSING, EvidenceReference, resolve_binding
+from or_audit.eval.evidence import (
+    _MISSING,
+    EvidenceReference,
+    normalize_locator,
+    resolve_binding,
+)
+from or_audit.eval.gym_world import nonfinite_kind
 from or_audit.eval.task import GateSpec
 from or_audit.eval.vector import GateOutcome
 
@@ -46,6 +52,11 @@ _OPS: dict[type[ast.AST], Any] = {
 def _truth(value: Any) -> Any:
     """Map a signal value to a tri-state truth: UNKNOWN never reads as False."""
     if value is UNKNOWN or value is None:
+        return UNKNOWN
+    if nonfinite_kind(value):
+        # `bool()` of the tag is True and `bool(nan)` is True, either of which
+        # would be a verdict invented from a divergence. We abstain when we
+        # cannot assess.
         return UNKNOWN
     try:
         return bool(value)
@@ -146,14 +157,41 @@ def evaluate_gate(
         return None
     signals: dict[str, Any] = {}
     evidence: list[EvidenceReference] = []
+    diverged: list[str] = []
     for name, locator in bindings.items():
-        value, uri, digest = resolve_binding(
-            locator,
-            context=context,
-            task_root=task_root,
-            absent_default=gate.input_defaults.get(name, _MISSING),
-        )
-        if value is _MISSING or value is None:
+        try:
+            value, uri, digest = resolve_binding(
+                locator,
+                context=context,
+                task_root=task_root,
+                absent_default=gate.input_defaults.get(name, _MISSING),
+            )
+        except ValueError as exc:
+            # `canonical.py` refuses to hash a non-finite float, and that
+            # refusal is right: a value that is not a number is not a
+            # measurement and must not enter the evidence chain as one. But it
+            # used to escape three frames below the gate and abort a whole job
+            # over one diverged step, so the operator saw a canonicalization
+            # error instead of "this gate could not be assessed". Abstaining is
+            # the honest outcome, and writing it down here is what keeps it
+            # one: a refusal that is only a side effect of the digest layer is
+            # one refactor away from becoming a fabricated pass.
+            diverged.append(f"{name}: {exc}")
+            signals[name] = UNKNOWN
+            evidence.append(
+                EvidenceReference(id=name, uri=normalize_locator(locator), digest="", signal=name)
+            )
+            continue
+        kind = nonfinite_kind(value)
+        if kind:
+            # Reported, canonical, hashable - and still not a measurement: the
+            # solver diverged, so there is no number for the predicate to
+            # enforce. The digest is kept, because "we saw a nan here" is
+            # itself evidence; only the verdict abstains.
+            diverged.append(f"{name} reported {kind}")
+            signals[name] = UNKNOWN
+            evidence.append(EvidenceReference(id=name, uri=uri, digest=digest, signal=name))
+        elif value is _MISSING or value is None:
             # Missing or explicitly null evidence is abstention, never falsy:
             # normalize to UNKNOWN so `x == true` cannot read as a PASS.
             signals[name] = UNKNOWN
@@ -184,11 +222,16 @@ def evaluate_gate(
             evidence=tuple(evidence),
         )
     if result is UNKNOWN:
-        missing = [ref.signal for ref in evidence if not ref.digest]
+        # From the tri-state signals, not from an empty digest: a non-finite
+        # binding keeps its digest and is still unassessable.
+        undetermined = sorted(name for name, value in signals.items() if value is UNKNOWN)
+        reason = f"gate cannot be determined; missing evidence: {undetermined}"
+        if diverged:
+            reason = f"{reason}; non-finite engine output: {sorted(diverged)}"
         return GateOutcome(
             id=gate.id,
             status=GateStatus.NOT_ASSESSABLE,
-            reason=f"gate cannot be determined; missing evidence: {sorted(missing)}",
+            reason=reason,
             realization=VerifierRealizationKind.SCALAR_DSL.value,
             provenance=gate.provenance,
             evidence=tuple(evidence),

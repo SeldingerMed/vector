@@ -6,6 +6,7 @@ import argparse
 import importlib.util
 import json
 import py_compile
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,10 @@ def _request(**overrides: Any) -> WrapRequest:
     fields: dict[str, Any] = {
         "env_id": "SurRoL/NeedleReach-v0",
         "task_id": "surrol-needle-reach",
-        "world_pin": "surrol-v2.0.1",
+        # A real SurRoL commit, not the tag this fixture used to carry: with a
+        # GitHub source repo the kit now requires a full commit, because a tag
+        # can be moved and a wrap's whole claim is that the run is replayable.
+        "world_pin": "aa430af5ca3ee62a69d677d2c8dfd031efe20204",
         "license": "MIT",
         "source_repo": "https://github.com/med-air/SurRoL",
         "max_steps": 4,
@@ -414,3 +418,217 @@ def test_orbit_example_is_an_honest_metrics_only_wrap(tmp_path: Path) -> None:
     text = trial.read_text(encoding="utf-8")
     for invented in ("max_pen", "contact_force_n", "workspace_violation", "safe_success"):
         assert invented not in text
+
+
+class TestGeneratedArtifactsCannotBeInjected:
+    """Free text carried into a generated artifact is structure, not prose.
+
+    Every file the kit emits is assembled by concatenating strings. Three
+    fields reached those files unescaped, and each produced a package that
+    `surgeval wrap` reported as a success: an ``env_id`` closing the module
+    docstring in ``verifier.py``, a ``world_pin`` ending the ``task.toml``
+    header comment and opening a forged ``[attestation]`` table, and a
+    ``--param`` name escaping its inline table. A scaffold the kit calls
+    written must be a package that loads.
+    """
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("env_id", 'E"""\nimport os\nos.system("touch /tmp/pwn")\n_x = """'),
+            ("world_pin", 'deadbeef\n[attestation]\nlevel = "attested"\n#'),
+            ("license", 'MIT\nid = "stolen"'),
+            ("modality", "video\n[decision]\nemit_human_determination = true"),
+        ],
+    )
+    def test_a_control_character_in_an_identifier_is_refused(self, field: str, value: str) -> None:
+        with pytest.raises(TaskContractError, match="control character"):
+            _request(**{field: value})
+
+    @pytest.mark.parametrize(
+        "env_id",
+        ['E"""', 'E\\"x"""y', "E # x = 1", 'E" and "'],
+    )
+    def test_quotes_alone_cannot_break_the_generated_package(
+        self, env_id: str, tmp_path: Path
+    ) -> None:
+        """Escaping holds without leaning on the control-character validator.
+
+        These carry no newline, so they pass the boundary check and must be
+        neutralised by the renderers themselves. Defence in depth: either
+        layer alone would have closed the reported hole, and one layer is
+        one accident away from reopening it.
+        """
+        out = tmp_path / "pkg"
+        scaffold_wrap(_request(env_id=env_id, task_id="quote-probe"), out)
+
+        py_compile.compile(str(out / "verifier.py"), doraise=True)
+        parsed = tomllib.loads((out / "task.toml").read_text(encoding="utf-8"))
+        assert parsed["environment"]["gym_id"] == env_id
+        assert "attestation" not in parsed
+        assert load_task(out).id == "quote-probe"
+
+    def test_a_param_name_cannot_escape_its_inline_table(self, tmp_path: Path) -> None:
+        """An unquoted TOML key containing ``}`` closes the table it sits in."""
+        hostile = "a = 1 }\n[decision]\nemit_human_determination = true\n#x"
+        out = tmp_path / "pkg"
+        scaffold_wrap(
+            _request(task_id="param-probe", parameters={hostile: 1}),
+            out,
+        )
+        parsed = tomllib.loads((out / "task.toml").read_text(encoding="utf-8"))
+        assert parsed["environment"]["parameters"] == {hostile: 1}
+        assert "decision" not in parsed
+
+    def test_nothing_is_written_when_an_artifact_would_not_round_trip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rendering bug must refuse, not ship a half-written package.
+
+        The escaping above is the fix; this is the check that the fix held.
+        It stands in for the *next* rendering bug, which will not be one of
+        the three already found.
+        """
+        import or_audit.eval.wrap as wrap_module
+
+        monkeypatch.setattr(wrap_module, "_render_verifier", lambda spec: "def broken(:\n")
+        out = tmp_path / "pkg"
+        with pytest.raises(TaskContractError, match=r"verifier\.py does not parse"):
+            scaffold_wrap(_request(task_id="render-bug"), out)
+        assert not out.exists(), "a refused wrap must leave no partial package"
+
+
+LAPGYM_PIN = "85bf7e05dd088b824794dda0046679df13b13e6e"
+
+
+class TestAuditedQuantitiesKeepTheirUnits:
+    """An audited measurement cannot be relabelled into a bare flag.
+
+    LapGym's ``gripper_jaw_peg_collisions`` is audited as a count in
+    ``contacts``. Both holes below let that quantity carry a gate with no
+    cited boundary: the predicate `gripper_jaw_peg_collisions` alone is a
+    test against zero, and zero was never cited by anyone.
+    """
+
+    def _mapping(self, **overrides: Any) -> GateMapping:
+        fields: dict[str, Any] = {
+            "id": "peg-contact",
+            "signal": "gripper_jaw_peg_collisions",
+            "fail_when": "gripper_jaw_peg_collisions > 0",
+            "threshold": 0.0,
+            "unit": "contacts",
+            "citation": "LapGym scenes.rst",
+        }
+        fields.update(overrides)
+        return GateMapping(**fields)
+
+    def _wrap(self, mapping: GateMapping) -> WrapRequest:
+        return _request(
+            env_id="LapGym/pick_and_place",
+            task_id="lapgym-peg",
+            world_kind="sofa",
+            world_pin=LAPGYM_PIN,
+            source_repo="",
+            gate_mappings=(mapping,),
+        )
+
+    def test_a_correctly_declared_audited_gate_is_accepted(self) -> None:
+        assert self._wrap(self._mapping()).gate_mappings[0].unit == "contacts"
+
+    def test_omitting_the_unit_is_refused(self) -> None:
+        """Reviewer's probe: no threshold, no unit, audited quantity."""
+        with pytest.raises(TaskContractError, match="declares no unit"):
+            self._wrap(
+                self._mapping(
+                    fail_when="gripper_jaw_peg_collisions",
+                    threshold=None,
+                    unit="",
+                    citation="",
+                )
+            )
+
+    def test_the_audited_unit_without_a_threshold_is_still_refused(self) -> None:
+        """Naming the right unit does not supply the missing number.
+
+        Closing only the unit hole left this open: the predicate is still a
+        bare truthiness test, so the boundary is still zero and still uncited.
+        """
+        with pytest.raises(TaskContractError, match="declares no threshold"):
+            self._wrap(
+                self._mapping(
+                    fail_when="gripper_jaw_peg_collisions",
+                    threshold=None,
+                    citation="",
+                )
+            )
+
+
+class TestWorldPinIsARevision:
+    """A pin that can move is not provenance, whatever the package claims."""
+
+    @pytest.mark.parametrize("moving", ["main", "master", "HEAD", "latest", "Main"])
+    def test_a_moving_reference_is_refused(self, moving: str) -> None:
+        with pytest.raises(TaskContractError, match="moving reference"):
+            _request(world_pin=moving)
+
+    def test_a_github_repo_requires_a_full_commit(self) -> None:
+        """A tag can be re-pointed and a short sha can collide."""
+        with pytest.raises(TaskContractError, match="40-character commit"):
+            _request(world_pin="v2.0.1")
+        with pytest.raises(TaskContractError, match="40-character commit"):
+            _request(world_pin="aa430af")
+
+    def test_a_non_github_world_may_pin_its_own_way(self) -> None:
+        """First-party and synthetic worlds are not git repositories."""
+        assert _request(world_pin="ortho-synthetic-v1", source_repo="").world_pin
+
+
+class TestGeneratedVerifierAbstainsOnNonFiniteReadings:
+    """A diverged solver must not be scored as a success.
+
+    The recorder tags NaN and the infinities rather than writing 0.0, so a
+    diverged reading reaches a generated verifier as ``"__nonfinite__:nan"``.
+    ``bool()`` of that string is True, so ``_boolean`` reported a **success**
+    for a run whose physics had blown up, and ``_numeric`` raised ValueError
+    on the way to the same place. A raw non-finite float arrives identically
+    from any world that never passed through the recorder.
+    """
+
+    def _verifier(self, tmp_path: Path) -> Any:
+        out = tmp_path / "pkg"
+        scaffold_wrap(
+            _request(task_id="nonfinite-probe", metrics_only=True, gate_mappings=()),
+            out,
+        )
+        spec = importlib.util.spec_from_file_location("gen_verifier", out / "verifier.py")
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @pytest.mark.parametrize(
+        "reading",
+        [
+            "__nonfinite__:nan",
+            "__nonfinite__:+inf",
+            "__nonfinite__:-inf",
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+        ],
+    )
+    def test_a_non_finite_reading_is_unassessable(self, reading: Any, tmp_path: Path) -> None:
+        module = self._verifier(tmp_path)
+        info = {"raw_success": reading}
+        assert module._reported(info, "raw_success") is None
+        assert module._boolean(info, "raw_success") is None
+        assert module._numeric(info, "raw_success") is None
+
+    def test_real_readings_still_pass_through(self, tmp_path: Path) -> None:
+        """The abstention must not swallow ordinary measurements."""
+        module = self._verifier(tmp_path)
+        assert module._numeric({"force": 2.0}, "force") == 2.0
+        assert module._boolean({"ok": True}, "ok") is True
+        assert module._numeric({"force": 0.0}, "force") == 0.0
+        assert module._boolean({"ok": False}, "ok") is False

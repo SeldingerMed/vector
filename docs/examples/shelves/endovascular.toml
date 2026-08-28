@@ -44,6 +44,11 @@ task_family = "guidewire-branch-navigation"
 [[worlds]]
 world_id = "steve"
 world_kind = "sofa"
+# The catalog's pinned revision for `steve` (worlds.install.commit). `sofa`
+# declares `requires_world_pin`, and `build_shelf` matches jobs on the exact
+# (task_id, world_pin) pair: without this line every real stEVE job is rejected
+# as undeclared and the published shelf can never be completed by any run.
+world_pin = "f909e7122d846a3c2fec91eedddaa0ba88b6391d"
 task_id = "steve-arch-variety-nav"
 task_family = "guidewire-branch-navigation"
 

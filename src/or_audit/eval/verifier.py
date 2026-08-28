@@ -9,6 +9,7 @@ from or_audit.domain.enums import GateStatus
 from or_audit.errors import TaskContractError
 from or_audit.eval.evidence import _MISSING, EvidenceReference, resolve_binding
 from or_audit.eval.gate_dsl import evaluate_gate, is_scalar_realization
+from or_audit.eval.gym_world import nonfinite_kind
 from or_audit.eval.plugins import VerifierRuntime, load_verifier_runtime
 from or_audit.eval.task import TaskSpec
 from or_audit.eval.vector import GateOutcome, MetricOutcome, TrialVector
@@ -149,6 +150,16 @@ def score_context(
         value = raw_metrics[metric_id]
         if value is not None and not isinstance(value, bool | int | float | str):
             raise TaskContractError(f"metric {metric_id} returned an unsupported value")
+        if nonfinite_kind(value):
+            # A diverged solver reported nan/+inf/-inf, or handed back the
+            # recorder's tag for one. Either way there is no number here, and
+            # the one thing it must never become is a number: 0.0 would be a
+            # fabricated safety reading, and the raw value cannot be hashed
+            # into the job head at all. Null is the same answer the gate gives
+            # for the same evidence, and it keeps a diverged run reportable
+            # instead of unscoreable. The trajectory still carries the tagged
+            # value, so *why* the metric is unassessable stays on the record.
+            value = None
         if (
             definition.kind.value == "categorical"
             and value is not None

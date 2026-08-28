@@ -32,6 +32,7 @@ from or_audit.eval.plugins import (
     load_verifier_runtime,
 )
 from or_audit.eval.predict import index_items, load_claim_footer, load_items
+from or_audit.eval.provenance import assert_scoreable_package
 from or_audit.eval.reconstitute import assert_trajectory_matches_vector
 from or_audit.eval.sim import (
     BACKEND_UNKNOWN,
@@ -123,12 +124,20 @@ def _engine_provenance(task: TaskSpec, env: object | None) -> dict[str, Any]:
     the bridge's own report, so a bridge cannot understate or misname the
     adapter that ran. The values land in the head-covered
     ``JobResult.world_engine``.
+
+    Every field here describes what was *observed*, so an absent reporter
+    leaves them empty. ``world_pin`` in particular used to default to
+    ``task.environment.world_pin``: the field conformance reads as evidence
+    was being populated from the declaration it is evidence about, which is
+    self-certification with extra steps. The declared pin stays available on
+    ``JobResult.world_pin``; unobserved is spelled ``""`` and read as "cannot
+    verify", never as "matches".
     """
     reported: dict[str, Any] = {
         "engine": world_kind_key(task.environment.kind),
         "backend": BACKEND_UNKNOWN,
         "backend_version": "",
-        "world_pin": task.environment.world_pin,
+        "world_pin": "",
     }
     reporter = getattr(env, "engine_provenance", None)
     if callable(reporter):
@@ -170,6 +179,10 @@ def run_job(
 ) -> JobResult:
     assert_bind(task, agent)
     task.assert_runnable()
+    # A package presenting concierge provenance must still be the package that was
+    # frozen: an adaptation whose verifier, gates, or projection moved after
+    # freezing would otherwise be hashed here as a brand-new task and scored.
+    assert_scoreable_package(task_dir)
     task_package_digest = tree_digest(task_dir)
     agent_package_digest = (
         tree_digest(agent_dir) if agent_dir is not None else digest(agent.model_dump(mode="json"))

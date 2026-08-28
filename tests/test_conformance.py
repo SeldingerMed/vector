@@ -24,6 +24,7 @@ import pytest
 from pydantic import ValidationError
 
 from or_audit.commands.conformance import register
+from or_audit.domain.enums import GateStatus
 from or_audit.eval import licensing
 from or_audit.eval.conformance import (
     CHECK_DETERMINISM,
@@ -31,10 +32,13 @@ from or_audit.eval.conformance import (
     CHECK_GATE_STATES,
     CHECK_LICENSE,
     REQUIRED_CHECKS,
+    RUN_A,
     ConformanceReport,
     run_conformance,
     write_conformance_report,
 )
+from or_audit.eval.contracts import InteractionMode
+from or_audit.eval.job import read_job_result
 from or_audit.eval.licensing import (
     LicenseStatus,
     classify_license,
@@ -166,25 +170,28 @@ class _BronchoGym:
         force: float = 0.5,
         jitter: float = 0.0,
         backend: str = BACKEND_REAL,
+        world_pin: str = "broncho-synthetic-v1",
     ) -> None:
         self._step = 0
         self._report_force = report_force
         self._force = force
         self._jitter = jitter
         self._backend = backend
+        self._world_pin = world_pin
 
     def engine_provenance(self) -> dict[str, Any]:
         """What a bridge must answer: which engine ran, and was it the real one.
 
         The double declares this because a real bridge must. Tests that want the
         provenance-less or stub-backed cases pass ``backend=`` explicitly rather
-        than relying on this class staying silent.
+        than relying on this class staying silent, and ``world_pin=`` covers the
+        bridge that ran a revision the package never pinned.
         """
         return {
             "engine": "gym",
             "backend": self._backend,
             "backend_version": "0.0.0-test-double",
-            "world_pin": "broncho-synthetic-v1",
+            "world_pin": self._world_pin,
         }
 
     def reset(
@@ -236,6 +243,22 @@ def _drifting_factory(
         del task
         run = next(runs)
         return _BronchoGym(force=0.5 + force_step * run, jitter=jitter_step * run)
+
+    return make
+
+
+def _diverging_factory() -> Callable[[TaskSpec], _BronchoGym]:
+    """Two runs whose solver blows up differently: ``nan``, then ``+inf``.
+
+    Under the old recorder both normalized to ``0.0``, so the pair digested
+    identically and measured ``bitwise`` - the worst available reading, since
+    non-finite telemetry *is* the divergence signal.
+    """
+    runs = itertools.count(1)
+
+    def make(task: TaskSpec) -> _BronchoGym:
+        del task
+        return _BronchoGym(force=float("nan") if next(runs) == 1 else float("inf"))
 
     return make
 
@@ -522,14 +545,44 @@ def test_evidence_replay_refuses_a_tampered_trajectory(tmp_path: Path) -> None:
     assert "reconstitutes a different vector" in check.detail
 
 
-def test_a_report_cannot_claim_a_tier_it_did_not_earn() -> None:
-    from or_audit.errors import TaskContractError
-    from or_audit.eval.conformance import ConformanceCheck
+def _passing_checks(
+    *,
+    measured: DeterminismClass = DeterminismClass.BITWISE,
+    tolerance: float = 1e-9,
+    failing: str = "",
+) -> tuple[Any, ...]:
+    """Four checks with real determinism evidence behind the class they claim.
 
-    checks = tuple(
-        ConformanceCheck(id=name, passed=name != CHECK_LICENSE, detail="fixture")
+    The evidence is part of the fixture because Tier 1 requires it: a report
+    naming a determinism class the ``execution-determinism`` check never
+    recorded is a header without a measurement.
+    """
+    from or_audit.eval.conformance import ConformanceCheck, DeterminismEvidence
+
+    return tuple(
+        ConformanceCheck(
+            id=name,
+            passed=name != failing,
+            detail="fixture",
+            determinism=(
+                DeterminismEvidence(
+                    measured=measured,
+                    tolerance=tolerance,
+                    identical_digests=measured is DeterminismClass.BITWISE,
+                    vectors_equal=True,
+                )
+                if name == CHECK_DETERMINISM
+                else None
+            ),
+        )
         for name in REQUIRED_CHECKS
     )
+
+
+def test_a_report_cannot_claim_a_tier_it_did_not_earn() -> None:
+    from or_audit.errors import TaskContractError
+
+    checks = _passing_checks(failing=CHECK_LICENSE)
     with pytest.raises(TaskContractError, match="tier 1 requires"):
         ConformanceReport(
             task_id="t",
@@ -538,6 +591,7 @@ def test_a_report_cannot_claim_a_tier_it_did_not_earn() -> None:
             world_kind="gym",
             adapter_identity="mod:fn+abc",
             adapter_pinned=True,
+            interaction_mode=InteractionMode.CLOSED_LOOP,
             stepped_world=True,
             backend=BACKEND_REAL,
             determinism_class=DeterminismClass.BITWISE,
@@ -555,6 +609,7 @@ def test_a_report_cannot_claim_a_tier_it_did_not_earn() -> None:
             world_kind="gym",
             adapter_identity="mod:fn+abc",
             adapter_pinned=False,
+            interaction_mode=InteractionMode.CLOSED_LOOP,
             stepped_world=True,
             determinism_class=DeterminismClass.BITWISE,
             tolerance=1e-9,
@@ -568,16 +623,13 @@ def test_a_stepped_world_cannot_claim_tier_1_without_a_real_backend() -> None:
     """The provenance gate is not defaultable, forgeable, or self-certifiable.
 
     Four ways a package could otherwise slip through: omit ``stepped_world`` so
-    a physics run reads as dataset-backed, *declare* it False for a physics
-    kind, report ``unknown`` because the bridge exposes no reporter, or report a
-    synthetic stand-in. All four must refuse.
+    a stepped run reads as dataset-backed, *declare* it False for a closed-loop
+    route, report ``unknown`` because the bridge exposes no reporter, or report
+    a synthetic stand-in. All four must refuse.
     """
     from or_audit.errors import TaskContractError
-    from or_audit.eval.conformance import ConformanceCheck
 
-    checks = tuple(
-        ConformanceCheck(id=name, passed=True, detail="fixture") for name in REQUIRED_CHECKS
-    )
+    checks = _passing_checks()
     fields: dict[str, Any] = {
         "task_id": "t",
         "task_version": "0",
@@ -585,6 +637,7 @@ def test_a_stepped_world_cannot_claim_tier_1_without_a_real_backend() -> None:
         "world_kind": "gym",
         "adapter_identity": "mod:fn+abc",
         "adapter_pinned": True,
+        "interaction_mode": InteractionMode.CLOSED_LOOP,
         "determinism_class": DeterminismClass.BITWISE,
         "tolerance": 1e-9,
         "checks": checks,
@@ -600,17 +653,21 @@ def test_a_stepped_world_cannot_claim_tier_1_without_a_real_backend() -> None:
         with pytest.raises(TaskContractError, match="tier 1 requires"):
             ConformanceReport(**fields, stepped_world=True, backend=backend)
 
-    # The same package on a dataset-backed world is legitimate: no engine ran,
+    # The same package on a dataset-backed route is legitimate: no engine ran,
     # and none was claimed.
     report = ConformanceReport(
-        **{**fields, "world_kind": "frame-source"},
+        **{
+            **fields,
+            "world_kind": "frame-source",
+            "interaction_mode": InteractionMode.SINGLE_TURN,
+        },
         stepped_world=False,
         backend=BACKEND_UNKNOWN,
     )
     assert report.tier == 1
     assert report.engine_attested is True
 
-    # Falsification: `gym` declares physics in the registry, so a report cannot
+    # Falsification: a closed-loop route steps a world, so a report cannot
     # reclassify itself as dataset-backed to escape the backend requirement.
     with pytest.raises(TaskContractError, match="cannot reclassify the world"):
         ConformanceReport(**fields, stepped_world=False, backend=BACKEND_UNKNOWN)
@@ -620,6 +677,361 @@ def test_a_stepped_world_cannot_claim_tier_1_without_a_real_backend() -> None:
     with pytest.raises(TaskContractError, match="tier 1 requires"):
         ConformanceReport(
             **{**fields, "world_kind": "steve-arch-nav"},
+            stepped_world=True,
+            backend=BACKEND_REAL,
+        )
+
+
+def test_an_unmeasured_determinism_class_cannot_carry_tier_1() -> None:
+    """``unmeasured`` is the honest default; Tier 1 names a measurement.
+
+    Original defect: ``tier1_eligible`` excluded only ``nondeterministic``, so
+    a serialized report could claim Tier 1 with ``determinism_class`` at its
+    honest default and no ``DeterminismEvidence`` at all - the strongest claim
+    this system makes, resting on the field that says nothing was measured.
+    """
+    from or_audit.errors import TaskContractError
+    from or_audit.eval.conformance import ConformanceCheck, DeterminismEvidence
+
+    fields: dict[str, Any] = {
+        "task_id": "t",
+        "task_version": "0",
+        "task_digest": "d",
+        "world_kind": "frame-source",
+        "adapter_identity": "mod:fn+abc",
+        "adapter_pinned": True,
+        "interaction_mode": InteractionMode.SINGLE_TURN,
+        "stepped_world": False,
+        "backend": BACKEND_UNKNOWN,
+        "tolerance": 1e-9,
+        "tier": 1,
+        "tier_reason": "fixture",
+    }
+
+    # The reviewer's probe verbatim: four bare passing checks and the default
+    # class. This validated with tier=1 and tier1_eligible True.
+    bare = tuple(ConformanceCheck(id=name, passed=True, detail="ok") for name in REQUIRED_CHECKS)
+    with pytest.raises(TaskContractError, match="tier 1 requires"):
+        ConformanceReport(**fields, determinism_class=DeterminismClass.UNMEASURED, checks=bare)
+
+    # Naming a strong class is not enough either: the check must carry the
+    # evidence that class was measured from.
+    with pytest.raises(TaskContractError, match="tier 1 requires"):
+        ConformanceReport(**fields, determinism_class=DeterminismClass.BITWISE, checks=bare)
+
+    # Evidence that measured something else does not back the header.
+    weaker = _passing_checks(measured=DeterminismClass.TOLERANCE)
+    with pytest.raises(TaskContractError, match="tier 1 requires"):
+        ConformanceReport(**fields, determinism_class=DeterminismClass.BITWISE, checks=weaker)
+
+    # Nor does evidence measured at a different tolerance than the one the
+    # report publishes: two tolerances are two claims.
+    mismatched = _passing_checks(measured=DeterminismClass.TOLERANCE, tolerance=1e-3)
+    with pytest.raises(TaskContractError, match="tier 1 requires"):
+        ConformanceReport(**fields, determinism_class=DeterminismClass.TOLERANCE, checks=mismatched)
+
+    # Backed by its own evidence, the same report earns the tier.
+    report = ConformanceReport(
+        **fields,
+        determinism_class=DeterminismClass.TOLERANCE,
+        checks=_passing_checks(measured=DeterminismClass.TOLERANCE),
+    )
+    assert report.tier == 1
+    assert report.determinism_measured is True
+    evidence = report.check(CHECK_DETERMINISM).determinism
+    assert isinstance(evidence, DeterminismEvidence)
+    assert evidence.measured is DeterminismClass.TOLERANCE
+
+
+def test_a_non_finite_tolerance_is_refused_at_every_surface(tmp_path: Path) -> None:
+    """``--tolerance inf`` excuses every difference, so it measures nothing.
+
+    Original defect: the guard tested only ``tolerance < 0``, and ``inf`` is
+    not negative. ``delta <= inf`` holds for any pair of floats, so two
+    arbitrarily different traces classified as tolerance-deterministic - and
+    the report then serialized non-standard ``Infinity``.
+    """
+    from or_audit.errors import TaskContractError
+    from or_audit.eval.conformance import DeterminismEvidence, _compare, _determinism_check
+    from or_audit.eval.job import read_job_result
+
+    # The reviewer's probe: an infinite tolerance must not excuse this.
+    found, delta = _compare(0.0, 1e300, tolerance=float("inf"), path="trace")
+    assert found
+    assert delta == pytest.approx(1e300)
+
+    task_dir = _broncho_task(tmp_path, name="broncho-tolerance")
+    task = load_task(task_dir)
+    measured = tmp_path / "measured"
+    run_conformance(task_dir, n=2, workdir=measured, gym_factory=_factory())
+    ran = read_job_result(measured / RUN_A)
+    for bad in (float("inf"), float("nan"), -1.0):
+        with pytest.raises(TaskContractError, match="finite non-negative"):
+            _determinism_check(task, ran, ran, tolerance=bad)
+        with pytest.raises(TaskContractError, match="finite non-negative"):
+            run_conformance(task_dir, n=2, workdir=tmp_path / "work", tolerance=bad)
+        with pytest.raises(TaskContractError, match="finite non-negative"):
+            DeterminismEvidence(
+                measured=DeterminismClass.TOLERANCE,
+                tolerance=bad,
+                identical_digests=False,
+                vectors_equal=True,
+            )
+        with pytest.raises(TaskContractError, match="finite non-negative"):
+            ConformanceReport(
+                task_id="t",
+                task_version="0",
+                task_digest="d",
+                world_kind="frame-source",
+                adapter_identity="mod:fn+abc",
+                adapter_pinned=True,
+                interaction_mode=InteractionMode.SINGLE_TURN,
+                stepped_world=False,
+                determinism_class=DeterminismClass.TOLERANCE,
+                tolerance=bad,
+                checks=_passing_checks(measured=DeterminismClass.TOLERANCE),
+                tier=0,
+                tier_reason="fixture",
+            )
+
+
+def test_an_engine_on_a_different_world_revision_is_refused(tmp_path: Path) -> None:
+    """Tier 1 promises a pinned commit; ``backend`` cannot check which one ran.
+
+    Original defect: conformance read ``world_engine.backend`` and never
+    compared the head-covered ``world_pin``. A task declaring
+    ``broncho-synthetic-v1`` against a real factory reporting
+    ``different-revision`` returned Tier 1 with all four checks passed.
+    """
+    from or_audit.errors import TaskContractError
+
+    task_dir = _broncho_task(tmp_path, name="broncho-repinned")
+    with pytest.raises(TaskContractError, match="is not a pin"):
+        run_conformance(
+            task_dir,
+            n=2,
+            workdir=tmp_path / "work",
+            gym_factory=_factory(world_pin="different-revision"),
+        )
+
+    # A bridge that attests no revision at all cannot certify the pin either,
+    # and that is a tier, not a crash: the run happened, it just proves less.
+    quiet = run_conformance(
+        task_dir,
+        n=2,
+        workdir=tmp_path / "quiet",
+        gym_factory=_factory(world_pin=""),
+    )
+    assert quiet.world_pin == "broncho-synthetic-v1"
+    assert quiet.world_pin_observed == ""
+    assert quiet.world_pin_attested is False
+    assert quiet.tier == 0
+    assert "pinned-commit half" in quiet.tier_reason
+
+    # The honest case still earns it: the engine attested the pinned revision.
+    good = run_conformance(
+        task_dir,
+        n=2,
+        workdir=tmp_path / "good",
+        gym_factory=_factory(),
+    )
+    assert good.world_pin_observed == "broncho-synthetic-v1"
+    assert good.world_pin_attested is True
+    assert good.tier == 1
+
+
+def test_non_finite_engine_output_is_not_flattened_before_it_is_compared(
+    tmp_path: Path,
+) -> None:
+    """A diverged solver's ``nan`` is neither 0.0 newtons nor bitwise agreement.
+
+    Original defect: the recorder normalized every ``nan``/``+inf``/``-inf`` to
+    ``0.0`` before the trajectory was built, so two runs whose physics blew up
+    differently digested identically and measured ``bitwise`` - and the gate
+    bound to the force read 0.0 N and passed. Non-finite telemetry *is* the
+    divergence signal, which makes this the worst case rather than a rounding
+    detail.
+    """
+    from or_audit.audit.canonical import digest
+    from or_audit.eval.gym_world import jsonable
+
+    # The reviewer's probe: the two divergences must not share a digest.
+    assert digest([{"telemetry": jsonable(float("nan"))}]) != digest(
+        [{"telemetry": jsonable(float("inf"))}]
+    )
+
+    # A NaN force is not a passing gate: it is a gate nobody could assess.
+    abstained = run_conformance(
+        _broncho_task(tmp_path, name="broncho-nan"),
+        n=2,
+        workdir=tmp_path / "nan",
+        gym_factory=_factory(force=float("nan")),
+    )
+    counts = abstained.check(CHECK_GATE_STATES).gate_states
+    assert [count.id for count in counts] == ["airway_wall_puncture"]
+    assert (counts[0].n_pass, counts[0].n_fail) == (0, 0)
+    assert counts[0].n_not_assessable == 2
+    assert abstained.check(CHECK_GATE_STATES).passed is False
+    # Replay still reconstitutes: the tagged value is what both the live
+    # scoring pass and the stored trajectory hand the verifier.
+    assert abstained.check(CHECK_EVIDENCE_REPLAY).passed is True
+    assert abstained.tier == 0
+
+    # Two runs that diverged differently are not one reproducible world.
+    diverged = run_conformance(
+        _broncho_task(tmp_path, name="broncho-divergent"),
+        n=2,
+        workdir=tmp_path / "divergent",
+        gym_factory=_diverging_factory(),
+    )
+    assert diverged.determinism_class is DeterminismClass.NONDETERMINISTIC
+    evidence = diverged.check(CHECK_DETERMINISM).determinism
+    assert evidence is not None
+    assert evidence.identical_digests is False
+    # The divergence reaches the *published vector*, not only the trace: the
+    # gate's kernel-hashed evidence digest differs because `nan` and `+inf` are
+    # finally different bytes. Under the old recorder both were 0.0 and every
+    # digest matched.
+    assert evidence.vectors_equal is False
+    assert "evidence[0].digest" in evidence.first_difference
+    stored = json.loads(
+        (
+            tmp_path / "divergent" / RUN_A / "trial-broncho-airway-nav-0" / "trajectory.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert stored[-1]["info"]["max_contact_force_n"] == "__nonfinite__:nan"
+    assert diverged.tier == 0
+
+
+#: A verifier that reports a diverged force as a raw ``nan`` metric value. The
+#: shipped example verifiers abstain instead, so this is the only way to drive
+#: the boundary a third-party package can still reach.
+_NAN_METRIC_VERIFIER = '''"""Fixture verifier reporting a diverged force as a raw NaN."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+class NanMetricVerifier:
+    def score(self, context: dict[str, Any]) -> dict[str, Any]:
+        info = context.get("info", {})
+        reached = bool(info.get("target_reached", False))
+        return {
+            "gates": {},
+            "metrics": {
+                "safe_navigation": reached,
+                "target_reached": reached,
+                "max_contact_force_n": float("nan"),
+                "diverged": bool(info.get("diverged", False)),
+            },
+        }
+
+
+def load_verifier(*, root: Any = None) -> NanMetricVerifier:
+    del root
+    return NanMetricVerifier()
+'''
+
+
+def test_a_verifier_reporting_a_non_finite_metric_yields_null_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    """A NaN metric is unassessable, never a number and never a crash.
+
+    Original defect: ``MetricOutcome`` accepted ``float('nan')``, so this
+    package passed verifier validation and then aborted the whole job with
+    ``ValueError: non-finite float nan cannot be canonicalized`` from inside
+    ``compute_head``. The canonicalizer refusing to hash it was the only thing
+    preventing a published NaN, and that was an accident rather than a
+    contract - the operator saw a digest-layer error instead of a statement
+    about their metric.
+    """
+    task_dir = _broncho_task(tmp_path, name="broncho-nan-metric")
+    (task_dir / "verifier.py").write_text(_NAN_METRIC_VERIFIER, encoding="utf-8")
+
+    report = run_conformance(
+        task_dir,
+        n=2,
+        workdir=tmp_path / "work",
+        gym_factory=_factory(),
+    )
+
+    result = read_job_result(tmp_path / "work" / RUN_A)
+    force = result.trials[0].vector.metric("max_contact_force_n")
+    assert force is not None
+    assert force.value is None
+    # The head still computes, so the run is publishable rather than aborted.
+    assert result.head
+    # And the gate is untouched: the kernel reads the real 0.5 N from `info`,
+    # not the verifier's self-reported number.
+    gate = result.trials[0].vector.gate("airway_wall_puncture")
+    assert gate is not None
+    assert gate.status is GateStatus.PASS
+    assert report.check(CHECK_EVIDENCE_REPLAY).passed is True
+    scorecard = json.loads((tmp_path / "work" / RUN_A / "scorecard.json").read_text())
+    row = next(item for item in scorecard["metrics"] if item["id"] == "max_contact_force_n")
+    assert (row["assessed"], row["unassessable"]) == (0, 2)
+    assert row["mean"] is None
+
+
+def test_a_closed_loop_adapter_cannot_waive_provenance_by_declaring_no_physics() -> None:
+    """``stepped_world`` follows the route, not the ``physics`` capability.
+
+    Original defect: it was derived from ``capabilities.physics``, so an
+    adapter declaring ``closed_loop=True, physics=False`` - a world a policy
+    genuinely steps - read as dataset-backed. Its report could then declare
+    ``stepped_world=False``, pass the registry cross-check, and certify its own
+    synthetic stand-in as Tier 1 with ``engine_attested`` True.
+    """
+    from or_audit.errors import TaskContractError
+
+    spec = attach_world_adapter(
+        "kinematic-loop",
+        capabilities=WorldCapabilities(closed_loop=True, physics=False),
+        factory=_frame_source_adapter,
+        provider="conformance-test",
+    )
+    fields: dict[str, Any] = {
+        "task_id": "t",
+        "task_version": "0",
+        "task_digest": "d",
+        "world_kind": "kinematic-loop",
+        "adapter_identity": spec.adapter_identity,
+        "adapter_pinned": True,
+        "interaction_mode": InteractionMode.CLOSED_LOOP,
+        "determinism_class": DeterminismClass.BITWISE,
+        "tolerance": 1e-9,
+        "checks": _passing_checks(),
+        "tier": 1,
+        "tier_reason": "fixture",
+    }
+
+    # The reviewer's probe verbatim: this validated at Tier 1.
+    with pytest.raises(TaskContractError, match="cannot reclassify the world"):
+        ConformanceReport(**fields, stepped_world=False, backend=BACKEND_SYNTHETIC_STUB)
+
+    # Told the truth about the route, the stand-in cannot carry the claim.
+    honest = ConformanceReport(
+        **{**fields, "tier": 0, "tier_reason": "stub"},
+        stepped_world=True,
+        backend=BACKEND_SYNTHETIC_STUB,
+    )
+    assert honest.stepped_world is True
+    assert honest.engine_attested is False
+    assert honest.tier1_eligible is False
+
+    # And a closed-loop report on a kind whose adapter does not grant
+    # closed_loop is refused: it attests a world the adapter never offered.
+    attach_world_adapter(
+        "still-frames",
+        capabilities=WorldCapabilities(),
+        factory=_frame_source_adapter,
+        provider="conformance-test",
+    )
+    with pytest.raises(TaskContractError, match="does not declare closed_loop"):
+        ConformanceReport(
+            **{**fields, "world_kind": "still-frames"},
             stepped_world=True,
             backend=BACKEND_REAL,
         )

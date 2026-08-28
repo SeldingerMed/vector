@@ -12,8 +12,9 @@ import argparse
 import json
 import re
 import shutil
+import subprocess
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,7 @@ from or_audit.install.catalog import (
     PipExtraInstall,
     PrebuiltContainerInstall,
     VendorRuntimeInstall,
+    WorldCatalog,
     WorldPackage,
     iter_packages,
     load_catalog,
@@ -43,10 +45,16 @@ from or_audit.install.catalog import (
 from or_audit.install.doctor import (
     CheckStatus,
     DoctorCheck,
+    DoctorReport,
     find_reference_paths,
     run_doctor,
 )
-from or_audit.install.installer import execute_install, plan_install
+from or_audit.install.installer import (
+    InstallOutcome,
+    InstallPlan,
+    execute_install,
+    plan_install,
+)
 
 PINNED_DIGEST = "sha256:" + "a" * 64
 
@@ -533,6 +541,186 @@ def test_a_failing_check_without_a_fix_is_refused():
         DoctorCheck("bogus", CheckStatus.FAIL, "something broke")
 
 
+def _fake_which(*present: str) -> Callable[..., str | None]:
+    """PATH lookup that finds exactly ``present``, so probes do not read this machine."""
+
+    def which(name: str, *_args: object, **_kwargs: object) -> str | None:
+        return f"/usr/bin/{name}" if name in present else None
+
+    return which
+
+
+def _one_world_catalog(pkg: WorldPackage) -> WorldCatalog:
+    return WorldCatalog(catalog_version="test", worlds=(pkg,))
+
+
+def test_a_required_unknown_check_fails_the_command():
+    """The fail-open shape: a required world nobody could probe used to exit 0.
+
+    ``unknown`` stays the printed label - it is honest, and distinct from
+    ``fail`` - but an unprobed requirement is not a satisfied one.
+    """
+    check = DoctorCheck(
+        "world:orbit-surgical",
+        CheckStatus.UNKNOWN,
+        "no GPU driver tooling on PATH, so the NVIDIA runtime cannot be probed",
+        fix="on a GPU host re-run `surgeval doctor --world orbit-surgical`",
+    )
+    report = DoctorReport(checks=(check,))
+    assert check.blocking
+    assert report.failures == (check,)
+    assert not report.ok
+    assert report.exit_code() == 1
+    assert "unknown" in report.render()
+
+
+def test_an_advisory_unknown_check_stays_advisory():
+    """A CPU-only machine scanning the whole shelf is still a healthy machine."""
+    check = DoctorCheck(
+        "world:orbit-surgical",
+        CheckStatus.UNKNOWN,
+        "no GPU driver tooling on PATH",
+        fix="on a GPU host re-run `surgeval doctor --world orbit-surgical`",
+        required=False,
+    )
+    report = DoctorReport(checks=(check,))
+    assert not check.blocking
+    assert report.advisories == (check,)
+    assert report.ok
+    assert report.exit_code() == 0
+
+
+def test_doctor_inspects_the_pinned_image_before_calling_a_container_world_ok(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    pkg = _container_world(digest=PINNED_DIGEST)
+    monkeypatch.setattr("or_audit.install.doctor.shutil.which", _fake_which("docker"))
+    asked: list[tuple[str, str]] = []
+
+    def present(runtime: str, reference: str) -> bool:
+        asked.append((runtime, reference))
+        return True
+
+    monkeypatch.setattr(doctor_mod, "_image_present", present)
+    report = run_doctor(packages=[pkg.id], catalog=_one_world_catalog(pkg), discovery=())
+    check = next(item for item in report.checks if item.id == f"world:{pkg.id}")
+    assert check.status is CheckStatus.OK
+    spec = pkg.install
+    assert isinstance(spec, PrebuiltContainerInstall)
+    # The exact digest-pinned reference, not the bare image name.
+    assert asked == [("/usr/bin/docker", f"{spec.image}@{PINNED_DIGEST}")]
+    assert report.exit_code() == 0
+
+
+def test_doctor_fails_a_required_container_world_whose_image_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Reviewer's probe: docker on PATH, image never pulled, and doctor said ok."""
+    pkg = _container_world(digest=PINNED_DIGEST)
+    monkeypatch.setattr("or_audit.install.doctor.shutil.which", _fake_which("docker"))
+    monkeypatch.setattr(doctor_mod, "_image_present", lambda _runtime, _reference: False)
+    report = run_doctor(packages=[pkg.id], catalog=_one_world_catalog(pkg), discovery=())
+    check = next(item for item in report.checks if item.id == f"world:{pkg.id}")
+    assert check.status is CheckStatus.FAIL
+    assert check.fix
+    assert report.exit_code() == 1
+
+
+def test_doctor_cannot_grade_a_container_world_when_the_runtime_will_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A daemon that never answered proves neither presence nor absence."""
+    pkg = _container_world(digest=PINNED_DIGEST)
+    monkeypatch.setattr("or_audit.install.doctor.shutil.which", _fake_which("docker"))
+    monkeypatch.setattr(doctor_mod, "_image_present", lambda _runtime, _reference: None)
+    report = run_doctor(packages=[pkg.id], catalog=_one_world_catalog(pkg), discovery=())
+    check = next(item for item in report.checks if item.id == f"world:{pkg.id}")
+    assert check.status is CheckStatus.UNKNOWN
+    assert "docker info" in check.fix
+    assert report.exit_code() == 1
+
+
+def test_doctor_requires_a_container_runtime_for_a_vendor_world(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Reviewer's probe: nvidia-smi present, no runtime, no image, still ok."""
+    pkg = _vendor_world()
+    monkeypatch.setattr("or_audit.install.doctor.shutil.which", _fake_which("nvidia-smi"))
+    monkeypatch.setattr(
+        doctor_mod,
+        "_image_present",
+        lambda _runtime, _reference: pytest.fail("no runtime, so nothing to inspect"),
+    )
+    report = run_doctor(packages=[pkg.id], catalog=_one_world_catalog(pkg), discovery=())
+    check = next(item for item in report.checks if item.id == f"world:{pkg.id}")
+    assert check.status is not CheckStatus.OK
+    assert "no container runtime" in check.detail
+    assert report.exit_code() == 1
+
+
+def test_doctor_inspects_the_vendor_image_when_a_runtime_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    pkg = _vendor_world()
+    monkeypatch.setattr("or_audit.install.doctor.shutil.which", _fake_which("nvidia-smi", "podman"))
+    asked: list[tuple[str, str]] = []
+
+    def present(runtime: str, reference: str) -> bool:
+        asked.append((runtime, reference))
+        return False
+
+    monkeypatch.setattr(doctor_mod, "_image_present", present)
+    absent = run_doctor(packages=[pkg.id], catalog=_one_world_catalog(pkg), discovery=())
+    check = next(item for item in absent.checks if item.id == f"world:{pkg.id}")
+    assert check.status is CheckStatus.FAIL
+    assert absent.exit_code() == 1
+    spec = pkg.install
+    assert isinstance(spec, VendorRuntimeInstall)
+    assert asked == [("/usr/bin/podman", spec.container)]
+
+    monkeypatch.setattr(doctor_mod, "_image_present", lambda _runtime, _reference: True)
+    found = run_doctor(packages=[pkg.id], catalog=_one_world_catalog(pkg), discovery=())
+    check = next(item for item in found.checks if item.id == f"world:{pkg.id}")
+    assert check.status is CheckStatus.OK
+    assert found.exit_code() == 0
+
+
+def test_the_image_probe_reads_local_metadata_and_never_pulls(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """``image inspect`` only, with a daemon outage kept distinct from absence."""
+    calls: list[tuple[str, ...]] = []
+    answers = [
+        (0, ""),
+        (1, "Error: No such image: img@sha256:0"),
+        (1, "Cannot connect to the Docker daemon at unix:///x.sock"),
+    ]
+
+    def fake_run(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(tuple(argv))
+        # Offline by construction: a timeout is set and no pull is ever run.
+        assert kwargs["timeout"] == doctor_mod.IMAGE_INSPECT_TIMEOUT_S
+        code, stderr = answers.pop(0)
+        return subprocess.CompletedProcess(list(argv), code, stdout="", stderr=stderr)
+
+    monkeypatch.setattr("or_audit.install.doctor.subprocess.run", fake_run)
+    assert doctor_mod._image_present("docker", "img@sha256:0") is True
+    assert doctor_mod._image_present("docker", "img@sha256:0") is False
+    # A runtime that could not be reached has not proven the image is absent.
+    assert doctor_mod._image_present("docker", "img@sha256:0") is None
+    assert calls == [("docker", "image", "inspect", "img@sha256:0")] * 3
+
+
+def test_the_image_probe_reports_unknown_when_the_runtime_cannot_be_run(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def explode(_argv: Sequence[str], **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(cmd="docker", timeout=1)
+
+    monkeypatch.setattr("or_audit.install.doctor.subprocess.run", explode)
+    assert doctor_mod._image_present("docker", "img@sha256:0") is None
+
+
 def test_doctor_json_report_is_machine_readable(capsys: pytest.CaptureFixture[str]):
     parser = _parser()
     args = parser.parse_args(["doctor", "--json"])
@@ -796,3 +984,89 @@ def test_worlds_without_a_subcommand_is_a_usage_error(capsys: pytest.CaptureFixt
     args = parser.parse_args(["worlds"])
     assert args.func(args) == 2
     assert "requires a subcommand" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# worlds command: dry-run/execute coherence (CliCoherence)
+# --------------------------------------------------------------------------
+
+
+class _RecordingInstall:
+    """Stands in for ``execute_install`` and records the intent it was handed."""
+
+    def __init__(self) -> None:
+        self.dry_runs: list[bool] = []
+
+    def __call__(self, plan: InstallPlan, *, dry_run: bool = True) -> InstallOutcome:
+        self.dry_runs.append(dry_run)
+        return InstallOutcome(world_id=plan.world_id, dry_run=dry_run, commands=plan.commands)
+
+
+@pytest.fixture
+def recorded_install(monkeypatch: pytest.MonkeyPatch) -> _RecordingInstall:
+    """Replace the installer so these tests can never reach a real runtime."""
+    recorder = _RecordingInstall()
+    monkeypatch.setattr(worlds_cmd, "execute_install", recorder)
+    return recorder
+
+
+def test_worlds_install_refuses_dry_run_and_execute_together(
+    recorded_install: _RecordingInstall, capsys: pytest.CaptureFixture[str]
+):
+    """The dangerous reading used to win: --dry-run --execute installed anyway.
+
+    argparse rejects the pair before a plan exists, so the installer is never
+    reached at all - not even in dry-run mode.
+    """
+    parser = _parser()
+    with pytest.raises(SystemExit) as exit_info:
+        parser.parse_args(["worlds", "install", "orbit-surgical", "--dry-run", "--execute"])
+    assert exit_info.value.code == 2
+    assert "not allowed with argument --dry-run" in capsys.readouterr().err
+    assert recorded_install.dry_runs == [], "a contradictory request must install nothing"
+
+
+def test_worlds_install_dry_run_flag_is_load_bearing(recorded_install: _RecordingInstall):
+    """--dry-run decides the outcome itself, rather than only being the default."""
+    parser = _parser()
+    args = parser.parse_args(
+        ["worlds", "install", "orbit-surgical", "--accept-vendor-eula", "--dry-run"]
+    )
+    assert args.func(args) == 0
+    assert recorded_install.dry_runs == [True]
+
+
+def test_worlds_install_defaults_to_a_dry_run(recorded_install: _RecordingInstall):
+    parser = _parser()
+    args = parser.parse_args(["worlds", "install", "orbit-surgical", "--accept-vendor-eula"])
+    assert args.func(args) == 0
+    assert recorded_install.dry_runs == [True]
+
+
+def test_worlds_install_execute_is_the_only_way_to_run_commands(
+    recorded_install: _RecordingInstall,
+):
+    parser = _parser()
+    args = parser.parse_args(
+        ["worlds", "install", "orbit-surgical", "--accept-vendor-eula", "--execute"]
+    )
+    assert args.func(args) == 0
+    assert recorded_install.dry_runs == [False]
+
+
+def test_worlds_install_execute_refuses_a_manual_plan_instead_of_tracebacking(
+    capsys: pytest.CaptureFixture[str],
+):
+    """`--execute` on a plan with manual steps is a refusal, not a stack trace.
+
+    Every source-build row is non-executable, so this is the common path, not an
+    edge: the installer's ``TaskContractError`` used to escape the command and
+    reach the user as a traceback with no exit code contract at all.
+    """
+    parser = _parser()
+    args = parser.parse_args(["worlds", "install", "steve", "--execute"])
+    assert args.func(args) == 1
+    captured = capsys.readouterr()
+    assert "install plan: steve (source-build)" in captured.out
+    assert "REFUSED:" in captured.err
+    assert "--dry-run" in captured.err, "the refusal must name the command that works"

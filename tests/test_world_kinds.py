@@ -33,9 +33,11 @@ from or_audit.eval.task import TaskSpec, WorldSpec
 from or_audit.eval.worlds import (
     DeterminismClass,
     WorldCapabilities,
+    WorldKindSpec,
     adapter_identity,
     determinism_at_least,
     list_world_kinds,
+    register_world_kind,
     require_world_kind,
     reset_default_world_kinds,
     resolve_world_capabilities,
@@ -459,3 +461,102 @@ def test_capability_resolution_and_determinism_ordering() -> None:
         is False
     )
     assert determinism_at_least(DeterminismClass.UNMEASURED, DeterminismClass.UNMEASURED) is True
+
+
+class _UnpinnableFactory:
+    """A callable object: no importable qualname, no source file of its own.
+
+    Two instances build different worlds but share a class, so no identity
+    derived from names can tell them apart.
+    """
+
+    def __init__(self, world_pin: str) -> None:
+        self.world_pin = world_pin
+
+    def __call__(self, task: TaskSpec | None = None) -> _ThirdPartyWorld:
+        del task
+        return _ThirdPartyWorld(world_pin=self.world_pin)
+
+
+def test_unidentifiable_adapter_factory_is_refused() -> None:
+    """A factory that cannot be content-pinned must refuse, not mint a name hash.
+
+    Hashing the fallback ``"anonymous"`` gave both of these the same identity,
+    so swapping one for the other moved no job head and passed every adapter pin
+    check - a digest that pins nothing is worse than no digest.
+    """
+    left, right = _UnpinnableFactory("pin-a"), _UnpinnableFactory("pin-b")
+    # Same class, different behaviour: an identity built from names cannot
+    # distinguish the two, so it must not claim to.
+    assert left().world_pin != right().world_pin
+    for factory in (left, right):
+        with pytest.raises(TaskContractError) as exc:
+            adapter_identity(factory)
+        assert "cannot be content-pinned" in str(exc.value)
+        assert "importable module:qualname" in str(exc.value)
+
+
+def test_unpinnable_adapter_is_not_registered() -> None:
+    """The refusal fires before the world kind exists, so nothing half-lands."""
+    reset_default_world_kinds()
+    with pytest.raises(TaskContractError, match="cannot be content-pinned"):
+        register_world_adapter(
+            WorldAdapter(
+                kind=THIRD_PARTY_KIND,
+                capabilities=THIRD_PARTY_CAPABILITIES,
+                factory=_UnpinnableFactory("world-a"),
+                provider="steve-adapter",
+            )
+        )
+    assert world_kind_spec(THIRD_PARTY_KIND) is None
+
+
+def test_unpinnable_plugin_is_a_failed_discovery_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from or_audit.eval.sim import base
+
+    class _Entry:
+        name = "steve"
+
+        def load(self) -> Any:
+            return WorldAdapter(
+                kind=THIRD_PARTY_KIND,
+                capabilities=THIRD_PARTY_CAPABILITIES,
+                factory=_UnpinnableFactory("world-a"),
+                provider="steve-adapter",
+            )
+
+    reset_default_world_kinds()
+    monkeypatch.setattr(base, "entry_points", lambda group: (_Entry(),))
+    report = base.discover_world_adapters(override=True)
+    assert len(report) == 1
+    assert report[0].ok is False
+    assert "cannot be content-pinned" in report[0].error
+    assert world_kind_spec(THIRD_PARTY_KIND) is None
+
+
+def test_registry_and_task_normalize_a_kind_the_same_way() -> None:
+    """A plugin kind must be reachable from the task that names it.
+
+    ``WorldSpec`` folds ``steve_sofa`` to ``steve-sofa``; the registry used to
+    store the author's spelling verbatim, so a registered kind resolved to
+    ``None`` from its own task and both the capability gate and the engine
+    dispatcher silently missed it.
+    """
+    reset_default_world_kinds()
+    capabilities = WorldCapabilities(physics=True, closed_loop=True)
+    spec = WorldKindSpec(kind="steve_sofa", capabilities=capabilities)
+    assert spec.kind == "steve-sofa"
+    register_world_kind(spec, override=True)
+
+    world = WorldSpec(kind="steve_sofa", capabilities=capabilities)
+    assert world.kind_key == "steve-sofa"
+    resolved = world_kind_spec(world.kind)
+    assert resolved is not None
+    assert resolved.kind == "steve-sofa"
+    # Either spelling reaches the same entry, from either direction.
+    assert require_world_kind("steve_sofa") is resolved
+    assert require_world_kind("steve-sofa") is resolved
+    assert world_kind_key("steve_sofa") == world_kind_key("steve-sofa") == "steve-sofa"
+    assert list(list_world_kinds()).count("steve_sofa") == 0

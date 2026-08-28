@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ast
+
 import pytest
 
 from or_audit.domain.enums import GateStatus
 from or_audit.errors import TaskContractError
 from or_audit.eval.gate_dsl import evaluate_gate
-from or_audit.eval.task import GateSpec, ThresholdBasis
+from or_audit.eval.task import GateSpec, ThresholdBasis, numeric_boundaries
 
 
 def _gate(
@@ -16,6 +18,7 @@ def _gate(
     fail_when: str = "contact_force > 1.5",
     kind: str = "force-threshold",
     threshold: float | None = 1.5,
+    unit: str = "N",
 ) -> GateSpec:
     """A gate whose cited number is the number its predicate enforces.
 
@@ -23,9 +26,13 @@ def _gate(
     two to agree: a bare ``contact_force > 1.5`` is an uncited safety number,
     which is precisely what §2.2 refuses. Pass ``threshold=None`` to build a
     boolean gate.
+
+    ``unit`` is stated on the gate as well as on the basis: the two are
+    compared unconditionally, so a gate publishing no unit against a basis in
+    N is a dropped dimension, not a shorthand.
     """
     basis = (
-        ThresholdBasis(value=threshold, unit="N", citation="fixture force envelope")
+        ThresholdBasis(value=threshold, unit=unit, citation="fixture force envelope")
         if threshold is not None
         else None
     )
@@ -35,6 +42,7 @@ def _gate(
         fail_when=fail_when,
         kind=kind,
         threshold=threshold,
+        unit=unit if threshold is not None else "",
         threshold_basis=basis,
     )
 
@@ -96,6 +104,7 @@ def test_gate_with_threshold_field() -> None:
         fail_when="max_overshoot_mm > 0.5",
         kind="spatial-exclusion",
         threshold=0.5,
+        unit="mm",
         threshold_basis=ThresholdBasis(
             value=0.5, unit="mm", citation="haptic boundary tolerance v1"
         ),
@@ -187,3 +196,174 @@ def test_gate_runtime_error_is_not_assessable() -> None:
     outcome = evaluate_gate(gate, {"contact_force": "2.0"})
     assert outcome is not None
     assert outcome.status is GateStatus.NOT_ASSESSABLE
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_raw_non_finite_signal_abstains_instead_of_exploding(value: float) -> None:
+    """A diverged solver's number is not a verdict, and not a crash either.
+
+    Original defect: ``canonical.py`` refuses to hash a non-finite float, so
+    ``resolve_binding`` raised ``ValueError: non-finite float nan cannot be
+    canonicalized`` and that escaped ``evaluate_gate`` unhandled - aborting a
+    whole job from three frames below the gate, where every other unassessable
+    condition in this system produces NOT_ASSESSABLE with a reason. The digest
+    layer's refusal was accidentally preventing a fabricated pass; here it is
+    a written-down outcome instead.
+    """
+    gate = _gate()
+    outcome = evaluate_gate(gate, {"contact_force": value})
+    assert outcome is not None
+    assert outcome.status is GateStatus.NOT_ASSESSABLE
+    assert "contact_force" in outcome.reason
+    assert "non-finite" in outcome.reason
+
+
+@pytest.mark.parametrize(
+    ("tagged", "kind"),
+    [
+        ("__nonfinite__:nan", "nan"),
+        ("__nonfinite__:+inf", "+inf"),
+        ("__nonfinite__:-inf", "-inf"),
+    ],
+)
+def test_a_recorded_non_finite_tag_abstains_and_names_the_divergence(
+    tagged: str, kind: str
+) -> None:
+    """The trajectory route reaches the same verdict as the raw-float route.
+
+    The recorder tags a non-finite float so the divergence survives into the
+    trace and its digest instead of being flattened to ``0.0``. Comparing the
+    tag against the threshold would raise and be reported as a broken
+    *expression*, and coercing it would invent a number; the gate abstains and
+    says which signal diverged and how.
+    """
+    gate = _gate()
+    outcome = evaluate_gate(gate, {"contact_force": tagged})
+    assert outcome is not None
+    assert outcome.status is GateStatus.NOT_ASSESSABLE
+    assert f"contact_force reported {kind}" in outcome.reason
+    # The tag is canonical, so its digest is kept: "we saw a nan here" is
+    # evidence, even though it supports no verdict.
+    assert [ref.digest for ref in outcome.evidence] != [""]
+
+
+def test_a_non_finite_boolean_signal_abstains_rather_than_reading_true() -> None:
+    """``bool("__nonfinite__:nan")`` is True; that would be an invented verdict."""
+    gate = _gate(
+        source="info.diverged",
+        fail_when="diverged",
+        kind="divergence",
+        threshold=None,
+    )
+    outcome = evaluate_gate(gate, {"info": {"diverged": "__nonfinite__:nan"}})
+    assert outcome is not None
+    assert outcome.status is GateStatus.NOT_ASSESSABLE
+
+
+def _numeric_gate(fail_when: str, threshold: float | None = 1.5, unit: str = "N") -> GateSpec:
+    """A gate over one input ``x``, so a predicate can be judged in isolation."""
+    payload: dict[str, object] = {
+        "id": "g",
+        "inputs": {"x": "info.x"},
+        "fail_when": fail_when,
+    }
+    if threshold is not None:
+        payload["threshold"] = threshold
+        payload["unit"] = unit
+        payload["threshold_basis"] = {"value": threshold, "unit": unit, "citation": "spec"}
+    return GateSpec.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "fail_when",
+    [
+        "x > false or x > 1.5",
+        "x > (not 999) or x > 1.5",
+        "x >= true",
+        "x < False",
+        "x <= true and x > 1.5",
+    ],
+)
+def test_ordering_against_a_boolean_is_refused(fail_when: str) -> None:
+    """An ordering comparison against a boolean is an uncited numeric boundary.
+
+    The DSL evaluates Python ordering, where ``False`` is 0. ``x > false or
+    x > 1.5`` with ``threshold=1.5`` was accepted and returned FAIL at 0.5:
+    the gate enforced a boundary at 0 while publishing a 1.5 N citation, and
+    the threshold check could not see it, because reading a boolean as a
+    number would refuse the honest ``unsafe == true`` gate.
+    """
+    with pytest.raises(TaskContractError, match="Python ordering"):
+        _numeric_gate(fail_when)
+
+
+def test_ordering_against_a_boolean_is_refused_without_a_threshold_too() -> None:
+    """A gate declaring no threshold still may not enforce the boolean-as-0 bound.
+
+    Without a threshold there is not even a citation to contradict: the
+    predicate applied a boundary at 0 that no field on the gate mentions, and
+    the "uncited inline number" check saw nothing to report.
+    """
+    with pytest.raises(TaskContractError, match="Python ordering"):
+        _numeric_gate("x > false", threshold=None)
+
+
+def test_equality_against_a_boolean_is_still_legal() -> None:
+    """The boolean-gate pattern is the reason booleans are not read as numbers."""
+    for fail_when in ("x == true", "x != false", "x == True", "x != False"):
+        gate = _numeric_gate(fail_when, threshold=None)
+        outcome = evaluate_gate(gate, {"info": {"x": True}})
+        assert outcome is not None
+
+
+def test_two_sided_inline_bounds_are_still_refused() -> None:
+    """Both spellings of a two-sided predicate enforce a number no basis cites."""
+    with pytest.raises(TaskContractError, match=r"enforces \[999\.0\]"):
+        _numeric_gate("1.5 < x < 999")
+    with pytest.raises(TaskContractError, match=r"enforces \[-999\.0\]"):
+        _numeric_gate("x < -999 or x > 1.5")
+
+
+@pytest.mark.parametrize("fail_when", ["x > 1", "x >= 1.0", "x != 1", "not x > 1"])
+def test_int_float_and_negation_spellings_share_one_boundary(fail_when: str) -> None:
+    """1 and 1.0 are the same cited number, and ``not`` does not hide the compare."""
+    assert numeric_boundaries(ast.parse(fail_when, mode="eval")) == {1.0}
+    assert _numeric_gate(fail_when, threshold=1.0).threshold == 1.0
+
+
+def test_unknown_callable_is_refused() -> None:
+    """``abs(x)`` is refused for the unbound name, so no boundary escapes unread."""
+    with pytest.raises(TaskContractError, match="unknown signal"):
+        _numeric_gate("abs(x) > 1.5")
+
+
+def test_a_dropped_or_invented_unit_is_refused() -> None:
+    """Unit agreement is not skippable by leaving one side empty.
+
+    Guarding the comparison on both sides being truthy accepted a gate that
+    published no unit against a basis in N (the dimension is dropped from the
+    published claim) and its inverse (the dimension is invented), both while
+    keeping the cited value.
+    """
+    for gate_unit, basis_unit in (("", "N"), ("N", "")):
+        with pytest.raises(TaskContractError, match="drops or"):
+            GateSpec.model_validate(
+                {
+                    "id": "g",
+                    "inputs": {"x": "info.x"},
+                    "fail_when": "x > 1.5",
+                    "threshold": 1.5,
+                    "unit": gate_unit,
+                    "threshold_basis": {
+                        "value": 1.5,
+                        "unit": basis_unit,
+                        "citation": "spec",
+                    },
+                }
+            )
+
+
+def test_a_dimensionless_threshold_is_legal() -> None:
+    """Two empty units agree: a ratio has no physical dimension to publish."""
+    gate = _numeric_gate("x > 1.5", unit="")
+    assert gate.unit == ""

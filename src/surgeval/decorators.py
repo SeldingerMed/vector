@@ -52,6 +52,12 @@ class AgentBinding:
     ``schema_wildcard`` is the honesty flag: ``True`` means the class declared no
     schemas, so the capability binds to any task on ``interface`` without the
     kernel ever checking that the model speaks that task's data shapes.
+
+    There is deliberately no single ``kind``/``entrypoint`` field: a class that
+    implements both ``act`` and ``predict`` has two runtime identities, and a
+    stored one would be the primary mode's, which is what let a predictor package
+    ship as a ``policy``. Ask for one with :meth:`kind_for` and
+    :meth:`entrypoint_for`, or resolve it with :func:`publication_mode`.
     """
 
     cls_name: str
@@ -65,8 +71,13 @@ class AgentBinding:
     version: str
     #: Explicit ``kind=`` from the decorator; empty means "derive it from the mode".
     declared_kind: str
-    kind: str
-    entrypoint_symbol: str
+
+    def identities(self) -> tuple[InteractionMode, ...]:
+        """Return one representative mode per distinct runtime identity."""
+        seen: dict[str, InteractionMode] = {}
+        for mode in self.interaction_modes:
+            seen.setdefault(entrypoint_symbol_for(mode), mode)
+        return tuple(seen.values())
 
     def capability_for_interface(self, interface: str) -> CapabilitySpec:
         """Return this capability rebound to ``interface`` (re-validated)."""
@@ -74,6 +85,21 @@ class AgentBinding:
             return self.capability
         payload = self.capability.model_dump()
         payload["interface"] = interface
+        return _capability(payload)
+
+    def published_capability(
+        self, mode: InteractionMode, interface: str | None = None
+    ) -> CapabilitySpec:
+        """Return this capability narrowed to what one entrypoint can drive.
+
+        A package names a single factory, so it may only advertise the modes that
+        factory serves. Anything wider is a claim the package cannot honour: the
+        task binds on the mode, then refuses on the kind the same package
+        declared.
+        """
+        payload = self.capability.model_dump()
+        payload["interface"] = interface or self.capability.interface
+        payload["interaction_modes"] = served_modes(self, mode)
         return _capability(payload)
 
     def entrypoint_for(self, mode: InteractionMode) -> str:
@@ -100,6 +126,62 @@ def agent_kind_for(mode: InteractionMode) -> str:
         if mode is InteractionMode.CLOSED_LOOP
         else AgentKind.FROZEN_MODEL.value
     )
+
+
+def served_modes(binding: AgentBinding, mode: InteractionMode) -> tuple[InteractionMode, ...]:
+    """Return the declared modes one entrypoint symbol can actually drive.
+
+    ``predict(item)`` speaks single-turn, counterfactual, and interactive through
+    the same factory, so publishing one of them publishes all three. ``act()``
+    speaks closed-loop and nothing else.
+    """
+    symbol = entrypoint_symbol_for(mode)
+    return tuple(
+        candidate
+        for candidate in binding.interaction_modes
+        if entrypoint_symbol_for(candidate) == symbol
+    )
+
+
+def publication_mode(
+    binding: AgentBinding,
+    requested: InteractionMode | str | None,
+    *,
+    option: str = "mode=",
+) -> InteractionMode:
+    """Return the one mode a package built from ``binding`` may declare.
+
+    A package carries a single ``kind`` and a single entrypoint, so it can only
+    honestly advertise the modes that pair reaches. A class implementing both
+    ``act`` and ``predict`` spans two such identities, and publishing the union
+    emits a ``policy``/``load_policy`` package that also claims predictor modes —
+    which every predictor task then rejects at bind time, after the mode check
+    already passed. Refuse instead of picking one silently; ``option`` names the
+    caller's way of choosing (``--mode`` for the CLI, ``mode=`` for the SDK).
+    """
+    if requested is not None:
+        try:
+            mode = InteractionMode(requested)
+        except ValueError as exc:
+            raise TaskContractError(f"unknown interaction mode {requested!r}") from exc
+        if not binding.supports(mode):
+            declared = ", ".join(item.value for item in binding.interaction_modes)
+            raise TaskContractError(
+                f"requested mode {mode.value!r} is not one of the modes "
+                f"{binding.cls_name} declares ({declared}); implement the matching "
+                "method, or ask for a mode it has"
+            )
+        return mode
+    if len(binding.identities()) > 1:
+        choices = ", ".join(item.value for item in binding.interaction_modes)
+        raise TaskContractError(
+            f"{binding.cls_name} implements {' and '.join(binding.methods)}, which are two "
+            "different runtime identities: act() publishes as a closed-loop policy "
+            "(load_policy) and predict() as a predictor (load_predictor). One package "
+            f"declares one identity, so pass {option} with one of: {choices}. Publish "
+            "twice to ship both."
+        )
+    return binding.primary_mode
 
 
 def capability_toml(capability: CapabilitySpec) -> str:
@@ -220,8 +302,6 @@ def _build_binding(
         agent_id=agent_id if "/" in agent_id else f"custom/{agent_id}",
         version=version,
         declared_kind=kind,
-        kind=kind or agent_kind_for(primary),
-        entrypoint_symbol=entrypoint_symbol_for(primary),
     )
 
 
@@ -246,7 +326,7 @@ def agent(
     slug for tasks that accept a narrower kind than the method shape implies —
     ``world-model``, ``vlm``, ``panel``.
     """
-    mode = (
+    declared_mode = (
         None
         if interaction_mode is None
         else (
@@ -260,25 +340,37 @@ def agent(
         binding = _build_binding(
             cls,
             interface=interface,
-            explicit_mode=mode,
+            explicit_mode=declared_mode,
             agent_id=agent_id,
             version=version,
             kind=kind,
         )
 
-        def to_agent_package(override_interface: str | None = None) -> AgentPackage:
+        def to_agent_package(
+            override_interface: str | None = None,
+            *,
+            mode: InteractionMode | str | None = None,
+        ) -> AgentPackage:
+            """Describe this class as an in-memory package for one interaction mode.
+
+            ``mode`` is required when the class implements both ``act`` and
+            ``predict``: the package it returns names one entrypoint, so it must
+            not claim the other identity's modes. Single-identity classes need no
+            argument, which keeps the ordinary decorator path one line.
+            """
+            published = publication_mode(binding, mode)
             iface = override_interface or binding.interface
             return AgentPackage(
                 format_version="1",
                 id=binding.agent_id,
                 agent_version=binding.version,
-                kind=binding.kind,
-                capabilities=(binding.capability_for_interface(iface),),
+                kind=binding.kind_for(published),
+                capabilities=(binding.published_capability(published, iface),),
                 weights_path="weights.json",
                 weights_pin=EMPTY_FILE_SHA256,
                 runtime=RuntimeDescriptor(
                     kind=RuntimeKind.LOCAL,
-                    entrypoint=f"runner.py:{binding.entrypoint_symbol}",
+                    entrypoint=f"runner.py:{binding.entrypoint_for(published)}",
                 ),
             )
 
@@ -326,9 +418,25 @@ def describe_agent(target: Any) -> str:
         f"  interface    {binding.interface}",
         f"  methods      {', '.join(signatures[name] for name in binding.methods)}",
         f"  modes        {', '.join(mode.value for mode in binding.interaction_modes)}",
-        f"  kind         {binding.kind}",
-        f"  entrypoint   runner.py:{binding.entrypoint_symbol}",
     ]
+    # A class with one runtime identity states it; a class with both methods has
+    # two, and naming only the primary one is what let a predictor ship as a
+    # policy. List them instead, and say who chooses.
+    identities = binding.identities()
+    if len(identities) == 1:
+        lines.append(f"  kind         {binding.kind_for(identities[0])}")
+        lines.append(f"  entrypoint   runner.py:{binding.entrypoint_for(identities[0])}")
+    else:
+        for mode in identities:
+            served = ", ".join(item.value for item in served_modes(binding, mode))
+            lines.append(
+                f"  identity     kind {binding.kind_for(mode)} via "
+                f"runner.py:{binding.entrypoint_for(mode)} ({served})"
+            )
+        lines.append(
+            "               two identities: publishing picks one "
+            "(`init-agent --mode`, `to_agent_package(mode=...)`)"
+        )
     if binding.schema_wildcard:
         lines.extend(
             [
@@ -362,4 +470,6 @@ __all__ = [
     "describe_agent",
     "entrypoint_symbol_for",
     "is_agent",
+    "publication_mode",
+    "served_modes",
 ]

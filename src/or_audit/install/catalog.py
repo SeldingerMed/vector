@@ -179,6 +179,15 @@ class AuditedEnv(_Frozen):
     #: not resolve at the pin is a fabricated citation, not a typo.
     path: str
     signals: tuple[WorldSignal, ...] = ()
+    #: Line-pinned readings that state an *empty* signal surface, for an env
+    #: that publishes nothing. Only meaningful because they are checked
+    #: exactly like signals: Surgical Gym's task writes an L2 distance to
+    #: ``rew_buf`` and terminates on ``progress_buf``, and recording those two
+    #: sites is what makes "nothing is published here" a citation rather than
+    #: a silence. Without it ``scripts/check_world_signals.py`` fetched the
+    #: tree, read not one line, and printed "0 signal(s) resolved" - a pass
+    #: earned by omission, which a zero-byte file was enough to obtain.
+    absence_markers: tuple[WorldSignal, ...] = ()
     note: str = ""
 
     @property
@@ -211,6 +220,44 @@ class AuditedEnv(_Frozen):
                 "unit as upstream actually produces it (e.g. 'scaled-N' when a scaling "
                 "factor is applied, 'contacts' for a count), or record the signal as "
                 "non-physical if the quantity is not a measurement."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _absence_markers_are_checkable_and_mean_absence(self) -> Self:
+        """An absence record is a citation, so it has to be checkable.
+
+        Unstated absence let a zero-signal env pass on an empty file. Replacing
+        it with an *unchecked* assertion would be the same defect in better
+        clothes, so every marker must pin a line for
+        ``scripts/check_world_signals.py`` to resolve at the pin. And a marker
+        claims nothing reaches ``info``/``extras``, which is false if the env
+        also records published signals - a key that is published belongs in
+        ``signals``, kind and all.
+        """
+        if not self.absence_markers:
+            return self
+        if self.signals:
+            raise TaskContractError(
+                f"audited env {self.env_id!r}: records both signals "
+                f"{[s.key for s in self.signals]} and absence_markers "
+                f"{[m.key for m in self.absence_markers]}. absence_markers state that this "
+                "env's signal surface is empty; a key it does publish belongs in signals."
+            )
+        unpinned = [marker.key for marker in self.absence_markers if not marker.line]
+        if unpinned:
+            raise TaskContractError(
+                f"audited env {self.env_id!r}: absence_marker(s) {unpinned} pin no line, so "
+                "the citation checker cannot resolve them and the recorded absence stays "
+                "unverified. Record the line each was read at, or drop the marker."
+            )
+        published = [marker.key for marker in self.absence_markers if marker.published]
+        if published:
+            raise TaskContractError(
+                f"audited env {self.env_id!r}: absence_marker(s) {published} are marked "
+                "published, which contradicts the absence they record. A marker is a site "
+                "that computes something and does not publish it; set published = false, or "
+                "record it as a signal."
             )
         return self
 
@@ -567,6 +614,12 @@ class WorldPackage(_Frozen):
                     )
                     lines.append(
                         f"      - {signal.key}: {signal.kind.value}{unit}{flags}{pinned}  {at}"
+                    )
+                for marker in env.absence_markers:
+                    where = marker.path or env.path
+                    lines.append(
+                        f"      - (empty surface) {marker.key}: {marker.kind.value}, "
+                        f"computed and never published  {where}:{marker.line}"
                     )
         else:
             lines.append("  audited     no env read at the pin; constrains nothing")

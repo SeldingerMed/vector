@@ -142,7 +142,11 @@ def _wrap(args: argparse.Namespace) -> int:
             parameters=_parameters(args.params),
         )
         result = scaffold_wrap(request, Path(args.out))
-    except TaskContractError as exc:
+    except (TaskContractError, argparse.ArgumentTypeError) as exc:
+        # `_parameters` runs here rather than as an argparse `type=` callback,
+        # so its refusals surface after parsing is finished. Uncaught, a plain
+        # `--param typo` printed a traceback instead of the refusal this
+        # command promises for every other contract violation.
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 1
     print(f"wrapped: {request.env_id} -> {result.root}")

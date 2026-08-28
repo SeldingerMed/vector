@@ -33,11 +33,18 @@ from __future__ import annotations
 import json
 import math
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Protocol, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
 
 from or_audit.audit.canonical import digest
 from or_audit.errors import ScoreContractError, TaskContractError
@@ -52,6 +59,21 @@ Sha256Hex = Annotated[str, StringConstraints(pattern=r"^(|[0-9a-f]{64})$")]
 
 class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class GateRef(Protocol):
+    """One gate a shelf world actually runs, as this module needs to see it.
+
+    Structural rather than imported: :mod:`or_audit.eval.shelf` already imports
+    this module to gate its cross-world collapse, so the manifest type it owns
+    (``ShelfGateRef``) cannot be imported back the other way.
+    """
+
+    @property
+    def gate_id(self) -> str: ...
+
+    @property
+    def unit(self) -> str: ...
 
 
 class DeclaredMatch(_Frozen):
@@ -207,6 +229,22 @@ class EquivalenceArtifact(_Frozen):
     external_referent: ExternalReferent
     published_as: Publication
 
+    @model_validator(mode="after")
+    def _distinct_worlds(self) -> Self:
+        """One world is not a pair; comparing it with itself measures nothing.
+
+        Left unchecked, ``("w", "w")`` satisfies every per-world check (both
+        halves resolve to the same shelf entry, the referent agrees with itself
+        perfectly) and unlocks a "cross-world" ordering computed from one world.
+        """
+        first, second = self.world_pair
+        if first == second:
+            raise TaskContractError(
+                f"equivalence artifact names world '{first}' twice: comparability is a claim "
+                "about two distinct worlds, and a world is trivially comparable with itself"
+            )
+        return self
+
 
 class EquivalenceVerdict(_Frozen):
     """Outcome of :func:`validate_equivalence`, naming exactly what failed."""
@@ -221,6 +259,9 @@ class EquivalenceVerdict(_Frozen):
     failures: tuple[str, ...]
     #: Weakest per-world rank correlation against the referent, when computable.
     computed_rank_correlation: float | None = None
+    #: Whether the artifact was checked against a shelf's real gate manifest.
+    #: False means the gate claims were only checked against themselves.
+    shelf_gates_checked: bool = False
 
     @property
     def failed_requirements(self) -> tuple[str, ...]:
@@ -293,7 +334,17 @@ def _referent_failures(artifact: EquivalenceArtifact) -> tuple[tuple[str, ...], 
         )
     for world_id in artifact.world_pair:
         ranking = referent.world_rankings.get(world_id)
-        if ranking is not None and set(ranking) != set(subjects):
+        if ranking is None:
+            continue
+        # A world ranking must be a permutation of the referent's subjects. Set
+        # equality alone admits a tuple that repeats one, and the position map
+        # below would then keep the last occurrence only - silently moving every
+        # other subject while still producing a correlation that can pass.
+        if len(set(ranking)) != len(ranking):
+            reasons.append(
+                f"external referent: world '{world_id}' repeats a subject in its ranking"
+            )
+        elif len(ranking) != len(subjects) or set(ranking) != set(subjects):
             reasons.append(
                 f"external referent: world '{world_id}' ranks a different subject set than "
                 f"the referent does"
@@ -339,8 +390,59 @@ def _publication_failures(artifact: EquivalenceArtifact) -> tuple[str, ...]:
     return ()
 
 
-def validate_equivalence(artifact: EquivalenceArtifact) -> EquivalenceVerdict:
-    """Check the four §2.6 requirements and the artifact's own publication pin."""
+def _shelf_gate_failures(
+    artifact: EquivalenceArtifact, world_gates: Mapping[str, Sequence[GateRef]]
+) -> tuple[str, ...]:
+    """Check the claimed gates against the gates the shelf worlds really run.
+
+    Internal consistency is not coverage: an artifact can calibrate a gate no
+    task declares, or cover one hard gate while omitting the others, and still
+    read as a clean comparability claim. Matching is by id *and* unit, because
+    an identically named gate in another unit is a different gate.
+    """
+    reasons: list[str] = []
+    claimed = {gate.gate_id: gate.unit for gate in artifact.gate_equivalence}
+    for world_id in artifact.world_pair:
+        manifest = world_gates.get(world_id)
+        if manifest is None:
+            reasons.append(
+                f"shelf gates: no gate manifest for world '{world_id}'; the artifact's gate "
+                "claims cannot be checked against what that world runs"
+            )
+            continue
+        declared = {ref.gate_id: ref.unit for ref in manifest}
+        for gate_id, unit in sorted(declared.items()):
+            if gate_id not in claimed:
+                reasons.append(
+                    f"shelf gates: world '{world_id}' runs hard gate '{gate_id}' ({unit!r}), "
+                    "which the artifact claims no equivalence for"
+                )
+            elif claimed[gate_id] != unit:
+                reasons.append(
+                    f"shelf gates: world '{world_id}' declares gate '{gate_id}' in unit "
+                    f"{unit!r} but the artifact maps it to {claimed[gate_id]!r}"
+                )
+        for gate_id in sorted(set(claimed) - set(declared)):
+            reasons.append(
+                f"shelf gates: the artifact claims gate '{gate_id}', which world "
+                f"'{world_id}' does not declare"
+            )
+    return tuple(reasons)
+
+
+def validate_equivalence(
+    artifact: EquivalenceArtifact,
+    *,
+    world_gates: Mapping[str, Sequence[GateRef]] | None = None,
+) -> EquivalenceVerdict:
+    """Check the four §2.6 requirements and the artifact's own publication pin.
+
+    ``world_gates`` is the shelf's per-world gate manifest. Without it the
+    artifact is only checked against itself, and the verdict says as much
+    through :attr:`EquivalenceVerdict.shelf_gates_checked`: a claim about gates
+    the shelf never runs is not evidence of comparability, so no caller may
+    unlock cross-world ordering on an unchecked verdict.
+    """
     task_failures = artifact.task_equivalence.failures()
     gate_failures: list[str] = []
     if not artifact.gate_equivalence:
@@ -348,8 +450,16 @@ def validate_equivalence(artifact: EquivalenceArtifact) -> EquivalenceVerdict:
             "gate equivalence: no gate is mapped; a comparability claim over a shelf "
             "with hard gates must map every gate to a physical quantity and unit"
         )
+    seen: set[str] = set()
     for gate in artifact.gate_equivalence:
+        # One gate, one mapping: duplicates would collapse in the coverage check.
+        if gate.gate_id in seen:
+            gate_failures.append(
+                f"gate equivalence: gate '{gate.gate_id}' is mapped more than once"
+            )
+        seen.add(gate.gate_id)
         gate_failures.extend(gate.failures(artifact.world_pair))
+    shelf_gate_failures = () if world_gates is None else _shelf_gate_failures(artifact, world_gates)
     scenario_failures = artifact.scenario_alignment.failures()
     referent_failures, computed = _referent_failures(artifact)
     publication_failures = _publication_failures(artifact)
@@ -357,13 +467,16 @@ def validate_equivalence(artifact: EquivalenceArtifact) -> EquivalenceVerdict:
     requirements = {
         "task_equivalence": not task_failures,
         "gate_equivalence": not gate_failures,
-        "scenario_alignment": not scenario_failures,
-        "external_referent": not referent_failures,
-        "publication": not publication_failures,
     }
+    if world_gates is not None:
+        requirements["shelf_gates"] = not shelf_gate_failures
+    requirements["scenario_alignment"] = not scenario_failures
+    requirements["external_referent"] = not referent_failures
+    requirements["publication"] = not publication_failures
     failures = (
         *task_failures,
         *gate_failures,
+        *shelf_gate_failures,
         *scenario_failures,
         *referent_failures,
         *publication_failures,
@@ -377,6 +490,7 @@ def validate_equivalence(artifact: EquivalenceArtifact) -> EquivalenceVerdict:
         requirements=requirements,
         failures=failures,
         computed_rank_correlation=computed,
+        shelf_gates_checked=world_gates is not None,
     )
 
 
@@ -424,15 +538,22 @@ def load_equivalence_artifact(path: Path | str) -> EquivalenceArtifact:
     if not source.is_file():
         raise TaskContractError(f"missing equivalence artifact: {source}")
     text = source.read_text(encoding="utf-8")
-    if source.suffix == ".toml":
-        raw: Any = tomllib.loads(text)
-    elif source.suffix == ".json":
-        raw = json.loads(text)
-    else:
+    try:
+        if source.suffix == ".toml":
+            raw: Any = tomllib.loads(text)
+        elif source.suffix == ".json":
+            raw = json.loads(text)
+        else:
+            raise TaskContractError(
+                f"an equivalence artifact is .toml or .json, got {source.suffix or source.name!r}"
+            )
+    except (tomllib.TOMLDecodeError, json.JSONDecodeError) as exc:
+        # A syntax error is a contract failure like any other, and the caller
+        # (surgeval shelf equivalence check) reports refusals, not tracebacks.
         raise TaskContractError(
-            f"an equivalence artifact is .toml or .json, got {source.suffix or source.name!r}"
-        )
+            f"equivalence artifact {source} is not parseable {source.suffix.lstrip('.')}: {exc}"
+        ) from exc
     try:
         return EquivalenceArtifact.model_validate(raw)
-    except ValidationError as exc:
+    except (ValidationError, TaskContractError) as exc:
         raise TaskContractError(f"equivalence artifact {source} failed validation: {exc}") from exc

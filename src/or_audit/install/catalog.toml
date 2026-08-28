@@ -676,11 +676,31 @@ pinned_version = "2022.2.1"
 env_id = "surgicalgym.tasks.psm:PSM"
 path = "surgicalgym/tasks/psm.py"
 note = """
-Audited and empty on purpose: there is no extras[...] assignment anywhere in the task. \
-calculate_metrics writes an L2 distance reward to rew_buf (line 266), is_done resets on \
-progress_buf >= max_episode_length only (line 273), and the target geometry has \
-collision explicitly disabled (line 134). Nothing physical is computed, let alone \
-published.
+Audited and empty on purpose: there is no extras[...] assignment anywhere in the task, and \
+the target geometry has collision explicitly disabled (line 134), so even a synthesized \
+contact signal would be meaningless. The two absence_markers below are the reward and \
+termination sites that reading was based on; they are checked at the pin like any other \
+citation, so this emptiness is stated rather than inferred from an absent signals table.
+"""
+
+[[worlds.envs.absence_markers]]
+key = "rew_buf"
+kind = "bookkeeping"
+line = 266
+published = false
+note = """
+calculate_metrics writes an L2 distance-to-target reward into rew_buf and nothing else. A \
+reward tensor is not published to extras and is not a measurement.
+"""
+
+[[worlds.envs.absence_markers]]
+key = "progress_buf"
+kind = "bookkeeping"
+line = 273
+published = false
+note = """
+is_done resets on progress_buf >= max_episode_length - 1 only: no contact, force, or \
+penetration term participates in termination.
 """
 
 [[worlds]]

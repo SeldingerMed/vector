@@ -6,11 +6,15 @@ here rather than described:
 * **No in-place mutation, ever.** :func:`search_scenarios` derives new
   ``ScenarioSpec``/``PerturbationSpec`` values from the declared ones and
   verifies the source package's ``tree_digest`` is unchanged when it returns.
-* **Nothing scored runs against an unfrozen adaptation.**
+* **Nothing scored runs against an unfrozen or edited adaptation.**
   :func:`freeze_adapted_package` writes a *new* versioned, digest-pinned
-  package whose provenance records ``authored_by: agent`` and
-  ``public_leaderboard_eligible: false``; :func:`assert_frozen_before_scoring`
-  re-hashes the directory, so an edit after freezing is not scoreable.
+  package whose ``provenance.json`` records ``authored_by: agent``,
+  ``public_leaderboard_eligible: false``, a self-pin over its own content, and
+  the identity of the parent's verifier. The kernel re-derives all of that in
+  :func:`or_audit.eval.provenance.assert_scoreable_package`, which
+  :func:`or_audit.eval.runner.run_job` calls before it scores anything, so an
+  edit after freezing is not scoreable and a quarantined package is refused at
+  public-leaderboard ingestion.
 
 The search aims at the hardest *honest* test. A candidate whose abstention rate
 exceeds the budget is refused rather than celebrated: a trial the verifier
@@ -19,7 +23,15 @@ would reward breaking the instrumentation.
 
 The concierge can author scenarios. It can never author verifiers:
 :func:`assert_verifier_untouched` refuses any difference in the verifier file,
-gates, metrics, headline, or projection between parent and frozen package.
+gates, metrics, headline, or projection between parent and frozen package, and
+the parent's verifier identity is pinned in provenance so the same refusal
+survives the parent package being deleted.
+
+The quarantine is not tamper-proof and is not claimed to be: the package sits
+on the operator's disk, and deleting ``provenance.json`` makes an adaptation
+indistinguishable from a hand-authored package. What is enforced is that a
+package *presenting* provenance must have provenance that checks out, so the
+dishonest path requires destroying the evidence rather than editing a gate.
 """
 
 from __future__ import annotations
@@ -40,6 +52,13 @@ from or_audit.errors import TaskContractError
 from or_audit.eval.contracts import PerturbationSpec, ScenarioSpec, Slug
 from or_audit.eval.integrity import file_sha256, tree_digest
 from or_audit.eval.loader import load_task
+from or_audit.eval.provenance import (
+    AUTHORED_BY_AGENT,
+    PROVENANCE_FILENAME,
+    assert_scoreable_package,
+    provenance_record,
+    verifier_files,
+)
 from or_audit.eval.task import TaskSpec
 
 #: Keys :func:`freeze_adapted_package` is permitted to change in ``task.toml``.
@@ -52,8 +71,6 @@ _MUTABLE_TASK_KEYS: Final[frozenset[str]] = frozenset(
 _CACHE_IGNORES: Final = shutil.ignore_patterns(
     ".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", "*.pyc", "*.pyo"
 )
-
-PROVENANCE_FILENAME: Final = "provenance.json"
 
 
 class _Frozen(BaseModel):
@@ -176,7 +193,10 @@ class FrozenPackage(_Frozen):
     parent_task_id: str
     parent_task_version: str
     parent_digest: str
-    authored_by: Annotated[str, StringConstraints(min_length=1, max_length=80)] = "agent"
+    #: Authorship is a class, not a label. Fixed to ``agent`` because the
+    #: quarantine below keys off it: a package free to call itself
+    #: human-authored would be a package free to leave its own quarantine.
+    authored_by: str = AUTHORED_BY_AGENT
     public_leaderboard_eligible: bool = False
     scenario_ids: tuple[str, ...] = ()
     perturbation_ids: tuple[str, ...] = ()
@@ -189,6 +209,14 @@ class FrozenPackage(_Frozen):
                 f"{self.task_id}: an adaptation is eligible only after promotion "
                 "through the same Tier-1 conformance any wrap faces; the authoring "
                 "step cannot grant it to itself"
+            )
+        if self.authored_by != AUTHORED_BY_AGENT:
+            raise TaskContractError(
+                f"refusing to record authored_by={self.authored_by!r} for "
+                f"{self.task_id}: this package was authored by the concierge, and "
+                f"the exclusion of agent-authored packages from public leaderboards "
+                f"is enforced on that field. The authorship class is "
+                f"{AUTHORED_BY_AGENT!r} and is not a caller's choice"
             )
         return self
 
@@ -430,12 +458,6 @@ def _bump_version(version: str) -> str:
     return bumped
 
 
-def _verifier_files(task: TaskSpec) -> tuple[str, ...]:
-    entrypoint = task.verifier.entrypoint
-    module = entrypoint.split(":", 1)[0] if entrypoint else ""
-    return tuple(name for name in (module, "verifier.toml") if name)
-
-
 def assert_verifier_untouched(parent_dir: Path | str, frozen_dir: Path | str) -> None:
     """Refuse any difference in the verifier, its gates, or the projection.
 
@@ -447,7 +469,7 @@ def assert_verifier_untouched(parent_dir: Path | str, frozen_dir: Path | str) ->
     frozen_root = Path(frozen_dir)
     parent = load_task(parent_root)
     frozen = load_task(frozen_root)
-    for name in _verifier_files(parent):
+    for name in verifier_files(parent):
         parent_file = parent_root / name
         frozen_file = frozen_root / name
         if not parent_file.is_file() and not frozen_file.is_file():
@@ -495,6 +517,10 @@ def assert_frozen_before_scoring(package: object) -> FrozenPackage:
             f"refusing to score {package.task_id}: package at {package.path} was "
             f"edited after freezing (pinned {package.digest}, now {actual})"
         )
+    # The in-memory receipt is not the boundary; the kernel's is. Running it here
+    # means the two agree, so a caller holding a FrozenPackage learns about a
+    # tampered verifier at the same place the runner would refuse it.
+    assert_scoreable_package(Path(package.path))
     return package
 
 
@@ -504,7 +530,6 @@ def freeze_adapted_package(
     scenarios: Sequence[ScenarioSpec],
     perturbations: Sequence[PerturbationSpec] = (),
     out: Path | str,
-    authored_by: str = "agent",
 ) -> FrozenPackage:
     """Write a new, versioned, digest-pinned package for an adaptation."""
     root = Path(task_dir).resolve()
@@ -561,27 +586,6 @@ def freeze_adapted_package(
 
     scenario_ids = tuple(scenario.id for scenario in scenarios)
     perturbation_ids = tuple(perturbation.id for perturbation in perturbations)
-    provenance = {
-        "format_version": "1",
-        "authored_by": authored_by,
-        "public_leaderboard_eligible": False,
-        "quarantine_reason": (
-            "agent-authored scenario package: excluded from public leaderboards "
-            "until promoted through the same Tier-1 conformance any wrap faces"
-        ),
-        "parent": {
-            "task_id": parent.id,
-            "task_version": parent.task_version,
-            "digest": parent_digest,
-        },
-        "task_id": parent.id,
-        "task_version": data["task_version"],
-        "scenarios": list(scenario_ids),
-        "perturbations": list(perturbation_ids),
-    }
-    (target / PROVENANCE_FILENAME).write_text(
-        json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
 
     frozen = load_task(target)
     if frozen.task_version == parent.task_version:
@@ -590,6 +594,25 @@ def freeze_adapted_package(
             "task_version, so two different packages would answer to one identity"
         )
     assert_verifier_untouched(root, target)
+
+    # Written last: the record pins the package's own content, so every other
+    # file has to be final before it can be computed.
+    provenance = provenance_record(
+        parent=parent,
+        parent_dir=root,
+        parent_digest=parent_digest,
+        task_version=frozen.task_version,
+        package_dir=target,
+        scenarios=scenario_ids,
+        perturbations=perturbation_ids,
+    )
+    (target / PROVENANCE_FILENAME).write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    # Freezing is only done when the boundary that guards scoring accepts what
+    # was written: a package whose provenance the kernel would refuse is not a
+    # frozen package, it is an unscoreable directory with a receipt.
+    assert_scoreable_package(target)
     return FrozenPackage(
         path=str(target),
         task_id=frozen.id,
@@ -598,7 +621,7 @@ def freeze_adapted_package(
         parent_task_id=parent.id,
         parent_task_version=parent.task_version,
         parent_digest=parent_digest,
-        authored_by=authored_by,
+        authored_by=AUTHORED_BY_AGENT,
         scenario_ids=scenario_ids,
         perturbation_ids=perturbation_ids,
     )

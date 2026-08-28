@@ -113,6 +113,75 @@ class TestSignalEligibility:
         assert "dynamic_force_on_gallbladder" not in surfaces["pick_and_place"]
 
 
+class TestAbsenceMarkers:
+    """An empty signal surface has to be *stated*, and the statement checked.
+
+    ``surgical-gym`` records one audited env that publishes nothing. Recording
+    that by leaving ``signals`` empty made the citation checker fetch the tree,
+    read not one line, and print "0 signal(s) resolved" - a zero-byte file was
+    enough to earn it. ``absence_markers`` turns the emptiness into line-pinned
+    citations that ``scripts/check_world_signals.py`` resolves at the pin.
+    """
+
+    def test_the_empty_surface_is_stated_with_pinned_lines(self):
+        (env,) = world_package("surgical-gym").envs
+        assert env.signals == ()
+        assert {(m.key, m.line) for m in env.absence_markers} == {
+            ("rew_buf", 266),
+            ("progress_buf", 273),
+        }
+
+    def test_a_marker_does_not_make_the_env_gate_eligible(self):
+        """A marker records what upstream computes and never publishes."""
+        (env,) = world_package("surgical-gym").envs
+        assert env.gate_signals == ()
+        assert not env.safety_eligible
+        assert all(not marker.published for marker in env.absence_markers)
+
+    def test_a_marker_that_pins_no_line_is_refused(self):
+        """An unchecked absence claim is the same defect in better clothes."""
+        with pytest.raises(TaskContractError, match="pin no line"):
+            AuditedEnv(
+                env_id="e",
+                path="e.py",
+                absence_markers=(
+                    WorldSignal(key="rew_buf", kind=SignalKind.BOOKKEEPING, published=False),
+                ),
+            )
+
+    def test_a_published_marker_is_refused(self):
+        with pytest.raises(TaskContractError, match="marked published"):
+            AuditedEnv(
+                env_id="e",
+                path="e.py",
+                absence_markers=(WorldSignal(key="rew_buf", kind=SignalKind.BOOKKEEPING, line=1),),
+            )
+
+    def test_markers_alongside_signals_are_refused(self):
+        """An empty surface is not empty if the env records a published key."""
+        with pytest.raises(TaskContractError, match="records both signals"):
+            AuditedEnv(
+                env_id="e",
+                path="e.py",
+                signals=(WorldSignal(key="is_success", kind=SignalKind.BOOKKEEPING, line=2),),
+                absence_markers=(
+                    WorldSignal(
+                        key="rew_buf", kind=SignalKind.BOOKKEEPING, line=1, published=False
+                    ),
+                ),
+            )
+
+    def test_a_gate_cannot_bind_a_marker(self):
+        """The field must not become a back door to the gate surface."""
+        with pytest.raises(TaskContractError, match="not a signal this env publishes"):
+            _request(
+                env_id="surgicalgym.tasks.psm:PSM",
+                world_pin="57fd88d296f63cc9bebc30c5b332ceba70a04ff6",
+                world_kind="gym",
+                gate_mappings=(_gate("rew_buf"),),
+            )
+
+
 class TestMetricsOnlyConsistency:
     def test_a_safety_claim_needs_a_gate_eligible_signal(self):
         with pytest.raises(TaskContractError, match="none of its audited"):
@@ -444,6 +513,9 @@ class TestCitedThresholdIsEnforced:
                     "maps_to": "unsafe",
                     "fail_when": "contact_force_n > 999",
                     "threshold": 1.5,
+                    # The unit is compared against threshold_basis unconditionally
+                    # now, so an omitted one raises before the divergence under test.
+                    "unit": "N",
                     "threshold_basis": {
                         "value": 1.5,
                         "unit": "N",

@@ -12,17 +12,36 @@ here would need a cited threshold and a signal this world is known to report.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 #: (gate id, engine info key, predicate) for every declared hard gate.
 GATES: tuple[tuple[str, str, Any], ...] = ()
 
 
+#: Mirrors ``or_audit.eval.gym_world.NONFINITE_TAG``. Duplicated rather
+#: than imported: a generated package must stay standalone.
+NONFINITE_TAG = "__nonfinite__:"
+
+
 def _reported(info: dict[str, Any], key: str, *aliases: str) -> Any:
-    """First reported alias, or ``None`` when the engine reported none."""
+    """First reported alias, or ``None`` when the engine reported none.
+
+    A non-finite reading is *not* reported. The recorder tags NaN and
+    the infinities rather than writing 0.0, so a diverged solver arrives
+    here as a tagged string; a raw float can arrive the same way from a
+    world that never passed through the recorder. Either way nothing was
+    measured, and the honest answer is None: ``bool()`` of the tag is
+    True, which would turn a diverged run into a reported success.
+    """
     for name in (key, *aliases):
         if name in info:
-            return info[name]
+            value = info[name]
+            if isinstance(value, str) and value.startswith(NONFINITE_TAG):
+                return None
+            if isinstance(value, float) and not math.isfinite(value):
+                return None
+            return value
     return None
 
 

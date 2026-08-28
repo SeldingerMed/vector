@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import inspect
 import json
 import shutil
 from collections.abc import Callable
@@ -23,6 +24,7 @@ from or_audit.concierge.adapt import (
     AdaptBudget,
     AdaptCandidate,
     AdaptObservation,
+    FrozenPackage,
     ScenarioSpace,
     assert_frozen_before_scoring,
     assert_verifier_untouched,
@@ -70,7 +72,17 @@ from or_audit.eval.contracts import (
     RuntimeKind,
 )
 from or_audit.eval.integrity import tree_digest
+from or_audit.eval.job import JobResult
 from or_audit.eval.loader import load_agent, load_task
+from or_audit.eval.provenance import (
+    PROVENANCE_FILENAME,
+    adaptation_tells,
+    assert_public_leaderboard_eligible,
+    assert_scoreable_package,
+    content_digest,
+    read_provenance,
+    verifier_identity,
+)
 from or_audit.eval.runner import run_job
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -78,6 +90,7 @@ TASK_CATALOG = REPO_ROOT / "docs/examples/tasks"
 VIDEO_TASK = TASK_CATALOG / "video-nextstep"
 VIDEO_AGENT = REPO_ROOT / "docs/examples/agents/example-video-predictor"
 COUNTERFACTUAL_TASK = TASK_CATALOG / "counterfactual-recovery"
+COUNTERFACTUAL_AGENT = REPO_ROOT / "docs/examples/agents/example-counterfactual-world-model"
 INTAKE_SOURCE = REPO_ROOT / "src/or_audit/concierge/intake.py"
 
 SANDBOX = SandboxPolicy(cpu_quota=2.0, memory_bytes=1 << 30, disk_bytes=1 << 30)
@@ -956,14 +969,19 @@ def test_freeze_writes_a_bumped_quarantined_digest_pinned_package(tmp_path: Path
     assert frozen.public_leaderboard_eligible is False
     assert frozen.digest == tree_digest(frozen_dir)
 
-    provenance = json.loads((frozen_dir / "provenance.json").read_text(encoding="utf-8"))
+    provenance = json.loads((frozen_dir / PROVENANCE_FILENAME).read_text(encoding="utf-8"))
     assert provenance["authored_by"] == "agent"
     assert provenance["public_leaderboard_eligible"] is False
     assert provenance["parent"] == {
         "task_id": task.id,
         "task_version": task.task_version,
         "digest": frozen.parent_digest,
+        # Pinned so a moved gate is caught even after the parent is deleted.
+        "verifier_identity": verifier_identity(parent),
     }
+    # The self-pin covers everything a scored run reads, and only that.
+    assert provenance["content_digest"] == content_digest(frozen_dir)
+    assert provenance["content_digest"] != frozen.digest
 
     reloaded = load_task(frozen_dir)
     assert reloaded.task_version == frozen.task_version
@@ -973,8 +991,6 @@ def test_freeze_writes_a_bumped_quarantined_digest_pinned_package(tmp_path: Path
 
 
 def test_freeze_cannot_mint_leaderboard_eligibility(tmp_path: Path) -> None:
-    from or_audit.concierge.adapt import FrozenPackage
-
     with pytest.raises(TaskContractError, match="Tier-1 conformance"):
         FrozenPackage(
             path=str(tmp_path),
@@ -1062,6 +1078,290 @@ def test_freeze_refuses_an_empty_scenario_set(tmp_path: Path) -> None:
     parent = _parent_copy(tmp_path)
     with pytest.raises(TaskContractError, match="no scenario"):
         freeze_adapted_package(parent, scenarios=[], out=tmp_path / "adapted")
+
+
+# --------------------------------------------------------------------------
+# The provenance boundary: the quarantine the N11 invariants describe
+# --------------------------------------------------------------------------
+
+
+def _frozen_dir(tmp_path: Path) -> tuple[Path, Path]:
+    """A parent package and a frozen adaptation of all its declared scenarios."""
+    parent = _parent_copy(tmp_path)
+    task = load_task(parent)
+    frozen = freeze_adapted_package(
+        parent,
+        scenarios=list(task.scenarios),
+        perturbations=list(task.perturbations),
+        out=tmp_path / "adapted",
+    )
+    return parent, Path(frozen.path)
+
+
+def _run(task_dir: Path, out: Path) -> JobResult:
+    return run_job(
+        task=load_task(task_dir),
+        task_dir=task_dir,
+        agent=load_agent(COUNTERFACTUAL_AGENT),
+        agent_dir=COUNTERFACTUAL_AGENT,
+        out=out,
+        n=1,
+    )
+
+
+def test_a_curated_package_presents_no_provenance_and_is_not_a_suspect(tmp_path: Path) -> None:
+    """No provenance.json means no adaptation claim, so there is nothing to verify."""
+    parent = _parent_copy(tmp_path)
+    assert read_provenance(parent) is None
+    assert assert_scoreable_package(parent) is None
+    # Returns None; the assertion is that it does not raise.
+    assert_public_leaderboard_eligible(parent)
+
+
+def test_a_frozen_adaptation_still_runs(tmp_path: Path) -> None:
+    """The boundary refuses tampering, not adaptation: the honest package scores."""
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    result = _run(frozen_dir, tmp_path / "job")
+    assert result.task_version == "1-adapted1"
+
+
+def test_a_verifier_edited_after_freezing_is_refused_at_scoring(tmp_path: Path) -> None:
+    """The reviewer's probe: freeze, edit the verifier, then try to score it.
+
+    Before the boundary existed, ``run_job`` simply hashed the edited tree as a
+    new task digest and scored it.
+    """
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    verifier = frozen_dir / "verifier.py"
+    verifier.write_text(
+        verifier.read_text(encoding="utf-8") + "\n# a scenario author is not a gate author\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(TaskContractError, match="never verifiers"):
+        assert_scoreable_package(frozen_dir)
+    with pytest.raises(TaskContractError, match="never verifiers"):
+        _run(frozen_dir, tmp_path / "job")
+
+
+def test_a_retuned_gate_after_freezing_is_refused_at_scoring(tmp_path: Path) -> None:
+    """A gate moved in task.toml is caught by the pinned parent verifier identity."""
+    parent, frozen_dir = _frozen_dir(tmp_path)
+    gate = load_task(parent).verifier.gates[0]
+    toml_path = frozen_dir / "task.toml"
+    original = toml_path.read_text(encoding="utf-8")
+    tampered = original.replace(f'id = "{gate.id}"', f'id = "{gate.id}-relaxed"', 1)
+    assert tampered != original
+    toml_path.write_text(tampered, encoding="utf-8")
+    with pytest.raises(TaskContractError, match="never verifiers"):
+        _run(frozen_dir, tmp_path / "job")
+
+
+def test_the_parent_verifier_pin_outlives_the_parent_package(tmp_path: Path) -> None:
+    """The refusal must not depend on the parent still being on disk."""
+    parent, frozen_dir = _frozen_dir(tmp_path)
+    shutil.rmtree(parent)
+    assert assert_scoreable_package(frozen_dir) is not None
+    verifier = frozen_dir / "verifier.py"
+    verifier.write_text(verifier.read_text(encoding="utf-8") + "\n# sweetened\n", encoding="utf-8")
+    with pytest.raises(TaskContractError, match="never verifiers"):
+        assert_scoreable_package(frozen_dir)
+
+
+def test_a_scenario_edited_after_freezing_is_refused_at_scoring(tmp_path: Path) -> None:
+    """Not only the verifier: the self-pin covers every file a run reads."""
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    (frozen_dir / "instruction.md").write_text("edited after freezing\n", encoding="utf-8")
+    with pytest.raises(TaskContractError, match="edited after freezing"):
+        _run(frozen_dir, tmp_path / "job")
+
+
+def test_a_frozen_package_cannot_relabel_its_own_authorship(tmp_path: Path) -> None:
+    """`--authored-by human` used to produce an agent package that denied it."""
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    record = json.loads((frozen_dir / PROVENANCE_FILENAME).read_text(encoding="utf-8"))
+    record["authored_by"] = "human"
+    (frozen_dir / PROVENANCE_FILENAME).write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(TaskContractError, match="authored_by 'human'"):
+        assert_scoreable_package(frozen_dir)
+    with pytest.raises(TaskContractError, match="authored_by 'human'"):
+        _run(frozen_dir, tmp_path / "job")
+
+
+def test_a_frozen_package_cannot_grant_itself_leaderboard_eligibility(tmp_path: Path) -> None:
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    record = json.loads((frozen_dir / PROVENANCE_FILENAME).read_text(encoding="utf-8"))
+    record["public_leaderboard_eligible"] = True
+    (frozen_dir / PROVENANCE_FILENAME).write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(TaskContractError, match="cannot grant it to itself"):
+        assert_scoreable_package(frozen_dir)
+
+
+def test_a_legacy_provenance_record_is_refused(tmp_path: Path) -> None:
+    """A record written before the self-pin existed cannot establish its claim."""
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    path = frozen_dir / PROVENANCE_FILENAME
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["format_version"] = "1"
+    path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(TaskContractError, match="format_version '1'"):
+        assert_scoreable_package(frozen_dir)
+
+
+def test_a_provenance_record_missing_its_content_pin_is_refused(tmp_path: Path) -> None:
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    path = frozen_dir / PROVENANCE_FILENAME
+    record = json.loads(path.read_text(encoding="utf-8"))
+    del record["content_digest"]
+    path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(TaskContractError, match="not a readable package provenance record"):
+        assert_scoreable_package(frozen_dir)
+
+
+def test_an_unreadable_provenance_file_is_refused_not_ignored(tmp_path: Path) -> None:
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    (frozen_dir / PROVENANCE_FILENAME).write_text("{ not json", encoding="utf-8")
+    with pytest.raises(TaskContractError, match="not readable JSON"):
+        assert_scoreable_package(frozen_dir)
+
+
+def test_a_quarantined_package_is_refused_at_public_leaderboard_ingestion(
+    tmp_path: Path,
+) -> None:
+    """The flag is honoured where it matters, and the refusal names the package."""
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    with pytest.raises(TaskContractError) as excinfo:
+        assert_public_leaderboard_eligible(frozen_dir)
+    message = str(excinfo.value)
+    assert "refusing to publish counterfactual-recovery@1-adapted1" in message
+    assert "Tier-1 conformance" in message
+
+
+def test_leaderboard_ingestion_checks_integrity_before_the_quarantine(tmp_path: Path) -> None:
+    """A quarantine flag on an edited package says nothing about what ran."""
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    verifier = frozen_dir / "verifier.py"
+    verifier.write_text(verifier.read_text(encoding="utf-8") + "\n# sweetened\n", encoding="utf-8")
+    with pytest.raises(TaskContractError, match="never verifiers"):
+        assert_public_leaderboard_eligible(frozen_dir)
+
+
+def _rename_version(task_dir: Path, new_version: str) -> None:
+    """Move a package out of the '-adaptedN' lineage, changing its identity."""
+    toml_path = task_dir / "task.toml"
+    text = toml_path.read_text(encoding="utf-8")
+    replaced = text.replace(
+        f'task_version = "{load_task(task_dir).task_version}"', f'task_version = "{new_version}"', 1
+    )
+    assert replaced != text
+    toml_path.write_text(replaced, encoding="utf-8")
+
+
+def test_curated_packages_carry_no_adaptation_tells() -> None:
+    """The tells must not fire on honest packages: a false refusal blocks users."""
+    for package in sorted(TASK_CATALOG.iterdir()):
+        if not (package / "task.toml").is_file():
+            continue
+        try:
+            task = load_task(package)
+        except TaskContractError:  # a package broken for unrelated reasons
+            continue
+        assert adaptation_tells(package, task) == (), package.name
+
+
+def test_a_frozen_package_carries_its_lineage_in_its_task_version(tmp_path: Path) -> None:
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    tells = adaptation_tells(frozen_dir)
+    assert any("-adaptedN" in tell for tell in tells)
+
+
+def test_deleting_provenance_no_longer_escapes_leaderboard_ingestion(tmp_path: Path) -> None:
+    """The bypass no local check can close is at least made loud.
+
+    Deleting the record used to make an adaptation indistinguishable from a
+    curated package. It still defeats the *content* pin — nothing local can
+    stop that — but the package keeps the adapted lineage in its identity, and
+    publishing something that claims that lineage without the evidence for it
+    is refused by name.
+    """
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    (frozen_dir / PROVENANCE_FILENAME).unlink()
+    # Scoring is deliberately unaffected: there is no claim left to verify.
+    assert assert_scoreable_package(frozen_dir) is None
+    with pytest.raises(TaskContractError) as excinfo:
+        assert_public_leaderboard_eligible(frozen_dir)
+    message = str(excinfo.value)
+    assert "carries the marks of an agent-authored adaptation" in message
+    assert "task_version '1-adapted1'" in message
+    assert PROVENANCE_FILENAME in message
+
+
+def test_escaping_the_tells_costs_the_package_its_adapted_identity(tmp_path: Path) -> None:
+    """The deliberate escape hatch, and the price Main named for taking it.
+
+    An honest author who really does want an unadapted package under this name
+    can have one — by renaming it out of the lineage, which severs exactly the
+    parent linkage a deletion was trying to keep.
+    """
+    _parent, frozen_dir = _frozen_dir(tmp_path)
+    (frozen_dir / PROVENANCE_FILENAME).unlink()
+    _rename_version(frozen_dir, "2")
+    assert adaptation_tells(frozen_dir) == ()
+    # Returns None; the assertion is that it no longer refuses.
+    assert_public_leaderboard_eligible(frozen_dir)
+
+
+def test_a_search_derived_scenario_is_a_tell_even_after_renaming(tmp_path: Path) -> None:
+    """Renaming the version is not enough when the search left its own mark."""
+    parent = _parent_copy(tmp_path)
+    scenario = load_task(parent).scenarios[0]
+    # Exactly what adapt._derive_scenario writes for a re-seeded candidate.
+    derived = scenario.model_copy(update={"id": f"{scenario.id}-seed7", "seed": 7})
+    frozen = freeze_adapted_package(parent, scenarios=[derived], out=tmp_path / "adapted")
+    frozen_dir = Path(frozen.path)
+    (frozen_dir / PROVENANCE_FILENAME).unlink()
+    _rename_version(frozen_dir, "2")
+    tells = adaptation_tells(frozen_dir)
+    assert tells == (
+        f"scenario '{scenario.id}-seed7' is named for its own seed (7), the shape a "
+        "search-derived scenario takes",
+    )
+    with pytest.raises(TaskContractError, match="named for its own seed"):
+        assert_public_leaderboard_eligible(frozen_dir)
+
+
+def test_a_scenario_whose_name_and_seed_disagree_is_not_a_tell(tmp_path: Path) -> None:
+    """Matched on the id/seed pair, so somebody's own naming is not a refusal."""
+    parent = _parent_copy(tmp_path)
+    scenario = load_task(parent).scenarios[0]
+    named = scenario.model_copy(update={"id": f"{scenario.id}-seed7", "seed": 3})
+    frozen = freeze_adapted_package(parent, scenarios=[named], out=tmp_path / "adapted")
+    frozen_dir = Path(frozen.path)
+    (frozen_dir / PROVENANCE_FILENAME).unlink()
+    _rename_version(frozen_dir, "2")
+    assert adaptation_tells(frozen_dir) == ()
+
+
+def test_frozen_package_refuses_a_relabelled_authorship_in_memory() -> None:
+    with pytest.raises(TaskContractError, match="not a caller's choice"):
+        FrozenPackage(
+            path="somewhere",
+            task_id="t",
+            task_version="1-adapted1",
+            digest="d",
+            parent_task_id="t",
+            parent_task_version="1",
+            parent_digest="p",
+            authored_by="human",
+        )
+
+
+def test_freeze_takes_no_authorship_argument() -> None:
+    """The authorship class is not a parameter, so no caller can pass one."""
+    assert "authored_by" not in inspect.signature(freeze_adapted_package).parameters
 
 
 # --------------------------------------------------------------------------
@@ -1203,3 +1503,22 @@ def test_cli_adapt_freezes_a_quarantined_package(tmp_path: Path, capsys) -> None
     assert "QUARANTINED" in captured.out
     assert "1-adapted1" in captured.out
     assert_verifier_untouched(parent, tmp_path / "adapted")
+    assert assert_scoreable_package(tmp_path / "adapted") is not None
+
+
+def test_cli_adapt_has_no_authored_by_flag(tmp_path: Path) -> None:
+    """`concierge adapt --authored-by human` produced an agent package that
+    denied being one, defeating the quarantine keyed on that field."""
+    with pytest.raises(SystemExit):
+        _parser().parse_args(
+            [
+                "concierge",
+                "adapt",
+                "--task",
+                str(tmp_path / "parent"),
+                "--out",
+                str(tmp_path / "adapted"),
+                "--authored-by",
+                "human",
+            ]
+        )

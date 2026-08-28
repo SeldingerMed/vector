@@ -17,7 +17,10 @@ than documented:
 * No scalar leaves the export without its projection digest and the canonical
   digest of the parent vector (ASSESSMENT R3). :func:`emit_reward_record` is
   the only sanctioned constructor and :class:`RewardRecord` refuses a record
-  missing either reference, so an export cannot ship a bare number.
+  missing either reference, so an export cannot ship a bare number. The
+  generated rubric does not trust that record either: it re-derives the parent
+  reference from the vector beside it and recomputes the scalar, so a forged
+  record cannot become a training signal.
 """
 
 from __future__ import annotations
@@ -471,8 +474,12 @@ def _readme_md(export: VerifiersExport, task: TaskSpec) -> str:
         "```",
         "",
         "`verifiers` is imported lazily: when it is installed, `load_environment`",
-        "attaches a single-function `Rubric` reading the recorded reward. Without it,",
-        "the environment and its reward are unchanged.",
+        "attaches a single-function `Rubric`. That rubric does not read the recorded",
+        "scalar on trust — it revalidates the record, checks its pins against this",
+        "package's own, requires `parent_vector_ref` to be the canonical digest of the",
+        "vector in the same state, and recomputes the projection. A hand-written state",
+        "carrying an invented reward is refused, not trained on. Without `verifiers`",
+        "installed, the environment and its reward are unchanged.",
         "",
     ]
     return "\n".join(lines)
@@ -681,23 +688,82 @@ class VectorProjectionEnv:
     # -- verifiers rubric compatibility -----------------------------------
 
     def reward_func(self, *, state: dict[str, Any], **kwargs: Any) -> float:
-        """Read the reward a rollout already recorded. Never recomputes a float."""
+        """Recompute the reward from the state's own vector, or refuse.
+
+        This is the RL boundary: whatever this returns is the training signal.
+        Reading `state["reward_record"]["reward"]` on trust would make any dict
+        with a float and two plausible strings a reward, so nothing here is
+        believed. The record is revalidated as a `RewardRecord`, its pins are
+        checked against this export's own constants, `parent_vector_ref` must be
+        the canonical digest of the vector actually supplied, and the scalar must
+        equal what the task's declared projection computes from that vector here
+        and now.
+        """
         del kwargs
-        record = state.get("reward_record")
-        if not isinstance(record, dict):
+        raw_record = state.get("reward_record")
+        if not isinstance(raw_record, dict):
             raise ScoreContractError(
                 "rollout state carries no reward_record; this environment does not "
                 "produce a reward outside a recorded projection"
             )
-        if not record.get("projection_digest") or not record.get("parent_vector_ref"):
+        try:
+            record = RewardRecord.model_validate(raw_record)
+        except ScoreContractError:
+            raise
+        except Exception as exc:
             raise ScoreContractError(
-                "rollout state carries a reward without its projection digest or "
-                "parent vector reference (ASSESSMENT R3)"
+                f"rollout state carries something that is not a reward record, so "
+                f"the scalar in it has no provenance to check (ASSESSMENT R3): {exc}"
+            ) from exc
+        for field, found, expected in (
+            ("projection_id", record.projection_id, PROJECTION_ID),
+            ("projection_version", record.projection_version, PROJECTION_VERSION),
+            ("projection_digest", record.projection_digest, PROJECTION_DIGEST),
+            ("task_id", record.task_id, TASK_ID),
+            ("task_version", record.task_version, TASK_VERSION),
+            ("task_digest", record.task_digest, TASK_DIGEST),
+            ("world_pin", record.world_pin, WORLD_PIN),
+        ):
+            if found != expected:
+                raise ScoreContractError(
+                    f"reward record {field}={found!r} is not this export's "
+                    f"{expected!r}; a reward earned under a different task, world, or "
+                    f"collapse rule is not a training signal for this one"
+                )
+        raw_vector = state.get("vector")
+        if not isinstance(raw_vector, dict):
+            raise ScoreContractError(
+                "rollout state carries a reward record but not the vector it claims to "
+                "project; without the vector the reward cannot be recomputed and this "
+                "environment does not return unrecomputed scalars"
             )
-        return float(record["reward"])
+        try:
+            vector = TrialVector.model_validate(raw_vector)
+        except ScoreContractError:
+            raise
+        except Exception as exc:
+            raise ScoreContractError(
+                f"rollout state carries something that is not a trial vector, so the "
+                f"reward has nothing to be recomputed from: {exc}"
+            ) from exc
+        found_ref = vector_reference(vector)
+        if record.parent_vector_ref != found_ref:
+            raise ScoreContractError(
+                f"reward record names parent vector {record.parent_vector_ref} but the "
+                f"vector in this state digests to {found_ref}; the scalar and the "
+                f"evidence beside it did not come from the same trial (ASSESSMENT R3)"
+            )
+        recomputed = project(vector, self.projection)
+        if recomputed != record.reward:
+            raise ScoreContractError(
+                f"reward record claims {record.reward!r} but {PROJECTION_IDENTITY} "
+                f"projects {recomputed!r} from the vector it references; refusing to "
+                f"train on a scalar the projection rule does not reproduce"
+            )
+        return recomputed
 
     def attach_rubric(self, verifiers: ModuleType) -> None:
-        """Attach a single-function rubric reading the recorded reward."""
+        """Attach a single-function rubric that recomputes the recorded reward."""
         self.rubric = verifiers.Rubric(funcs=[self.reward_func], weights=[1.0])
 
     def close(self) -> None:

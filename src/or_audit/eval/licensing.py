@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
 
@@ -200,13 +200,88 @@ def _classify_term(term: str) -> LicenseVerdict:
     )
 
 
-def _split(expression: str, operator: str) -> list[str]:
-    return [part.strip() for part in expression.split(operator) if part.strip()]
+class _ParseError(ValueError):
+    """The declaration is not a well-formed SPDX expression. Refused, not guessed."""
 
 
-def _classify_any_of(expression: str, alternatives: list[str]) -> LicenseVerdict:
+#: Tokens that can never stand in for a license identifier.
+_RESERVED: frozenset[str] = frozenset({"AND", "OR", "WITH", "(", ")"})
+
+#: Nesting limit for parenthesised groups. A declaration is third-party data,
+#: so the parser must refuse pathological input rather than exhaust the stack:
+#: a classifier that dies on a hostile string is its own kind of fail-open. No
+#: real SPDX expression nests anywhere near this deep.
+_MAX_DEPTH = 32
+
+
+def _tokenize(expression: str) -> list[str]:
+    return expression.replace("(", " ( ").replace(")", " ) ").split()
+
+
+def _render(tokens: Sequence[str]) -> str:
+    """Re-join a token slice so a sub-verdict quotes the sub-expression as written."""
+    text = ""
+    for token in tokens:
+        if not text or token == ")" or text.endswith("("):
+            text += token
+        else:
+            text += f" {token}"
+    return text
+
+
+def _classify_id(token: str) -> LicenseVerdict:
+    """Classify one license id, honouring the ``+`` (or-later) suffix.
+
+    ``+`` widens the grant to every later version of the same license. A denied
+    family stays denied — no later GPL stops being copyleft — but a permissive
+    base cannot carry its clearance forward onto a version nobody has read.
+    """
+    if not token.endswith("+"):
+        return _classify_term(token)
+    base = _classify_term(token[:-1])
+    if base.status is LicenseStatus.RESTRICTED:
+        return base.model_copy(update={"spdx": token})
+    return LicenseVerdict(
+        spdx=token,
+        status=LicenseStatus.UNKNOWN,
+        reason=(
+            f"{token!r} admits any later version of {token[:-1]!r}, and later versions are "
+            "not reviewed here; declare the exact SPDX id the package ships under"
+        ),
+    )
+
+
+def _classify_with(base: LicenseVerdict, exception: str, expression: str) -> LicenseVerdict:
+    """Apply a ``WITH`` exception against the (empty) table of reviewed exceptions.
+
+    An SPDX exception grants additional permission, but *which* permission is a
+    property of its text and no exception has been reviewed here. So a refused
+    base stays refused — naming the exception, since reviewing it is the way
+    out — and a permissive base drops to ``unknown`` rather than inheriting a
+    clearance that was granted to the bare license, not to this variant.
+    """
+    if base.status is LicenseStatus.RESTRICTED:
+        return LicenseVerdict(
+            spdx=expression,
+            status=LicenseStatus.RESTRICTED,
+            reason=(
+                f"{base.reason}. The {exception!r} exception is not reviewed here, so it "
+                "cannot lift that refusal"
+            ),
+        )
+    return LicenseVerdict(
+        spdx=expression,
+        status=LicenseStatus.UNKNOWN,
+        reason=(
+            f"{exception!r} is not a reviewed SPDX license exception, and an exception "
+            f"nobody has read may not be assumed harmless to {base.spdx!r}; declare the "
+            "bare license, or add the exception in review"
+        ),
+    )
+
+
+def _classify_any_of(expression: str, verdicts: list[LicenseVerdict]) -> LicenseVerdict:
     """A dual license: the licensee picks, so one permissive alternative suffices."""
-    verdicts = [classify_license(part) for part in alternatives]
     allowed = next((v for v in verdicts if v.status is LicenseStatus.ALLOWED), None)
     if allowed is not None:
         return LicenseVerdict(
@@ -229,9 +304,8 @@ def _classify_any_of(expression: str, alternatives: list[str]) -> LicenseVerdict
     )
 
 
-def _classify_all_of(expression: str, terms: list[str]) -> LicenseVerdict:
+def _classify_all_of(expression: str, verdicts: list[LicenseVerdict]) -> LicenseVerdict:
     """Conjunctive terms: every obligation applies, so every term must clear."""
-    verdicts = [_classify_term(term) for term in terms]
     restricted = [v for v in verdicts if v.status is LicenseStatus.RESTRICTED]
     if restricted:
         return LicenseVerdict(
@@ -246,26 +320,107 @@ def _classify_all_of(expression: str, terms: list[str]) -> LicenseVerdict:
             status=LicenseStatus.UNKNOWN,
             reason="; ".join(v.reason for v in unreviewed),
         )
-    if len(verdicts) > 1:
-        return LicenseVerdict(
-            spdx=expression,
-            status=LicenseStatus.ALLOWED,
-            reason=(
-                "every term is on the reviewed permissive allowlist: "
-                + ", ".join(v.spdx for v in verdicts)
-            ),
-        )
-    return verdicts[0].model_copy(update={"spdx": expression})
+    return LicenseVerdict(
+        spdx=expression,
+        status=LicenseStatus.ALLOWED,
+        reason=(
+            "every term is on the reviewed permissive allowlist: "
+            + ", ".join(v.spdx for v in verdicts)
+        ),
+    )
+
+
+class _Parser:
+    """Recursive descent over the SPDX expression grammar, classifying as it goes.
+
+    Grammar (SPDX Annex D, restricted to the forms declarations actually use)::
+
+        alternatives := conjunction ("OR" conjunction)*
+        conjunction  := operand ("AND" operand)*
+        operand      := "(" alternatives ")" | id ["WITH" exception]
+        id           := <license identifier> ["+"]
+
+    Grouping is the whole point: ``AND`` binds tighter than ``OR``, so
+    ``A AND (B OR C)`` and ``A AND B OR C`` are different licenses, and
+    flattening the parentheses away turns the first into the second — which is
+    how a copyleft term that applies under *every* choice gets read as one
+    optional branch among several.
+    """
+
+    def __init__(self, tokens: Sequence[str]) -> None:
+        self._tokens = tokens
+        self._pos = 0
+        self._depth = 0
+
+    def parse(self) -> LicenseVerdict:
+        verdict = self._alternatives()
+        if self._pos < len(self._tokens):
+            raise _ParseError(f"unexpected {self._tokens[self._pos]!r}")
+        return verdict
+
+    def _peek(self) -> str | None:
+        return self._tokens[self._pos] if self._pos < len(self._tokens) else None
+
+    def _alternatives(self) -> LicenseVerdict:
+        start = self._pos
+        verdicts = [self._conjunction()]
+        while self._peek() == "OR":
+            self._pos += 1
+            verdicts.append(self._conjunction())
+        if len(verdicts) == 1:
+            return verdicts[0]
+        return _classify_any_of(_render(self._tokens[start : self._pos]), verdicts)
+
+    def _conjunction(self) -> LicenseVerdict:
+        start = self._pos
+        verdicts = [self._operand()]
+        while self._peek() == "AND":
+            self._pos += 1
+            verdicts.append(self._operand())
+        if len(verdicts) == 1:
+            return verdicts[0]
+        return _classify_all_of(_render(self._tokens[start : self._pos]), verdicts)
+
+    def _operand(self) -> LicenseVerdict:
+        start = self._pos
+        token = self._peek()
+        if token is None:
+            raise _ParseError("the expression ends where a license identifier is required")
+        if token == "(":
+            if self._depth >= _MAX_DEPTH:
+                raise _ParseError(f"nested more than {_MAX_DEPTH} groups deep")
+            self._pos += 1
+            self._depth += 1
+            inner = self._alternatives()
+            self._depth -= 1
+            if self._peek() != ")":
+                raise _ParseError("unbalanced '('")
+            self._pos += 1
+            return inner.model_copy(update={"spdx": _render(self._tokens[start : self._pos])})
+        if token in _RESERVED:
+            raise _ParseError(f"expected a license identifier, found {token!r}")
+        self._pos += 1
+        verdict = _classify_id(token)
+        if self._peek() != "WITH":
+            return verdict
+        self._pos += 1
+        exception = self._peek()
+        if exception is None or exception in _RESERVED:
+            raise _ParseError("'WITH' is not followed by an exception identifier")
+        self._pos += 1
+        return _classify_with(verdict, exception, _render(self._tokens[start : self._pos]))
 
 
 def classify_license(spdx: str) -> LicenseVerdict:
     """Classify a declared SPDX expression against the reviewed tables.
 
-    Composition follows SPDX meaning rather than string matching: an ``AND``
-    expression is only allowed when *every* term is (all obligations apply at
-    once), while an ``OR`` expression is allowed as soon as *one* term is (the
-    licensee chooses). A restricted term inside ``AND`` is decisive; inside
-    ``OR`` it only matters when no permissive alternative exists.
+    The expression is parsed, not split: composition follows SPDX meaning with
+    the declared structure intact. An ``AND`` node is allowed only when *every*
+    operand is (all obligations apply at once), an ``OR`` node as soon as *one*
+    operand is (the licensee chooses), and parentheses override the default
+    precedence rather than being discarded. Anything undecided by a restricted
+    or permissive operand resolves to ``unknown``; an expression that does not
+    parse is ``unknown`` too, never allowed.
     """
     expression = " ".join(spdx.split())
     if not expression:
@@ -277,11 +432,19 @@ def classify_license(spdx: str) -> LicenseVerdict:
                 "its license explicitly"
             ),
         )
-    normalized = " ".join(expression.replace("(", " ").replace(")", " ").split())
-    alternatives = _split(normalized, " OR ")
-    if len(alternatives) > 1:
-        return _classify_any_of(expression, alternatives)
-    return _classify_all_of(expression, _split(normalized, " AND "))
+    try:
+        verdict = _Parser(_tokenize(expression)).parse()
+    except _ParseError as exc:
+        return LicenseVerdict(
+            spdx=expression,
+            status=LicenseStatus.UNKNOWN,
+            reason=(
+                f"{expression!r} is not a well-formed SPDX expression ({exc}); an expression "
+                "nobody can evaluate is never assumed permissive. Declare the package's real "
+                "SPDX expression"
+            ),
+        )
+    return verdict.model_copy(update={"spdx": expression})
 
 
 def is_allowed(spdx: str) -> bool:

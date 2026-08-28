@@ -187,7 +187,6 @@ def _adapt(args: argparse.Namespace) -> int:
             scenarios=scenarios,
             perturbations=perturbations,
             out=Path(args.out),
-            authored_by=args.authored_by,
         )
     except (TaskContractError, ValueError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
@@ -279,9 +278,8 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
         default=[],
         help="declared perturbation id to freeze (repeatable; default all)",
     )
-    adapt.add_argument(
-        "--authored-by", default="agent", help="authorship recorded in provenance.json"
-    )
+    # No --authored-by: authorship is the class that carries the quarantine, and
+    # a package that could call itself human-authored could leave it.
     adapt.set_defaults(func=_adapt)
 
 

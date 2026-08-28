@@ -51,13 +51,18 @@ Tier 1 additionally requires the package to pin its world adapter
 (``environment.adapter`` + ``adapter_digest``), to map gates rather than ship
 ``environment.metrics_only`` (§2.2 places a metrics-only wrap at Tier 0 by
 construction: a passing gate-state check on a metrics-only package proves it
-has no gates, which is honest and still not curated), and a measured
-determinism class that is not ``nondeterministic``.
+has no gates, which is honest and still not curated), the world revision the
+package pins to be the one the engine attested, and a determinism class
+*measured* ``bitwise`` or ``tolerance`` by the ``execution-determinism``
+evidence the report carries. ``unmeasured`` is the honest default and is not a
+Tier-1 class: "determinism/replay validation" names a measurement, and a
+report that has none has nothing to show for the claim.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -68,6 +73,7 @@ from or_audit.audit.canonical import digest
 from or_audit.domain.enums import GateStatus
 from or_audit.errors import ScoreContractError, TaskContractError
 from or_audit.eval.agent import AgentPackage
+from or_audit.eval.contracts import InteractionMode
 from or_audit.eval.job import JobResult, read_job_config
 from or_audit.eval.licensing import (
     LicenseStatus,
@@ -143,6 +149,21 @@ class DeterminismEvidence(_Frozen):
     #: First difference that tolerance does not excuse; ``""`` when none.
     first_difference: str = ""
 
+    @model_validator(mode="after")
+    def _tolerance_is_a_finite_measurement(self) -> Self:
+        """``inf``/``nan`` tolerance would certify two unrelated traces as equal.
+
+        ``delta <= inf`` holds for every pair of floats, so an infinite
+        tolerance is a comparison that observed nothing while reporting a
+        ``tolerance`` class. Neither value is a JSON number either, so the
+        evidence would serialize as non-standard ``Infinity``/``NaN``.
+        """
+        if not math.isfinite(self.tolerance) or self.tolerance < 0:
+            raise TaskContractError(
+                f"determinism tolerance must be a finite non-negative float, got {self.tolerance!r}"
+            )
+        return self
+
 
 class ConformanceCheck(_Frozen):
     """One check's verdict plus the evidence it was decided on."""
@@ -175,13 +196,18 @@ class ConformanceReport(_Frozen):
     #: metrics-only wrap has no gate mapping, so §2.2 places it at Tier 0 no
     #: matter how clean the rest of the package is.
     metrics_only: bool = False
-    #: Whether this world is one a policy *steps*, taken from the world kind's
-    #: declared ``physics`` capability. A dataset-backed kind (frame-source,
-    #: counterfactual, angiostress-contract) runs no engine at all, so its
-    #: evidence is the pinned data and its verifier, not a physics backend;
-    #: demanding engine provenance there would refuse a whole legitimate class
-    #: of package for failing to attest something it never used.
-    #: Required, never defaulted: a default would let a physical package omit
+    #: Interaction route the runner actually took, from
+    #: ``TaskSpec.interface.interaction_mode``. ``stepped_world`` is a function
+    #: of this and nothing else, so a report cannot pick its own provenance
+    #: regime.
+    interaction_mode: InteractionMode
+    #: Whether this world is one a policy *steps*, i.e. whether the runner drove
+    #: an engine at all. A dataset-backed route (frame source, counterfactual,
+    #: angiostress contract) runs no engine, so its evidence is the pinned data
+    #: and its verifier, not a physics backend; demanding engine provenance
+    #: there would refuse a whole legitimate class of package for failing to
+    #: attest something it never used.
+    #: Required, never defaulted: a default would let a stepped package omit
     #: the field, be read as dataset-backed, and earn Tier 1 on an unknown or
     #: synthetic backend. Fail-open is not available on a provenance gate.
     stepped_world: bool
@@ -193,6 +219,15 @@ class ConformanceReport(_Frozen):
     #: claim: a stub reports whatever it likes (deterministically, because it
     #: is fake), and ``unknown`` means the bridge exposes no provenance at all.
     backend: str = BACKEND_UNKNOWN
+    #: World revision the package pins (``environment.world_pin``).
+    world_pin: str = ""
+    #: World revision the engine actually attested, from both runs'
+    #: head-covered ``world_engine.world_pin``. "Pinned commit" is the first
+    #: thing §2.2 promises at Tier 1, and ``backend`` cannot check it: a real
+    #: engine on the wrong revision is still ``real``. A run that contradicts
+    #: the declaration is refused while measuring; a run that attests nothing
+    #: arrives here as ``""`` and is refused Tier 1 by ``world_pin_attested``.
+    world_pin_observed: str = ""
     #: Measured, never assumed.
     determinism_class: DeterminismClass
     tolerance: float
@@ -223,6 +258,45 @@ class ConformanceReport(_Frozen):
         return self.backend == BACKEND_REAL
 
     @property
+    def world_pin_attested(self) -> bool:
+        """Whether the engine attested the revision the package pins.
+
+        Only a stepped world has an engine to ask, and only a package that
+        names a revision has anything to attest - an unpinned world kind is
+        judged on the rest of its evidence, not on a pin it never claimed.
+        Where a pin *is* declared, an engine that reports a different revision,
+        or reports none, leaves the pinned-commit half of the Tier-1 claim
+        unverified; unverified is not attested.
+        """
+        if not self.stepped_world or not self.world_pin:
+            return True
+        return self.world_pin_observed == self.world_pin
+
+    @property
+    def determinism_measured(self) -> bool:
+        """Whether the determinism class is a measurement this report can show.
+
+        ``unmeasured`` is the honest default, and honesty is not evidence:
+        Tier 1 claims determinism/replay validation, so nothing weaker than a
+        measured ``tolerance`` can carry it. The class alone is not enough
+        either - it must be the class the ``execution-determinism`` check
+        actually recorded, at the tolerance the report publishes, or the header
+        and the evidence are two different claims. Enforced here and not only
+        in ``run_conformance`` because a serialized report is read as a claim
+        by whoever loads it, long after the run that produced it.
+        """
+        if self.determinism_class not in (
+            DeterminismClass.BITWISE,
+            DeterminismClass.TOLERANCE,
+        ):
+            return False
+        check = next((item for item in self.checks if item.id == CHECK_DETERMINISM), None)
+        evidence = check.determinism if check is not None else None
+        if evidence is None:
+            return False
+        return evidence.measured is self.determinism_class and evidence.tolerance == self.tolerance
+
+    @property
     def tier1_eligible(self) -> bool:
         """Whether every Tier-1 condition holds. The tier field cannot exceed this."""
         return (
@@ -231,7 +305,8 @@ class ConformanceReport(_Frozen):
             and not self.metrics_only
             and self.kind_registered
             and self.engine_attested
-            and self.determinism_class is not DeterminismClass.NONDETERMINISTIC
+            and self.world_pin_attested
+            and self.determinism_measured
         )
 
     def check(self, check_id: str) -> ConformanceCheck:
@@ -243,24 +318,49 @@ class ConformanceReport(_Frozen):
         return found
 
     @model_validator(mode="after")
-    def _stepped_world_matches_the_installed_adapter(self) -> Self:
+    def _tolerance_is_a_finite_measurement(self) -> Self:
+        """A published tolerance must be a number a reader can act on.
+
+        The CLI's ``--tolerance`` is parsed with ``float``, which accepts
+        ``inf`` and ``nan``; both would excuse every difference and neither is
+        representable in standard JSON.
+        """
+        if not math.isfinite(self.tolerance) or self.tolerance < 0:
+            raise TaskContractError(
+                f"tolerance must be a finite non-negative float, got {self.tolerance!r}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _stepped_world_follows_the_interaction_route(self) -> Self:
         """The report may not self-certify what kind of world it ran.
 
         ``stepped_world`` is the switch that decides whether engine provenance
-        is required, so a report that could *declare* it False would waive its
-        own provenance gate. The registered adapter's capability is the
-        authority; only a kind with no adapter installed has no cross-check,
-        and that case cannot reach Tier 1 (see ``tier1_eligible``).
+        is required, so a report free to *declare* it would waive its own
+        provenance gate. The authority is the interaction route: ``closed-loop``
+        is precisely the mode in which the runner steps a world. The world
+        kind's ``physics`` capability is not that authority - a closed-loop
+        adapter declaring ``physics=False`` was stepped all the same, and
+        reading ``physics`` let it waive the gate and certify its own
+        stand-in. ``closed_loop`` is the cross-check instead: an adapter that
+        does not grant it cannot have been stepped, and only a kind with no
+        adapter installed has no cross-check at all, a case ``tier1_eligible``
+        already refuses.
         """
-        spec = world_kind_spec(self.world_kind)
-        if spec is None:
-            return self
-        declared = spec.capabilities.physics
-        if self.stepped_world != declared:
+        stepped = self.interaction_mode is InteractionMode.CLOSED_LOOP
+        if self.stepped_world != stepped:
+            verb = "steps" if stepped else "does not step"
             raise TaskContractError(
-                f"world kind {self.world_kind!r} declares physics={declared} in the installed "
-                f"adapter, but the report claims stepped_world={self.stepped_world}; a report "
+                f"interaction_mode {self.interaction_mode.value!r} means the runner {verb} a "
+                f"world, but the report claims stepped_world={self.stepped_world}; a report "
                 "cannot reclassify the world it ran in order to waive the backend requirement"
+            )
+        spec = world_kind_spec(self.world_kind)
+        if stepped and spec is not None and not spec.capabilities.closed_loop:
+            raise TaskContractError(
+                f"world kind {self.world_kind!r} does not declare closed_loop in the installed "
+                "adapter, so a closed-loop run on it was never eligible; refusing a report that "
+                "attests a world its own adapter does not grant"
             )
         return self
 
@@ -278,7 +378,9 @@ class ConformanceReport(_Frozen):
             raise TaskContractError(
                 "tier 1 requires all four checks passed, a pinned world adapter, a gate "
                 "mapping (not metrics-only), an observed real backend on any world that is "
-                "stepped, and a measured determinism class better than nondeterministic"
+                "stepped, the pinned world revision attested by the engine that ran, and a "
+                "determinism class measured bitwise or tolerance by the execution-determinism "
+                "evidence this report carries"
             )
         if not self.tier_reason:
             raise TaskContractError("a conformance report must state why it earned its tier")
@@ -296,10 +398,16 @@ def _compare(a: Any, b: Any, *, tolerance: float, path: str) -> tuple[str, float
     Structural comparison rather than digest equality, because the whole point
     of the ``tolerance`` class is to distinguish "this engine's floats wobble
     in the last bits" from "this engine ran a different episode".
+
+    A non-finite tolerance excuses nothing. ``delta <= inf`` holds for every
+    pair of floats, so it would report "no difference" between two unrelated
+    traces - a comparison that observed nothing, reported as agreement. The
+    callers refuse such a tolerance outright; the leaf refuses to act on it
+    even if a caller someday forgets.
     """
     if _is_number(a) and _is_number(b):
         delta = abs(float(a) - float(b))
-        if delta <= tolerance:
+        if math.isfinite(tolerance) and delta <= tolerance:
             return "", delta
         return f"{path or '$'}: {a!r} != {b!r} (delta {delta:.3e})", delta
     if isinstance(a, dict) and isinstance(b, dict):
@@ -463,8 +571,11 @@ def _determinism_check(
     tolerance: float,
 ) -> tuple[ConformanceCheck, DeterminismEvidence]:
     """Measure a determinism class from two identical runs; never assume one."""
-    if tolerance < 0:
-        raise TaskContractError(f"tolerance must be non-negative, got {tolerance}")
+    if not math.isfinite(tolerance) or tolerance < 0:
+        # `inf` excuses every difference, so the comparison below would observe
+        # nothing and still report a `tolerance` class; `nan` compares false
+        # against everything. Neither is a JSON number.
+        raise TaskContractError(f"tolerance must be a finite non-negative float, got {tolerance!r}")
     seeds_a = [trial.seed for trial in first.trials]
     seeds_b = [trial.seed for trial in second.trials]
     declared = _declared_determinism(task)
@@ -566,6 +677,8 @@ def _tier_reason(
     kind_registered: bool,
     stepped_world: bool,
     backend: str,
+    world_pin: str,
+    world_pin_observed: str,
     measured: DeterminismClass,
 ) -> tuple[Literal[0, 1], str]:
     """Tier plus a reason naming exactly what is missing."""
@@ -596,8 +709,19 @@ def _tier_reason(
             f"the observed backend is {backend!r}: the bridge exposes no engine_provenance "
             "reporter, so no real-world claim can be attested from this run"
         )
+    if stepped_world and world_pin and world_pin_observed != world_pin:
+        attested = world_pin_observed or "(none reported)"
+        missing.append(
+            f"the engine attested world revision {attested!r} but the package pins "
+            f"{world_pin!r}, so the pinned-commit half of the Tier-1 claim is unverified"
+        )
     if measured is DeterminismClass.NONDETERMINISTIC:
         missing.append("measured determinism class is nondeterministic")
+    elif measured not in (DeterminismClass.BITWISE, DeterminismClass.TOLERANCE):
+        missing.append(
+            f"determinism class {measured.value} is not a measurement: Tier 1 names "
+            "reproducibility, so it requires a measured bitwise or tolerance class"
+        )
     if missing:
         return 0, "tier 0: " + "; ".join(missing)
     evidence = "a real backend" if stepped_world else f"declared data ({backend})"
@@ -626,6 +750,39 @@ def _observed_backend(first: JobResult, second: JobResult) -> str:
             "available (or unavailable) for both runs and re-measure."
         )
     return backends[0]
+
+
+def _observed_world_pin(task: TaskSpec, first: JobResult, second: JobResult) -> str:
+    """World revision both runs attested, from head-covered provenance.
+
+    ``backend`` cannot see this: a real engine running the wrong revision is
+    still ``real``, and "pinned commit" is the first thing Tier 1 promises. A
+    package naming ``broncho-synthetic-v1`` whose engine reports something else
+    has published evidence from a world nobody reviewed, so the contradiction
+    is refused here rather than tiered - as with ``_observed_backend``, there
+    is no honest single report to write about two different worlds. Silence
+    (``""``) is not a contradiction and is returned, to be refused Tier 1 by
+    ``ConformanceReport.world_pin_attested``.
+    """
+    declared = task.environment.world_pin
+    pins = []
+    for label, result in ((RUN_A, first), (RUN_B, second)):
+        engine = result.world_engine
+        pin = engine.world_pin if engine is not None else ""
+        if pin and declared and pin != declared:
+            raise TaskContractError(
+                f"{label} attested world revision {pin!r} but the package pins {declared!r}; "
+                "a pinned world that is not the world that ran is not a pin. Fix: install the "
+                "pinned revision, or correct environment.world_pin to the revision that ran."
+            )
+        pins.append(pin)
+    if pins[0] != pins[1]:
+        raise TaskContractError(
+            f"the two conformance runs attested different world revisions ({pins[0]!r} then "
+            f"{pins[1]!r}), so they do not measure one world. Fix: pin the engine revision "
+            "for both runs and re-measure."
+        )
+    return pins[0]
 
 
 def _resolve_agent(
@@ -659,6 +816,11 @@ def run_conformance(
     """
     if n < 1:
         raise TaskContractError(f"conformance needs at least one trial, got n={n}")
+    if not math.isfinite(tolerance) or tolerance < 0:
+        # Refused before two jobs run rather than after: `--tolerance inf` is
+        # accepted by the CLI's `float` parser and would excuse every
+        # difference, so the measurement would compare nothing.
+        raise TaskContractError(f"tolerance must be a finite non-negative float, got {tolerance!r}")
     root = task_dir if task_dir.is_dir() else task_dir.parent
     task = load_task(root)
     package = _resolve_agent(task, agent=agent, agent_dir=agent_dir)
@@ -692,10 +854,15 @@ def run_conformance(
     adapter_pinned = bool(task.environment.adapter and task.environment.adapter_digest)
     failed = tuple(check.id for check in checks if not check.passed)
     backend = _observed_backend(first, second)
-    # From the *declared* capability, not from whether an env object happened to
-    # exist: a physics world whose bridge silently failed to build must still be
-    # judged as a physics world, or the missing engine would excuse itself.
-    stepped_world = task.environment.resolved_capabilities.physics
+    world_pin_observed = _observed_world_pin(task, first, second)
+    # The route the runner actually took, not the kind's `physics` flag:
+    # `closed_loop` is the capability that means "a policy steps this world",
+    # and a closed-loop adapter declaring `physics=False` was reading as
+    # dataset-backed - waiving its own provenance gate so a synthetic stand-in
+    # could certify itself. Derived from the mode rather than from whether an
+    # env object happened to exist, so a world whose bridge silently failed to
+    # build is still judged as the stepped world it is.
+    stepped_world = task.interface.interaction_mode is InteractionMode.CLOSED_LOOP
     tier, reason = _tier_reason(
         failed=failed,
         adapter_pinned=adapter_pinned,
@@ -703,6 +870,8 @@ def run_conformance(
         kind_registered=spec is not None,
         stepped_world=stepped_world,
         backend=backend,
+        world_pin=task.environment.world_pin,
+        world_pin_observed=world_pin_observed,
         measured=determinism.measured,
     )
     return ConformanceReport(
@@ -713,8 +882,11 @@ def run_conformance(
         adapter_identity=spec.adapter_identity if spec is not None else "unregistered",
         adapter_pinned=adapter_pinned,
         metrics_only=task.environment.metrics_only,
+        interaction_mode=task.interface.interaction_mode,
         stepped_world=stepped_world,
         backend=backend,
+        world_pin=task.environment.world_pin,
+        world_pin_observed=world_pin_observed,
         determinism_class=determinism.measured,
         tolerance=tolerance,
         checks=checks,
@@ -737,8 +909,11 @@ def render_markdown(report: ConformanceReport) -> str:
         f"- World kind: `{report.world_kind}`",
         f"- Adapter identity: `{report.adapter_identity}`",
         f"- Adapter pinned: `{str(report.adapter_pinned).lower()}`",
+        f"- Interaction mode: `{report.interaction_mode.value}`",
         f"- Metrics-only: `{str(report.metrics_only).lower()}`",
         f"- Stepped world: `{str(report.stepped_world).lower()}`",
+        f"- World pin (declared): `{report.world_pin or 'none'}`",
+        f"- World pin (attested): `{report.world_pin_observed or 'none reported'}`",
         f"- Backend (observed): `{report.backend}`",
         f"- Determinism (measured): `{report.determinism_class.value}`",
         f"- Tolerance: `{report.tolerance:g}`",

@@ -4,7 +4,7 @@ Five steps from nothing to a replayable safety vector for your own model. Every 
 
 There are two paths through SurgEval, and only one of them belongs in your first ten minutes:
 
-- **The trial path** — `@se.agent` on a class you already have, then `surgeval run`. No `task.toml`, no `agent.toml`, no digests to compute. This page.
+- **The trial path** — `@se.agent` on a class you already have, then `se.evaluate(...)` from Python. No `task.toml`, no `agent.toml`, no digests to compute. This page. It is deliberately *not* `surgeval run`: that command resolves an agent from a package directory, a registry reference, or the built-in `random`, and cannot import a `module:Class`. The trial path is the Python API precisely because it needs no package.
 - **The publication path** — a versioned, digest-pinned package directory that other people can pull, rerun, and hold you to. That comes later, and `surgeval init-agent` generates it for you when you get there.
 
 ---
@@ -206,6 +206,8 @@ next: surgeval run -t <task> -a packages/next-step --out runs/first
 
 `init-agent` writes `agent.toml` (the capability exactly as inferred), `runner.py` (the harness entrypoint), and the weights file, and pins `weights_pin` to the **real** SHA-256 of the bytes it wrote. Omit `--weights` and it writes a placeholder file and pins that placeholder honestly — the package loads, and nothing pretends to be weights it is not. Replace the file later and re-run with `--weights <file> --force`.
 
+A class implementing **both** `act` and `predict` spans two runtime identities, and a package carries exactly one: one `binding.kind`, one entrypoint. `init-agent` therefore requires `--mode` for such a class and refuses without it, naming the flag. The emitted package then declares only that mode's capability, kind and entrypoint, so it cannot advertise predictor compatibility while identifying as a policy — a package that did would be rejected at `bind` time by a predictor task, for a reason nothing in the package explained. Publish both by running `init-agent` twice, into two directories. Single-identity classes need no flag and are unchanged. The trial path is unaffected: `se.evaluate(...)` picks the identity each task requires, which is why it can serve a dual-mode class from one object.
+
 `init-agent` and `describe-agent` import `module:Class` from your working directory, which executes that module in-process. That is your own source tree, the same trust level as `python -c "import mymodel"`. It is not an upload path: untrusted models run through the isolated plugin-host runtime instead.
 
-Package authoring — hand-written `task.toml` and `agent.toml`, digest pins, registry references — is the **publication** path, not the trial path. If you are still deciding whether SurgEval measures the thing you care about, stay on `@se.agent` and `surgeval run`; you lose nothing except the ability to hand your result to someone else and have them reproduce it byte for byte.
+Package authoring — hand-written `task.toml` and `agent.toml`, digest pins, registry references — is the **publication** path, not the trial path. If you are still deciding whether SurgEval measures the thing you care about, stay on `@se.agent` and `se.evaluate(...)`; you lose nothing except the ability to hand your result to someone else and have them reproduce it byte for byte.

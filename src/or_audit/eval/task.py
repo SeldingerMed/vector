@@ -71,7 +71,21 @@ _BOOLEAN_METRICS = {
 }
 
 
-def numeric_boundaries(tree: ast.Expression) -> set[float]:
+#: Ordering operators, whose operands the DSL reads as numbers.
+_ORDERING_SYMBOLS: dict[type[ast.cmpop], str] = {
+    ast.Lt: "<",
+    ast.LtE: "<=",
+    ast.Gt: ">",
+    ast.GtE: ">=",
+}
+_ORDERING_OPS = tuple(_ORDERING_SYMBOLS)
+#: Literal spellings of a boolean in ``fail_when``: TOML/JSON authors write
+#: ``true``/``false`` (parsed as names, resolved by the evaluator), Python
+#: authors write ``True``/``False`` (parsed as bool constants).
+_BOOLEAN_LITERALS = frozenset({"true", "false"})
+
+
+def numeric_boundaries(tree: ast.Expression, *, gate_id: str = "") -> set[float]:
     """Every numeric boundary an expression compares against, sign folded.
 
     Reads the operands of each :class:`ast.Compare` rather than walking every
@@ -81,19 +95,79 @@ def numeric_boundaries(tree: ast.Expression) -> set[float]:
     genuine two-sided predicate like ``x > 0.05 or x < -0.05``, which enforces
     two numbers while citing one.
 
-    ``bool`` is excluded explicitly: it subclasses ``int``, so a naive numeric
-    check reads ``True`` in ``unsafe == true`` as the number 1 and would
-    refuse an honest boolean gate.
+    ``bool`` is not a number *in an equality*: it subclasses ``int``, so a
+    naive numeric check reads ``True`` in ``unsafe == true`` as the number 1
+    and would refuse an honest boolean gate. Under an *ordering* operator the
+    same operand is a number - Python orders ``False`` as 0 - and cannot be
+    extracted as one, so it is refused outright by
+    :func:`_assert_no_boolean_ordering` rather than silently dropped.
     """
     found: set[float] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Compare):
             continue
+        _assert_no_boolean_ordering(node, gate_id=gate_id)
         for operand in (node.left, *node.comparators):
             value = _literal_number(operand)
             if value is not None:
                 found.add(value)
     return found
+
+
+def _assert_no_boolean_ordering(node: ast.Compare, *, gate_id: str = "") -> None:
+    """Refuse an ordering comparison against a boolean operand.
+
+    ``x > false`` is an uncited numeric boundary at 0 wearing whatever
+    citation the gate carries: the extractor cannot report it as a number
+    without breaking the honest ``unsafe == true`` gate, and the DSL evaluates
+    Python ordering, where ``False`` is 0 and ``True`` is 1. A gate declaring
+    ``threshold=1.5`` with ``fail_when="x > false or x > 1.5"`` therefore
+    failed at 0.5 while publishing 1.5. Equality keeps the boolean reading;
+    ordering is refused.
+    """
+    operands = (node.left, *node.comparators)
+    for index, operand in enumerate(operands):
+        shape = _boolean_shape(operand)
+        if shape is None:
+            continue
+        # ``ops[i]`` joins ``operands[i]`` and ``operands[i + 1]``, so an
+        # operand is ordered by the op before it or the op after it.
+        adjacent = [op for i, op in enumerate(node.ops) if i in (index - 1, index)]
+        ordering = next((op for op in adjacent if isinstance(op, _ORDERING_OPS)), None)
+        if ordering is None:
+            continue
+        prefix = f"gate {gate_id}: " if gate_id else ""
+        raise TaskContractError(
+            f"{prefix}fail_when {ast.unparse(node)!r} orders "
+            f"{ast.unparse(operand)!r} ({shape}) with "
+            f"{_ORDERING_SYMBOLS[type(ordering)]!r}. The DSL evaluates Python ordering, "
+            "where false is 0 and true is 1, so this enforces a numeric boundary no "
+            "threshold or basis describes - and the boundary is invisible to the "
+            "threshold check, which must read a boolean as a boolean. Fix: compare "
+            "against the declared threshold number, or use == / != if the operand "
+            "really is a boolean."
+        )
+
+
+def _boolean_shape(node: ast.expr) -> str | None:
+    """How an operand is guaranteed to produce a boolean, else ``None``.
+
+    Only shapes that *always* yield a bool are named. A bare signal name may
+    hold one at runtime, but refusing that would refuse every numeric gate,
+    and its boundary still has to be a cited literal to pass the threshold
+    check.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        return "boolean literal"
+    if isinstance(node, ast.Name) and node.id in _BOOLEAN_LITERALS:
+        return "boolean literal"
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return "not-expression"
+    if isinstance(node, ast.Compare):
+        return "comparison result"
+    if isinstance(node, ast.BoolOp):
+        return "and/or result"
+    return None
 
 
 def _literal_number(node: ast.expr) -> float | None:
@@ -104,7 +178,8 @@ def _literal_number(node: ast.expr) -> float | None:
 
     The ``bool`` rejection is first and deliberate: it subclasses ``int``, so
     reading it as a number turns ``unsafe == true`` into a comparison against
-    1 and would refuse an honest boolean gate.
+    1 and would refuse an honest boolean gate. Ordering a boolean is refused
+    by :func:`_assert_no_boolean_ordering` before this ever returns ``None``.
     """
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub | ast.UAdd):
         inner = _literal_number(node.operand)
@@ -408,18 +483,20 @@ class GateSpec(_Frozen):
                 "justified by, so a gate that cites one number and declares another has no "
                 "justified threshold at all."
             )
-        if (
-            self.threshold_basis is not None
-            and self.unit
-            and self.threshold_basis.unit
-            and self.unit != self.threshold_basis.unit
-        ):
+        if self.threshold_basis is not None and self.unit != self.threshold_basis.unit:
+            # Compared unconditionally: guarding on both sides being truthy let
+            # a gate drop the dimension (unit="" against a basis in N) or invent
+            # one (unit="N" against a dimensionless basis) while keeping the
+            # cited value. Two empty strings still agree - a dimensionless
+            # threshold is legal.
             raise TaskContractError(
                 f"gate {self.id}: publishes unit {self.unit!r} but its basis is stated in "
                 f"{self.threshold_basis.unit!r}. A threshold is only a physical quantity in "
-                "one unit; two disagreeing units mean the cited source does not justify the "
-                "number as published. Fix: state both in the unit the evidence is measured "
-                "in, or convert the number explicitly and cite the conversion."
+                "one unit; two disagreeing units - including an empty one, which drops or "
+                "invents the dimension - mean the cited source does not justify the number "
+                "as published. Fix: state both in the unit the evidence is measured in "
+                "(both empty only for a genuinely dimensionless threshold), or convert the "
+                "number explicitly and cite the conversion."
             )
         if is_scalar and self.fail_when:
             self._validate_fail_when_names(bindings)
@@ -458,7 +535,7 @@ class GateSpec(_Frozen):
         the rendered verifier docstring would all have shown 1.5.
         """
         tree = ast.parse(self.fail_when, mode="eval")
-        literals = numeric_boundaries(tree)
+        literals = numeric_boundaries(tree, gate_id=self.id)
         if self.threshold is None:
             if literals:
                 raise TaskContractError(

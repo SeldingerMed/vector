@@ -6,7 +6,7 @@ PyBullet) into a unified reset/step/render/inspect interface for procedural eval
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import (
     PackageNotFoundError,
@@ -27,6 +27,7 @@ from or_audit.eval.worlds import (
     require_world_kind,
     reset_default_world_kinds,
     world_kind_key,
+    world_kind_spec,
 )
 
 #: A real physics/world library produced the observations.
@@ -46,6 +47,135 @@ def module_distribution_version(module_name: str) -> str:
         except PackageNotFoundError:  # pragma: no cover - metadata race only
             continue
     return ""
+
+
+#: Deepest nesting a single-env batch unwrap will walk before refusing to guess
+#: which level holds the scalar the engine must publish.
+MAX_BATCH_UNWRAP_DEPTH = 4
+
+
+def batch_len(value: Any) -> int | None:
+    """Outer length of a batch-like engine value, or ``None`` when it is scalar.
+
+    Asked rather than type-checked: a 0-d torch tensor or numpy array defines
+    ``__len__`` and raises on it, so no ``hasattr`` test can tell a scalar from a
+    vector for the types a GPU engine actually hands back. Strings and mappings
+    are scalars here — a ``str`` is indexable but indexing it never ends.
+    """
+    if isinstance(value, str | bytes | Mapping):
+        return None
+    try:
+        return len(value)
+    except TypeError:
+        return None
+
+
+def batch_rows(value: Any) -> list[Any] | None:
+    """The value's outer dimension as a list, or ``None`` when it is scalar."""
+    size = batch_len(value)
+    return None if size is None else [value[index] for index in range(size)]
+
+
+def require_step_scalar(value: Any, *, field: str, world: str) -> Any:
+    """Unwrap a length-1 batch dimension off a step return; refuse anything wider.
+
+    A single-env GPU engine still returns shape-``(1,)`` tensors, and taking the
+    one entry out of a one-entry batch invents nothing. Two or more entries are a
+    batch that ``SimulationEngine`` cannot represent: one observation, one
+    reward, one terminated flag, one info dict per step. Coercing such a batch is
+    never a reduction — ``float()`` raises on a list, and ``bool()`` on a
+    non-empty list of per-env flags is unconditionally ``True``, which silently
+    ends an episode the environments never ended. A named refusal is the only
+    honest outcome.
+    """
+    current = value
+    for _ in range(MAX_BATCH_UNWRAP_DEPTH):
+        size = batch_len(current)
+        if size is None:
+            return current
+        if size != 1:
+            raise TaskContractError(
+                f"world {world!r} returned {size} {field} values for one step; this "
+                "SimulationEngine is a scalar contract and no reduction of a batch is "
+                "a step a single environment took. Build the env with num_envs = 1."
+            )
+        current = current[0]
+    raise TaskContractError(
+        f"world {world!r} returned a {field} nested more than {MAX_BATCH_UNWRAP_DEPTH} "
+        "levels deep; refusing to guess which level holds the scalar this engine must "
+        "publish."
+    )
+
+
+def require_single_env(raw: Any, *, world: str) -> int:
+    """Accept only ``num_envs == 1``.
+
+    ``SimulationEngine`` is a scalar contract, so there is no well-defined scalar
+    to publish for a batch: env 0 discards the rest, an average describes a world
+    that does not exist, and a max turns one env's contact into every env's
+    contact. Refusing is the honest outcome; repetition belongs to
+    ``environment.n_eval_episodes`` and the seed policy, which give independently
+    scored trials instead of one collapsed number.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise TaskContractError(
+            f"world {world!r}: environment.parameters.num_envs must be an integer, got {raw!r}"
+        )
+    if raw != 1:
+        raise TaskContractError(
+            f"world {world!r} requests num_envs={raw}, but this SimulationEngine is a "
+            "scalar contract (one observation, reward, terminated flag, and info dict "
+            "per step). A batched env returns a vector for each of those and no "
+            "reduction of it is a step a single environment took, so the batch is "
+            "refused rather than silently collapsed. Set "
+            "environment.parameters.num_envs = 1 and use environment.n_eval_episodes "
+            "with the task's seed policy for repetition."
+        )
+    return raw
+
+
+#: ``gymnasium.make`` errors that mean "this world is not registered here", as
+#: opposed to "this world exists and could not be built". Resolved by name
+#: because gymnasium is an optional dependency and older versions omit some.
+MISSING_WORLD_ERROR_NAMES = (
+    "NameNotFound",
+    "NamespaceNotFound",
+    "VersionNotFound",
+    "UnregisteredEnv",
+)
+
+
+def missing_world_errors(gymnasium_module: Any) -> tuple[type[BaseException], ...]:
+    """Exception types from ``gymnasium.make`` that mean the world is not installed.
+
+    Anything outside this set is a world that *is* registered and still failed to
+    build, which is a task configuration failure. Both were caught by one bare
+    ``except Exception`` that reported "no backend", so a task opting into the
+    synthetic stub silently measured a stand-in under a real world's name. An
+    empty tuple (a gymnasium exposing no ``error`` module) never matches, so
+    nothing is misclassified as missing.
+    """
+    errors = getattr(gymnasium_module, "error", None)
+    return tuple(
+        candidate
+        for name in MISSING_WORLD_ERROR_NAMES
+        if isinstance(candidate := getattr(errors, name, None), type)
+        and issubclass(candidate, BaseException)
+    )
+
+
+def refuse_unbuildable_world(engine: str, env_id: str, exc: BaseException) -> str:
+    """Refusal for a world that is registered but could not be constructed."""
+    return (
+        f"{engine} world {env_id!r} is registered but could not be built: "
+        f"{type(exc).__name__}: {exc}. That is a task configuration failure, not a "
+        "missing vendor runtime, and the two must not look alike: this used to be "
+        "caught and reported as 'no backend', so a task with "
+        "environment.synthetic_stub = true silently measured a non-physical stand-in "
+        "while naming a world that implies real physics. Fix environment.gym_id or "
+        "environment.parameters, or drop the world; do not accept stand-in numbers "
+        "under a real world's name."
+    )
 
 
 @runtime_checkable
@@ -156,20 +286,46 @@ def register_simulation_engine(
 ) -> None:
     """Register a simulation engine factory for a world kind.
 
-    Passing ``capabilities`` also (re-)registers the world kind's declared
-    eligibility with digest-pinned adapter identity, which is what lets a
-    non-Gym third-party world publish tasks without a kernel release.
+    ``capabilities`` declares what the world is eligible for and is registered
+    alongside the factory's digest-pinned adapter identity, which is what lets a
+    non-Gym third-party world publish tasks without a kernel release. It may be
+    omitted only when the kind already carries a declaration to inherit.
+
+    Replacing a factory always re-pins the identity, reusing the already
+    registered capabilities when the caller omits them: a spec left pointing at
+    the previous factory would make every job head attest an adapter the
+    dispatcher no longer runs, which is exactly the substitution the digest
+    exists to detect. ``provider`` is *not* inherited from the replaced spec -
+    a new factory is published by whoever registers it, and silently keeping
+    the old distribution's name would be a provenance claim nobody made.
+
+    A kind with no declaration anywhere is refused. An adapter that declares
+    nothing withholds everything, so installing a runnable engine for it would
+    leave ``resolve_world_capabilities`` with only the task's own word and let
+    a package grant itself ``physics`` (and a physics oracle with it) - the
+    inversion the adapter-authoritative rule exists to prevent.
     """
     key = world_kind_key(kind)
     if key in _SIM_ENGINE_REGISTRY and not override:
         raise TaskContractError(f"simulation engine already registered for {key!r}")
-    if capabilities is not None:
-        attach_world_adapter(
-            key,
-            capabilities=capabilities,
-            factory=factory,
-            provider=provider,
+    existing = world_kind_spec(key)
+    declared = capabilities
+    if declared is None and existing is not None:
+        declared = existing.capabilities
+    if declared is None:
+        raise TaskContractError(
+            f"world kind {key!r} has no declared capabilities, so an engine for it "
+            "cannot be registered: an undeclared adapter withholds every eligibility, "
+            "and a task would be left granting itself physics or closed-loop on its own "
+            "word. Pass capabilities= to register_simulation_engine, or declare the kind "
+            f"first with register_world_kind(WorldKindSpec(kind={key!r}, capabilities=...))"
         )
+    attach_world_adapter(
+        key,
+        capabilities=declared,
+        factory=factory,
+        provider=provider,
+    )
     _SIM_ENGINE_REGISTRY[key] = factory
 
 

@@ -283,6 +283,57 @@ def test_generated_environment_rewards_carry_provenance_into_rubric_state(tmp_pa
         env.close()
 
 
+def test_generated_rubric_refuses_a_forged_reward_record(tmp_path: Path):
+    """The rubric is the RL boundary, so it recomputes instead of believing.
+
+    The probe this defends against: a dict with an arbitrary float and two
+    non-empty strings used to be returned verbatim as the training reward.
+    """
+    out = tmp_path / "env"
+    export_verifiers_environment(LUMEN_TASK, out=out, projection_id=PROJECTION)
+    module = _load_generated(out, "generated_lumen_forged")
+    env = module.load_environment(gym_factory=lambda task: StubLumenWorld(max_pen=0.1))
+    try:
+        rollout = env.rollout(seed=0)
+        genuine = rollout.to_state()
+        # The honest record still round-trips through the rubric untouched.
+        assert env.reward_func(state=genuine) == rollout.reward == 1.0
+
+        # The forgery itself: a scalar and two plausible-looking strings.
+        with pytest.raises(ScoreContractError, match="not a reward record"):
+            env.reward_func(
+                state={
+                    "reward_record": {
+                        "reward": 99.0,
+                        "projection_digest": "not-a-digest",
+                        "parent_vector_ref": "not-a-vector",
+                    }
+                }
+            )
+
+        # A complete, well-typed record earned under someone else's task.
+        foreign = {**genuine["reward_record"], "task_digest": "0" * 64}
+        with pytest.raises(ScoreContractError, match="task_digest"):
+            env.reward_func(state={**genuine, "reward_record": foreign})
+
+        # This export's own pins, but a scalar the projection does not produce.
+        inflated = {**genuine["reward_record"], "reward": 99.0}
+        with pytest.raises(ScoreContractError, match="does not reproduce"):
+            env.reward_func(state={**genuine, "reward_record": inflated})
+
+        # A genuine record placed beside a vector it did not come from.
+        other = env.rollout(seed=1)
+        with pytest.raises(ScoreContractError, match="same trial"):
+            env.reward_func(state={**genuine, "vector": other.vector.model_dump(mode="json")})
+
+        # No vector at all: there is nothing to recompute the reward from.
+        without_vector = {key: value for key, value in genuine.items() if key != "vector"}
+        with pytest.raises(ScoreContractError, match="not the vector"):
+            env.reward_func(state=without_vector)
+    finally:
+        env.close()
+
+
 def test_generated_environment_refuses_an_edited_task_package(tmp_path: Path):
     out = tmp_path / "env"
     export_verifiers_environment(LUMEN_TASK, out=out, projection_id=PROJECTION)

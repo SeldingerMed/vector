@@ -16,8 +16,9 @@ import pytest
 import surgeval as se
 from or_audit.commands.onramp import register
 from or_audit.errors import TaskContractError
+from or_audit.eval.bind import assert_bind
 from or_audit.eval.contracts import InteractionMode
-from or_audit.eval.loader import load_agent
+from or_audit.eval.loader import load_agent, load_task
 from surgeval.decorators import agent, capability_for, describe_agent
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -229,6 +230,42 @@ class NotAnAgent:
 """
 
 
+DUAL_MODEL_SOURCE = """
+from typing import Any
+
+import surgeval as se
+
+
+@se.agent(interface="video-predict", agent_id="onramp/dual-predict", version="1")
+class DualVideoModel:
+    observations = ["video-clip"]
+    outputs = ["next-step"]
+    features = ["reasoning", "abstention"]
+
+    def predict(self, item: dict[str, Any]) -> dict[str, Any]:
+        del item
+        return {"next_step": "advance", "outcome": "continue", "unsafe": False}
+
+    def act(self, observation: Any, *, step: int = 0) -> list[float]:
+        del observation, step
+        return [0.0]
+
+
+@se.agent(interface="gym-policy", agent_id="onramp/dual-policy", version="1")
+class DualPolicyModel:
+    observations = ["gym-obs"]
+    actions = ["insertion_twist"]
+
+    def predict(self, item: dict[str, Any]) -> dict[str, Any]:
+        del item
+        return {}
+
+    def act(self, observation: Any, *, step: int = 0) -> list[float]:
+        del observation, step
+        return [0.0]
+"""
+
+
 @pytest.fixture
 def onramp_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="surgeval")
@@ -241,6 +278,18 @@ def model_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tu
     """Write a decorated model module and make it importable from a clean cwd."""
     name = f"onramp_model_{uuid4().hex[:12]}"
     (tmp_path / f"{name}.py").write_text(MODEL_SOURCE, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    try:
+        yield tmp_path, name
+    finally:
+        sys.modules.pop(name, None)
+
+
+@pytest.fixture
+def dual_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Path, str]]:
+    """Write a module of classes implementing both act() and predict()."""
+    name = f"onramp_dual_{uuid4().hex[:12]}"
+    (tmp_path / f"{name}.py").write_text(DUAL_MODEL_SOURCE, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     try:
         yield tmp_path, name
@@ -348,3 +397,171 @@ def test_describe_agent_command_refuses_bad_target(
     args = onramp_parser.parse_args(["describe-agent", "no-colon-here"])
     assert args.func(args) == 1
     assert "module:Class" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# publication mode: one package, one runtime identity
+# --------------------------------------------------------------------------
+
+
+def test_init_agent_refuses_a_dual_mode_class_without_a_mode(
+    dual_module: tuple[Path, str],
+    onramp_parser: argparse.ArgumentParser,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """act() and predict() are two runtime identities; the package must not guess."""
+    root, name = dual_module
+    out = root / "pkg"
+    args = onramp_parser.parse_args(["init-agent", f"{name}:DualVideoModel", "--out", str(out)])
+    assert args.func(args) == 1
+    err = capsys.readouterr().err
+    assert "REFUSED" in err
+    assert "--mode" in err
+    assert not out.exists() or not (out / "agent.toml").exists()
+
+
+def test_init_agent_publishes_only_the_predictor_identity(
+    dual_module: tuple[Path, str], onramp_parser: argparse.ArgumentParser
+) -> None:
+    """The reviewer's probe: a dual-mode class published as a predictor must bind.
+
+    Before the fix the package claimed predictor modes while declaring
+    ``kind = "policy"`` and ``load_policy``, so every predictor task refused it
+    in ``assert_bind`` - a package that advertised what it could not be driven as.
+    """
+    root, name = dual_module
+    out = root / "pkg"
+    args = onramp_parser.parse_args(
+        ["init-agent", f"{name}:DualVideoModel", "--out", str(out), "--mode", "single-turn"]
+    )
+    assert args.func(args) == 0
+
+    package = load_agent(out)
+    assert package.kind == "frozen-model"
+    assert package.runtime is not None
+    assert package.runtime.entrypoint == "runner.py:load_predictor"
+    modes = package.capabilities[0].interaction_modes
+    assert InteractionMode.CLOSED_LOOP not in modes
+    assert InteractionMode.SINGLE_TURN in modes
+    runner = (out / "runner.py").read_text(encoding="utf-8")
+    assert "load_policy" not in runner, "an unpublished identity must not ship a factory"
+
+    assert_bind(load_task(VIDEO_TASK), package)
+
+
+def test_init_agent_predictor_package_from_a_dual_class_runs(
+    dual_module: tuple[Path, str], onramp_parser: argparse.ArgumentParser
+) -> None:
+    root, name = dual_module
+    out = root / "pkg"
+    args = onramp_parser.parse_args(
+        ["init-agent", f"{name}:DualVideoModel", "--out", str(out), "--mode", "single-turn"]
+    )
+    assert args.func(args) == 0
+    result = se.evaluate(out, VIDEO_TASK, out=root / "run", n=2, strict_schemas=True)
+    assert result.n == 2
+
+
+def test_init_agent_publishes_only_the_policy_identity(
+    dual_module: tuple[Path, str], onramp_parser: argparse.ArgumentParser
+) -> None:
+    root, name = dual_module
+    out = root / "pkg"
+    args = onramp_parser.parse_args(
+        ["init-agent", f"{name}:DualPolicyModel", "--out", str(out), "--mode", "closed-loop"]
+    )
+    assert args.func(args) == 0
+
+    package = load_agent(out)
+    assert package.kind == "policy"
+    assert package.runtime is not None
+    assert package.runtime.entrypoint == "runner.py:load_policy"
+    assert package.capabilities[0].interaction_modes == (InteractionMode.CLOSED_LOOP,)
+    runner = (out / "runner.py").read_text(encoding="utf-8")
+    assert "load_predictor" not in runner
+
+    assert_bind(load_task(REPO_ROOT / "docs/examples/tasks/lumen-nav-safe"), package)
+
+
+def test_init_agent_predictor_publication_does_not_claim_closed_loop(
+    dual_module: tuple[Path, str], onramp_parser: argparse.ArgumentParser
+) -> None:
+    """The other half of honesty: publishing one identity gives up the other.
+
+    Pre-fix this package declared every mode plus ``kind = "policy"``, so a
+    closed-loop task accepted a predictor publication.
+    """
+    root, name = dual_module
+    out = root / "pkg"
+    args = onramp_parser.parse_args(
+        ["init-agent", f"{name}:DualPolicyModel", "--out", str(out), "--mode", "single-turn"]
+    )
+    assert args.func(args) == 0
+    package = load_agent(out)
+    with pytest.raises(TaskContractError, match="do not satisfy task lumen-nav-safe"):
+        assert_bind(load_task(REPO_ROOT / "docs/examples/tasks/lumen-nav-safe"), package)
+
+
+def test_init_agent_refuses_a_mode_the_class_does_not_implement(
+    model_module: tuple[Path, str],
+    onramp_parser: argparse.ArgumentParser,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root, name = model_module
+    args = onramp_parser.parse_args(
+        [
+            "init-agent",
+            f"{name}:ScaffoldModel",
+            "--out",
+            str(root / "pkg"),
+            "--mode",
+            "closed-loop",
+        ]
+    )
+    assert args.func(args) == 1
+    assert "closed-loop" in capsys.readouterr().err
+
+
+def test_init_agent_mode_is_optional_for_a_single_identity_class(
+    model_module: tuple[Path, str], onramp_parser: argparse.ArgumentParser
+) -> None:
+    """predict() alone is one identity across three modes, so no flag is needed."""
+    root, name = model_module
+    out = root / "pkg"
+    args = onramp_parser.parse_args(
+        ["init-agent", f"{name}:ScaffoldModel", "--out", str(out), "--mode", "counterfactual"]
+    )
+    assert args.func(args) == 0
+    published = load_agent(out).capabilities[0].interaction_modes
+    args = onramp_parser.parse_args(
+        ["init-agent", f"{name}:ScaffoldModel", "--out", str(out), "--force"]
+    )
+    assert args.func(args) == 0
+    assert load_agent(out).capabilities[0].interaction_modes == published
+
+
+def test_describe_agent_names_both_identities_of_a_dual_mode_class() -> None:
+    """describe-agent must not answer a two-identity class with one kind/entrypoint."""
+
+    @agent(interface="video-predict", agent_id="described/dual")
+    class DescribedDualModel:
+        def predict(self, item: dict[str, Any]) -> dict[str, Any]:
+            del item
+            return {}
+
+        def act(self, observation: Any, *, step: int = 0) -> list[float]:
+            del observation, step
+            return [0.0]
+
+    summary = describe_agent(DescribedDualModel)
+    assert "kind policy via runner.py:load_policy" in summary
+    assert "kind frozen-model via runner.py:load_predictor" in summary
+    assert "publishing picks one" in summary
+
+
+def test_describe_agent_states_the_one_identity_of_a_single_mode_class() -> None:
+    """One identity is stated plainly - this is the shape docs/ONRAMP.md prints."""
+    summary = describe_agent(DeclaredVideoModel)
+    assert "  kind         frozen-model" in summary
+    assert "  entrypoint   runner.py:load_predictor" in summary
+    assert "identity" not in summary

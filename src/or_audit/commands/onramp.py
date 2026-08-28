@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from or_audit.errors import ScoreContractError, TaskContractError
+from or_audit.eval.contracts import InteractionMode
 from or_audit.eval.integrity import file_sha256
 from or_audit.eval.loader import load_agent
 from surgeval.decorators import (
@@ -26,6 +27,7 @@ from surgeval.decorators import (
     binding_for,
     capability_toml,
     describe_agent,
+    publication_mode,
 )
 
 _PLACEHOLDER_WEIGHTS = """{
@@ -80,6 +82,10 @@ def load_policy(*, root: Any = None, weights_path: Any = None) -> Any:
     del root
     return _build(weights_path)
 '''
+
+#: Runner factory source keyed by the symbol it defines. A published package
+#: declares one runtime identity, so it carries exactly one of these.
+_FACTORIES = {"load_predictor": _PREDICTOR_FACTORY, "load_policy": _POLICY_FACTORY}
 
 
 @contextlib.contextmanager
@@ -151,6 +157,7 @@ def _write_package(
     binding: AgentBinding,
     out: Path,
     *,
+    mode: InteractionMode,
     module_name: str,
     weights_source: Path | None,
 ) -> tuple[Path, str]:
@@ -168,11 +175,10 @@ def _write_package(
     # package whose declared digest is not its content is a broken package.
     weights_pin = file_sha256(weights_file)
 
-    factories = ""
-    if "predict" in binding.methods:
-        factories += _PREDICTOR_FACTORY
-    if "act" in binding.methods:
-        factories += _POLICY_FACTORY
+    # One identity, one factory: the runner defines exactly the symbol agent.toml
+    # names, so what the package advertises is what it can be driven through.
+    entrypoint = binding.entrypoint_for(mode)
+    factories = _FACTORIES[entrypoint]
     (out / "runner.py").write_text(
         _RUNNER_TEMPLATE.format(
             module=module_name,
@@ -182,17 +188,16 @@ def _write_package(
         encoding="utf-8",
     )
 
-    entrypoint = binding.entrypoint_symbol
     agent_toml = "\n".join(
         [
             'format_version = "2"',
             f'id = "{binding.agent_id}"',
             f'agent_version = "{binding.version}"',
-            f'kind = "{binding.kind}"',
+            f'kind = "{binding.kind_for(mode)}"',
             f'weights_pin = "{weights_pin}"',
             f'weights_path = "{weights_name}"',
             "",
-            capability_toml(binding.capability),
+            capability_toml(binding.published_capability(mode)),
             "[runtime]",
             'kind = "local"',
             'protocol_version = "1"',
@@ -216,8 +221,9 @@ def _init_agent(args: argparse.Namespace) -> int:
         if weights_source is not None and not weights_source.is_file():
             raise TaskContractError(f"weights file {weights_source} does not exist")
         module_name = target.__module__
+        mode = publication_mode(binding, args.mode, option="--mode")
         weights_file, weights_pin = _write_package(
-            binding, out, module_name=module_name, weights_source=weights_source
+            binding, out, mode=mode, module_name=module_name, weights_source=weights_source
         )
         vendored = _vendor_module(target, out)
         package = load_agent(out)
@@ -227,6 +233,8 @@ def _init_agent(args: argparse.Namespace) -> int:
     print(f"wrote agent package: {out}")
     print(f"  id           {package.id}@{package.agent_version}")
     print(f"  kind         {package.kind}")
+    modes = ", ".join(item.value for item in package.capabilities[0].interaction_modes)
+    print(f"  modes        {modes}")
     print(f"  entrypoint   {package.runtime.entrypoint if package.runtime else ''}")
     print(f"  weights      {weights_file.name}  sha256:{weights_pin}")
     if weights_source is None:
@@ -264,6 +272,12 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     init.add_argument("target", help="module:Class of a decorated agent")
     init.add_argument("--out", required=True, help="package directory to write")
     init.add_argument("--weights", help="weights file to copy in and pin (default: placeholder)")
+    init.add_argument(
+        "--mode",
+        choices=[item.value for item in InteractionMode],
+        help="interaction mode to publish; required when the class implements both "
+        "act() and predict(), since one package declares one runtime identity",
+    )
     init.add_argument("--force", action="store_true", help="overwrite a non-empty output directory")
     init.set_defaults(func=_init_agent)
 

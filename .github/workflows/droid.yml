@@ -29,10 +29,10 @@ jobs:
       actions: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 1
       - name: Run Droid Exec
-        uses: Factory-AI/droid-action@main
+        uses: Factory-AI/droid-action@c6951275d02429bb172eadc7302352d21b45a694 # main
         with:
           factory_api_key: ${{ secrets.FACTORY_API_KEY }}

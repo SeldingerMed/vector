@@ -13,11 +13,11 @@ import json
 import re
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 
-from or_audit.commands.shelf import register
+from or_audit.commands.shelf import _print_orders, register
 from or_audit.errors import ScoreContractError, TaskContractError
 from or_audit.eval.equivalence import (
     DeclaredMatch,
@@ -38,6 +38,7 @@ from or_audit.eval.loader import load_agent, load_task
 from or_audit.eval.runner import run_job
 from or_audit.eval.shelf import (
     ShelfBenchEntry,
+    ShelfGateRef,
     ShelfReport,
     ShelfSpec,
     ShelfWorldEntry,
@@ -45,6 +46,8 @@ from or_audit.eval.shelf import (
     load_shelf_report,
     load_shelf_spec,
     refuse_cross_world_aggregate,
+    render_html,
+    shelf_data,
     shelf_ranking,
 )
 
@@ -71,6 +74,14 @@ def _task_package(dst: Path, *, task_id: str, world_pin: str = "") -> Path:
             f'kind = "frame-source"\nworld_pin = "{world_pin}"',
             1,
         )
+    # The shelf gate manifest is matched by (id, unit), so the world's one hard
+    # gate has to say what it is measured in before any equivalence claim over
+    # it can be checked at all.
+    text = text.replace(
+        'id = "unsafe_prediction"',
+        'id = "unsafe_prediction"\nunit = "indicator"',
+        1,
+    )
     toml_path.write_text(text, encoding="utf-8")
     return dst
 
@@ -204,7 +215,13 @@ def test_shelf_groups_verified_rows_per_world_with_heads(report: ShelfReport):
             assert len(row["head"]) == 64
             assert row["world_pin"] == world.entry.world_pin
             # Gates are a block of their own; the metric vector stays intact.
-            assert set(row["gates"]) == {"any_gate_failed"}
+            # The block carries what was gated, not just the verdict: an empty
+            # gate set must not be readable as a passing one.
+            assert set(row["gates"]) == {"any_gate_failed", "declared", "safety_attested"}
+            assert row["gates"]["declared"] == [
+                {"gate_id": "unsafe_prediction", "unit": "indicator"}
+            ]
+            assert row["gates"]["safety_attested"] is True
             assert "next_step_correct" in row["metrics"]
             # Abstention is reported, not folded away: one clip abstains.
             assert row["abstention"]["unassessable"] == 1
@@ -303,6 +320,9 @@ def test_shelf_refuses_a_world_the_catalog_will_not_ship():
                 ShelfWorldEntry(
                     world_id="cathsim",
                     world_kind="gym",
+                    # ``gym`` requires a pin; the catalog's, so this test fails
+                    # on the disposition rule under test and nothing else.
+                    world_pin="adfabb2f291e31e6d656e66d0052269f38db01bd",
                     task_id="cathsim-aorta-nav",
                     task_family=FAMILY,
                 ),
@@ -322,6 +342,7 @@ def test_shelf_may_name_a_world_the_catalog_does_not_curate():
             ShelfWorldEntry(
                 world_id="some-third-party-world",
                 world_kind="gym",
+                world_pin="tp@v1",
                 task_id="tp-nav",
                 task_family=FAMILY,
             ),
@@ -416,28 +437,51 @@ def _matched(statement: str) -> DeclaredMatch:
     return DeclaredMatch(statement=statement, matched=True)
 
 
-def _gate(*, unit_b: str = "newton", quantity_b: str = "wall contact force") -> GateEquivalence:
+class _GateRef(NamedTuple):
+    """Structural stand-in for one entry of a shelf world's gate manifest."""
+
+    gate_id: str
+    unit: str
+
+
+#: What the two shelf worlds actually run, as validate_equivalence sees it.
+_SHELF_GATES = {
+    "corpus-a": (_GateRef("unsafe_prediction", "indicator"),),
+    "corpus-b": (_GateRef("unsafe_prediction", "indicator"),),
+}
+
+
+def _gate(
+    *, unit_b: str = "indicator", quantity_b: str = "unsafe next-step prediction"
+) -> GateEquivalence:
+    """The gate these worlds really run: the unsafe-prediction flag.
+
+    Both worlds are frame-source next-step prediction tasks whose only hard
+    gate is ``unsafe_prediction``. Calibrating a wall contact force here would
+    describe physics neither task measures - internally consistent, and about
+    nothing on the shelf.
+    """
     return GateEquivalence(
         gate_id="unsafe_prediction",
-        physical_quantity="wall contact force",
-        unit="newton",
-        physical_event="vessel wall perforation onset",
+        physical_quantity="unsafe next-step prediction",
+        unit="indicator",
+        physical_event="the predicted next step is one the label set marks unsafe",
         calibration=(
             GateCalibration(
                 world_id="corpus-a",
-                physical_quantity="wall contact force",
-                unit="newton",
-                threshold=0.35,
+                physical_quantity="unsafe next-step prediction",
+                unit="indicator",
+                threshold=1.0,
                 bites_at_declared_event=True,
-                evidence="force sensor sweep on the silicone loop; onset at 0.34-0.36 N",
+                evidence="held-out split scored against the shared unsafe-step label set",
             ),
             GateCalibration(
                 world_id="corpus-b",
                 physical_quantity=quantity_b,
                 unit=unit_b,
-                threshold=0.35,
+                threshold=1.0,
                 bites_at_declared_event=True,
-                evidence="matched sweep on the second engine; onset at 0.34-0.36 N",
+                evidence="the same label set applied to the second corpus's held-out split",
             ),
         ),
     )
@@ -613,6 +657,128 @@ def test_load_refuses_an_unknown_artifact_format(tmp_path: Path):
     path = tmp_path / "equivalence.yaml"
     path.write_text("shelf_id: endovascular\n", encoding="utf-8")
     with pytest.raises(TaskContractError, match=r"\.toml or \.json"):
+        load_equivalence_artifact(path)
+
+
+def test_validate_equivalence_says_when_no_shelf_manifest_was_checked():
+    """Validating an artifact alone checks it against itself, and admits it."""
+    verdict = validate_equivalence(_published(_artifact()))
+    assert verdict.valid
+    assert verdict.shelf_gates_checked is False
+    assert "shelf_gates" not in verdict.requirements
+
+
+def test_validate_equivalence_accepts_an_artifact_covering_the_shelf_gates():
+    verdict = validate_equivalence(_published(_artifact()), world_gates=_SHELF_GATES)
+    assert verdict.valid
+    assert verdict.shelf_gates_checked is True
+    assert verdict.requirements["shelf_gates"] is True
+
+
+def test_validate_equivalence_refuses_a_gate_the_shelf_worlds_never_declare():
+    """The reviewed defect: a self-consistent claim about an unrelated gate."""
+    manifest = {world: (_GateRef("excess_force", "newton"),) for world in _SHELF_GATES}
+    verdict = validate_equivalence(_published(_artifact()), world_gates=manifest)
+    assert not verdict.valid
+    assert verdict.failed_requirements == ("shelf_gates",)
+    assert any(
+        "'unsafe_prediction'" in failure and "does not declare" in failure
+        for failure in verdict.failures
+    )
+    assert any(
+        "'excess_force'" in failure and "claims no equivalence" in failure
+        for failure in verdict.failures
+    )
+
+
+def test_validate_equivalence_refuses_an_omitted_hard_gate():
+    """Covering one gate while another runs unmapped is not comparability."""
+    manifest = {
+        world: (*gates, _GateRef("perforation", "newton")) for world, gates in _SHELF_GATES.items()
+    }
+    verdict = validate_equivalence(_published(_artifact()), world_gates=manifest)
+    assert verdict.failed_requirements == ("shelf_gates",)
+    assert any(
+        "'perforation'" in failure and "claims no equivalence" in failure
+        for failure in verdict.failures
+    )
+
+
+def test_validate_equivalence_matches_shelf_gates_by_unit_not_only_by_name():
+    manifest = {world: (_GateRef("unsafe_prediction", "newton"),) for world in _SHELF_GATES}
+    verdict = validate_equivalence(_published(_artifact()), world_gates=manifest)
+    assert verdict.failed_requirements == ("shelf_gates",)
+    assert any("'newton'" in failure and "'indicator'" in failure for failure in verdict.failures)
+
+
+def test_validate_equivalence_refuses_a_world_with_no_manifest_at_all():
+    verdict = validate_equivalence(_published(_artifact()), world_gates={"corpus-a": ()})
+    assert verdict.failed_requirements == ("shelf_gates",)
+    assert any("no gate manifest for world 'corpus-b'" in failure for failure in verdict.failures)
+
+
+def test_validate_equivalence_refuses_a_gate_mapped_twice():
+    doubled = _artifact().model_copy(update={"gate_equivalence": (_gate(), _gate())})
+    verdict = validate_equivalence(_published(doubled))
+    assert verdict.failed_requirements == ("gate_equivalence",)
+    assert any("mapped more than once" in failure for failure in verdict.failures)
+
+
+def test_equivalence_artifact_refuses_naming_one_world_twice():
+    """A world is trivially comparable with itself; the pair must be two worlds."""
+    payload = {**_artifact().model_dump(mode="json"), "world_pair": ["corpus-a", "corpus-a"]}
+    with pytest.raises(TaskContractError, match="names world 'corpus-a' twice"):
+        EquivalenceArtifact.model_validate(payload)
+
+
+def test_equivalence_refuses_a_world_ranking_that_repeats_a_subject():
+    """Duplicates change computed positions; set equality alone lets them through."""
+    verdict = validate_equivalence(
+        _published(
+            _artifact(
+                world_rankings={
+                    "corpus-a": ("strong", "middle", "weak", "weak"),
+                    "corpus-b": ("strong", "middle", "weak"),
+                }
+            )
+        )
+    )
+    assert verdict.failed_requirements == ("external_referent",)
+    assert any("repeats a subject" in failure for failure in verdict.failures)
+
+
+def test_equivalence_refuses_a_world_ranking_shorter_than_the_referent():
+    verdict = validate_equivalence(
+        _published(
+            _artifact(
+                world_rankings={
+                    "corpus-a": ("strong", "middle"),
+                    "corpus-b": ("strong", "middle", "weak"),
+                }
+            )
+        )
+    )
+    assert verdict.failed_requirements == ("external_referent",)
+    assert any("different subject set" in failure for failure in verdict.failures)
+
+
+def test_equivalence_load_refuses_malformed_toml_and_json(tmp_path: Path):
+    """Malformed input is a refusal, not a traceback out of the parser."""
+    bad_toml = tmp_path / "broken.toml"
+    bad_toml.write_text('shelf_id = "endovascular\n', encoding="utf-8")
+    with pytest.raises(TaskContractError, match="not parseable toml"):
+        load_equivalence_artifact(bad_toml)
+    bad_json = tmp_path / "broken.json"
+    bad_json.write_text('{"shelf_id": "endovascular",}', encoding="utf-8")
+    with pytest.raises(TaskContractError, match="not parseable json"):
+        load_equivalence_artifact(bad_json)
+
+
+def test_equivalence_load_scopes_a_model_refusal_to_the_file(tmp_path: Path):
+    path = tmp_path / "same-world.json"
+    payload = {**_artifact().model_dump(mode="json"), "world_pair": ["corpus-a", "corpus-a"]}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(TaskContractError, match="failed validation"):
         load_equivalence_artifact(path)
 
 
@@ -807,3 +973,470 @@ def test_load_shelf_report_round_trips(
     assert reloaded.spec == report.spec
     assert [world.rows for world in reloaded.worlds] == [world.rows for world in report.worlds]
     assert reloaded.benches[0].rows[0]["head"] == report.benches[0].rows[0]["head"]
+
+
+# --- Tier-0 provenance on a shelf row ---------------------------------------
+
+
+def _metrics_only_task_package(dst: Path, *, task_id: str, world_pin: str) -> Path:
+    """A Tier-0 wrap: instrumentation reports metrics, never a safety state.
+
+    ``TaskSpec`` refuses ``metrics_only`` alongside hard gates, so this package
+    necessarily has an empty gate set — which is exactly the shape that used to
+    render as a clean safety result.
+    """
+    shutil.copytree(VIDEO_TASK, dst, ignore=_NO_PYCACHE)
+    toml_path = dst / "task.toml"
+    text = toml_path.read_text(encoding="utf-8")
+    text = text.replace('id = "video-nextstep"', f'id = "{task_id}"', 1)
+    text = text.replace("safety_critical = true", "safety_critical = false", 1)
+    text = text.replace(
+        'kind = "frame-source"',
+        f'kind = "frame-source"\nworld_pin = "{world_pin}"\nmetrics_only = true',
+        1,
+    )
+    text = re.sub(r"\[\[verifier\.gates\]\]\n(?:.+\n)+?\n", "", text, count=1)
+    assert "verifier.gates" not in text
+    toml_path.write_text(text, encoding="utf-8")
+    return dst
+
+
+@pytest.fixture(scope="module")
+def tier0(bundles: dict[str, Any], tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """A built shelf whose one world is a metrics-only wrap, plus its payload."""
+    root = tmp_path_factory.mktemp("tier0")
+    task = _metrics_only_task_package(root / "task", task_id="wrap-nav", world_pin="wrap@v1")
+    agent = _agent_package(root / "agent", agent_id="example/predictor-strong")
+    job = _run(task, agent, root / "job")
+    spec = _spec(
+        worlds=(
+            ShelfWorldEntry(
+                world_id="wrap-world",
+                world_kind="frame-source",
+                world_pin="wrap@v1",
+                task_id="wrap-nav",
+                task_family=FAMILY,
+            ),
+        ),
+        benches=(ShelfBenchEntry(task_id=BENCH_TASK, pairs_worlds=("wrap-world",)),),
+    )
+    out = root / "shelf"
+    report = build_shelf(spec, [job, bundles["jobs"]["bench-strong"]], out=out)
+    return {"report": report, "out": out}
+
+
+def test_a_metrics_only_row_is_labelled_tier0_not_gate_clean(tier0: dict[str, Any]):
+    """The reviewer's probe: every metrics-only package necessarily has no gates.
+
+    Carrying only ``any_gate_failed`` made the shelf print "Gate failures: no"
+    for a row that is explicitly not safety-attested.
+    """
+    row = tier0["report"].world("wrap-world").rows[0]
+    assert row["gates"]["declared"] == []
+    assert not row["gates"]["any_gate_failed"]
+    # The distinction the old row shape could not express.
+    assert row["gates"]["safety_attested"] is False
+    assert row["provenance"]["metrics_only"] is True
+    assert row["provenance"]["attested"] is True
+
+
+def test_tier0_html_never_renders_an_empty_gate_set_as_passing(tier0: dict[str, Any]):
+    page = (tier0["out"] / "index.html").read_text(encoding="utf-8")
+    assert "Tier-0 metrics-only world" in page
+    assert "no hard gates declared" in page
+    # The bare cell a genuinely passing row gets must not appear for this world.
+    assert "<td>no</td>" not in page
+
+
+def test_a_synthetic_stub_backend_is_named_in_the_rendered_shelf(report: ShelfReport):
+    """A stub row must not render like a row a real world produced."""
+    data = json.loads(json.dumps(shelf_data(report)))
+    data["worlds"][0]["rows"][0]["provenance"] |= {
+        "attested": True,
+        "backend": "synthetic-stub",
+        "engine": "frame-source",
+    }
+    page = render_html(data)
+    assert "SYNTHETIC STUB — not a real world" in page
+
+
+def test_a_row_with_no_engine_provenance_reads_as_unattested(report: ShelfReport):
+    """Absent provenance is a statement, not a default to ``real``."""
+    data = json.loads(json.dumps(shelf_data(report)))
+    data["worlds"][0]["rows"][0]["provenance"] |= {"attested": False, "backend": "unknown"}
+    page = render_html(data)
+    assert "unattested — bundle recorded no engine provenance" in page
+
+
+# --- the per-world gate manifest --------------------------------------------
+
+
+UNSAFE_GATE = ShelfGateRef(gate_id="unsafe_prediction", unit="indicator")
+
+
+def test_shelf_captures_a_gate_manifest_per_world(report: ShelfReport):
+    for world in report.worlds:
+        assert world.gate_manifest == (UNSAFE_GATE,)
+
+
+def test_shelf_json_persists_and_restores_the_gate_manifest(
+    shelf_json: dict[str, Any], bundles: dict[str, Any], tmp_path: Path
+):
+    assert shelf_json["worlds"][0]["gate_manifest"] == [
+        {"gate_id": "unsafe_prediction", "unit": "indicator"}
+    ]
+    build_shelf(_spec(), _all_jobs(bundles), out=tmp_path / "manifest")
+    reloaded = load_shelf_report(tmp_path / "manifest")
+    assert [world.gate_manifest for world in reloaded.worlds] == [(UNSAFE_GATE,), (UNSAFE_GATE,)]
+
+
+def test_a_metrics_only_world_has_an_empty_manifest_not_a_missing_one(tier0: dict[str, Any]):
+    """``()`` says "this task gates nothing"; ``None`` would say "unknown"."""
+    assert tier0["report"].world("wrap-world").gate_manifest == ()
+
+
+def _unrun_world_spec() -> ShelfSpec:
+    return _spec(
+        worlds=(
+            *_spec().worlds,
+            ShelfWorldEntry(
+                world_id="corpus-c",
+                world_kind="frame-source",
+                world_pin="corpus-c@v1",
+                task_id="endo-nav-c",
+                task_family=FAMILY,
+            ),
+        ),
+    )
+
+
+def test_a_world_with_no_verified_row_has_no_gate_manifest(bundles: dict[str, Any], tmp_path: Path):
+    built = build_shelf(_unrun_world_spec(), _all_jobs(bundles), out=tmp_path / "unrun")
+    assert built.world("corpus-c").rows == ()
+    # Never established, which is not the same claim as "declares no gates".
+    assert built.world("corpus-c").gate_manifest is None
+
+
+def test_cross_world_refuses_a_world_whose_gate_manifest_was_never_established(
+    report: ShelfReport, bundles: dict[str, Any], tmp_path: Path
+):
+    built = build_shelf(_unrun_world_spec(), _all_jobs(bundles), out=tmp_path / "unrun-rank")
+    agents = _agents(report, "corpus-a")
+    base = _artifact(
+        world_rankings={"corpus-a": tuple(agents), "corpus-c": tuple(agents)},
+        referent_ranking=tuple(agents),
+    )
+    artifact = _published(base.model_copy(update={"world_pair": ("corpus-a", "corpus-c")}))
+    with pytest.raises(ScoreContractError, match="gate manifest was never established"):
+        refuse_cross_world_aggregate(
+            built, task_family=FAMILY, operation="rank", equivalence=artifact
+        )
+
+
+# --- a persisted shelf is re-verified, not trusted ---------------------------
+
+
+def test_load_shelf_report_refuses_a_hand_edited_row_order(bundles: dict[str, Any], tmp_path: Path):
+    """The reviewer's probe: stored order *is* the within-world rank.
+
+    Reconstructing a report from arbitrary row dicts let anyone move a line in a
+    text editor and change a cross-world mean rank, while a valid equivalence
+    artifact still supplied the "licensed by" label.
+    """
+    out = tmp_path / "edited"
+    build_shelf(_spec(), _all_jobs(bundles), out=out)
+    path = out / "shelf.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["worlds"][0]["rows"].reverse()
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(TaskContractError, match="has been edited since it was built"):
+        load_shelf_report(out)
+
+
+def test_load_shelf_report_refuses_an_invented_row(bundles: dict[str, Any], tmp_path: Path):
+    out = tmp_path / "invented"
+    build_shelf(_spec(), _all_jobs(bundles), out=out)
+    path = out / "shelf.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    forged = json.loads(json.dumps(payload["worlds"][0]["rows"][0]))
+    forged["agent_identity"] = "example/predictor-fictional@0"
+    payload["worlds"][0]["rows"].insert(0, forged)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(TaskContractError, match="does not match the rows re-verified"):
+        load_shelf_report(out)
+
+
+def test_load_shelf_report_refuses_a_file_that_names_no_job_bundles(
+    bundles: dict[str, Any], tmp_path: Path
+):
+    out = tmp_path / "nojobs"
+    build_shelf(_spec(), _all_jobs(bundles), out=out)
+    path = out / "shelf.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["jobs"] = []
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(TaskContractError, match="records no job bundles"):
+        load_shelf_report(out)
+
+
+def test_load_shelf_report_refuses_when_a_job_bundle_is_gone(
+    bundles: dict[str, Any], tmp_path: Path
+):
+    out = tmp_path / "moved"
+    build_shelf(_spec(), _all_jobs(bundles), out=out)
+    path = out / "shelf.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["jobs"] = [f"{reference}-not-here" for reference in payload["jobs"]]
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(TaskContractError, match="is not present at"):
+        load_shelf_report(out)
+
+
+def test_cli_rank_refuses_a_tampered_shelf(
+    bundles: dict[str, Any], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    out = tmp_path / "tampered"
+    build_shelf(_spec(), _all_jobs(bundles), out=out)
+    path = out / "shelf.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["worlds"][0]["rows"].reverse()
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    assert _invoke(["shelf", "rank", str(out)]) == 1
+    assert "has been edited since it was built" in capsys.readouterr().err
+
+
+# --- a world pin the kind requires ------------------------------------------
+
+
+def test_a_world_of_a_pinned_kind_may_not_be_shelved_unpinned():
+    """``sofa`` declares ``requires_world_pin``; an unpinned row can never match."""
+    with pytest.raises(TaskContractError, match="require a world pin, but declares none"):
+        ShelfWorldEntry(
+            world_id="steve",
+            world_kind="sofa",
+            task_id="steve-arch-variety-nav",
+            task_family=FAMILY,
+        )
+
+
+def test_an_unregistered_world_kind_is_not_judged_for_a_pin():
+    entry = ShelfWorldEntry(
+        world_id="third-party",
+        world_kind="not-a-registered-kind",
+        task_id="tp-nav",
+        task_family=FAMILY,
+    )
+    assert entry.world_pin == ""
+
+
+def test_the_shipped_endovascular_shelf_pins_its_sofa_world():
+    """The published shelf could never be completed while its stEVE row was unpinned."""
+    from or_audit.install.catalog import world_package
+
+    spec = load_shelf_spec(Path("docs/examples/shelves/endovascular.toml"))
+    for world in spec.worlds:
+        assert world.world_pin == world_package(world.world_id).world_pin
+
+
+# --- malformed files refuse, they do not traceback ---------------------------
+
+
+def test_load_shelf_spec_refuses_malformed_toml(tmp_path: Path):
+    (tmp_path / "shelf.toml").write_text('id = "endovascular"\ntitle = ', encoding="utf-8")
+    with pytest.raises(TaskContractError, match="is not valid TOML"):
+        load_shelf_spec(tmp_path)
+
+
+def test_load_shelf_report_refuses_malformed_json(tmp_path: Path):
+    (tmp_path / "shelf.json").write_text('{"format_version": "1",', encoding="utf-8")
+    with pytest.raises(TaskContractError, match="is not valid JSON"):
+        load_shelf_report(tmp_path)
+
+
+def test_load_shelf_report_refuses_a_json_document_that_is_not_an_object(tmp_path: Path):
+    (tmp_path / "shelf.json").write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(TaskContractError, match="is not a JSON object"):
+        load_shelf_report(tmp_path)
+
+
+def test_cli_refuses_malformed_shelf_files_without_a_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """The handlers catch only our own error types, so a raw parse error escapes."""
+    spec_path = tmp_path / "shelf.toml"
+    spec_path.write_text('id = "endovascular"\ntitle = ', encoding="utf-8")
+    assert (
+        _invoke(
+            [
+                "shelf",
+                "build",
+                str(spec_path),
+                "--jobs",
+                str(tmp_path),
+                "--out",
+                str(tmp_path / "o"),
+            ]
+        )
+        == 1
+    )
+    assert "REFUSED" in capsys.readouterr().err
+
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "shelf.json").write_text("{not json", encoding="utf-8")
+    assert _invoke(["shelf", "rank", str(site)]) == 1
+    err = capsys.readouterr().err
+    assert "REFUSED" in err
+    assert "is not valid JSON" in err
+
+
+# --- shelf rank labels (CliCoherence) ----------------------------------------
+
+
+class TestShelfRankLabels:
+    """``surgeval shelf rank`` must never print an absence as a success.
+
+    The HTML learned this first: a Tier-0 metrics-only row has no hard gates to
+    fail, so ``any_gate_failed`` is falsy for a row that verified no safety state
+    at all, and a row whose bundle recorded no engine provenance is unattested
+    rather than real. The ranked CLI output is read the same way and must say
+    the same things.
+    """
+
+    def test_a_tier0_row_is_not_ranked_as_gates_pass(
+        self, tier0: dict[str, Any], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert _invoke(["shelf", "rank", str(tier0["out"])]) == 0
+        ranked = capsys.readouterr().out
+        assert "gates-pass" not in ranked, "a metrics-only row has no gates to pass"
+        assert "gates-not-attested (Tier-0 metrics-only world, no safety state to gate)" in ranked
+
+    def test_a_verified_row_keeps_the_labels_it_earned(
+        self, report: ShelfReport, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The honest labels must stay available to rows that did run gates."""
+        ranking = shelf_ranking(report)
+        entry = ranking["per_world"][0]["order"][0]
+        assert entry["safety_attested"] is True, "the fixture world declares hard gates"
+        assert entry["any_gate_failed"], "and the strong predictor fails one of them"
+        _print_orders(ranking)
+        assert "gate-failed" in capsys.readouterr().out
+
+        entry["any_gate_failed"] = False
+        _print_orders(ranking)
+        printed = capsys.readouterr().out
+        assert "gates-pass" in printed
+        assert "gates-not-attested" not in printed
+
+    def test_a_row_whose_task_declares_no_gates_is_not_a_pass(
+        self, report: ShelfReport, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ranking = shelf_ranking(report)
+        entry = ranking["per_world"][0]["order"][0]
+        entry |= {"safety_attested": False, "any_gate_failed": False, "metrics_only": False}
+        _print_orders(ranking)
+        assert "gates-not-attested (task declares no hard gates)" in capsys.readouterr().out
+
+    def test_a_row_with_no_engine_provenance_ranks_as_unattested(
+        self, report: ShelfReport, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ranking = shelf_ranking(report)
+        ranking["per_world"][0]["order"][0]["backend"] = None
+        _print_orders(ranking)
+        assert "backend=UNATTESTED" in capsys.readouterr().out
+
+    def test_a_synthetic_stub_row_is_named_on_the_rank_line(
+        self, report: ShelfReport, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ranking = shelf_ranking(report)
+        ranking["per_world"][0]["order"][0]["backend"] = "synthetic-stub"
+        _print_orders(ranking)
+        printed = capsys.readouterr().out
+        assert "backend=SYNTHETIC-STUB" in printed
+        assert "backend=unknown" in printed, "the untouched row keeps its own backend"
+
+
+class TestEquivalenceCheckShelfGates:
+    """A requirement that did not run must be named, not omitted."""
+
+    @staticmethod
+    def _valid_artifact(report: ShelfReport, path: Path) -> Path:
+        agents = _agents(report, "corpus-a")
+        write_equivalence_artifact(
+            _artifact(
+                world_rankings={"corpus-a": tuple(agents), "corpus-b": tuple(agents)},
+                referent_ranking=tuple(agents),
+            ),
+            path,
+        )
+        return path
+
+    def test_check_without_a_shelf_reports_shelf_gates_as_not_run(
+        self, report: ShelfReport, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Without a shelf the gate map is checked against itself, nothing more."""
+        path = self._valid_artifact(report, tmp_path / "equivalence.json")
+        assert _invoke(["shelf", "equivalence", "check", str(path)]) == 0
+        printed = capsys.readouterr().out
+        assert "[not run] shelf_gates" in printed
+        assert "stays refused until the shelf_gates check above runs" in printed
+        assert "cross-world ordering is unlocked" not in printed
+
+    def test_check_with_a_shelf_runs_the_gate_check_and_says_so(
+        self,
+        report: ShelfReport,
+        bundles: dict[str, Any],
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        out = tmp_path / "shelf"
+        build_shelf(_spec(), _all_jobs(bundles), out=out)
+        path = self._valid_artifact(report, tmp_path / "equivalence.json")
+        assert _invoke(["shelf", "equivalence", "check", str(path), "--shelf", str(out)]) == 0
+        printed = capsys.readouterr().out
+        assert "[ok] shelf_gates" in printed
+        assert "cross-world ordering is unlocked" in printed
+        assert "[not run]" not in printed
+
+    def test_check_against_a_shelf_the_artifact_does_not_cover_refuses(
+        self,
+        report: ShelfReport,
+        tier0: dict[str, Any],
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Pointing the check at the wrong shelf must refuse, not report VALID."""
+        path = self._valid_artifact(report, tmp_path / "equivalence.json")
+        assert (
+            _invoke(["shelf", "equivalence", "check", str(path), "--shelf", str(tier0["out"])]) == 1
+        )
+        assert "REFUSED" in capsys.readouterr().err
+
+    def test_check_refuses_a_world_whose_gate_manifest_was_never_established(
+        self,
+        report: ShelfReport,
+        bundles: dict[str, Any],
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An absent manifest must not check like an empty one.
+
+        ``corpus-c`` is on the shelf but has no verified row, so its gate
+        manifest was never established. Treating that as "no gates to cover"
+        would let the artifact clear the requirement by default.
+        """
+        out = tmp_path / "unrun"
+        build_shelf(_unrun_world_spec(), _all_jobs(bundles), out=out)
+        agents = _agents(report, "corpus-a")
+        base = _artifact(
+            world_rankings={"corpus-a": tuple(agents), "corpus-c": tuple(agents)},
+            referent_ranking=tuple(agents),
+        )
+        path = tmp_path / "unrun-equivalence.json"
+        write_equivalence_artifact(
+            base.model_copy(update={"world_pair": ("corpus-a", "corpus-c")}), path
+        )
+        assert _invoke(["shelf", "equivalence", "check", str(path), "--shelf", str(out)]) == 1
+        err = capsys.readouterr().err
+        assert "REFUSED" in err
+        assert "gate manifest was never established" in err

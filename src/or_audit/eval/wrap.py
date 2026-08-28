@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Self
@@ -344,11 +345,64 @@ class WrapRequest(_Frozen):
     capabilities: WorldCapabilities | None = None
 
     @model_validator(mode="after")
+    def _identifiers_are_single_line(self) -> Self:
+        """Refuse control characters in text that names the wrapped world.
+
+        These fields are interpolated into four generated artifacts - a TOML
+        comment, a Markdown claim, and two Python docstrings. A newline in an
+        env id or a revision pin is never a real upstream identifier, and in a
+        generated file it is structure: it ends the comment and what follows
+        becomes top-level TOML. Each site escapes independently; this refuses
+        the input outright, at the boundary, where the error can name a fix.
+        """
+        for field in ("env_id", "world_pin", "license", "modality", "source_repo"):
+            value: str = getattr(self, field)
+            bad = sorted({char for char in value if char < " " or char == "\x7f"})
+            if bad:
+                shown = ", ".join(repr(char) for char in bad)
+                raise TaskContractError(
+                    f"wrap {self.task_id}: --{field.replace('_', '-')} contains "
+                    f"control character(s) {shown}. An identifier that spans lines "
+                    "is not an identifier; pass the upstream value on one line"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _wrap_is_claimable(self) -> Self:
         if not self.world_pin.strip():
             raise TaskContractError(
                 f"wrap {self.task_id}: --world-pin is required; a world that cannot be "
                 "pinned cannot be replayed, and an unreplayable row is not evidence"
+            )
+        moving = {
+            "main",
+            "master",
+            "head",
+            "latest",
+            "trunk",
+            "dev",
+            "develop",
+            "edge",
+            "stable",
+            "nightly",
+            "tip",
+            "default",
+        }
+        if self.world_pin.strip().lower() in moving:
+            raise TaskContractError(
+                f"wrap {self.task_id}: --world-pin {self.world_pin!r} names a moving "
+                "reference, not a revision. The package would claim replayability while "
+                "later runs resolve different world code - the failure this pin exists to "
+                "prevent. Fix: pass the commit the branch currently points at"
+            )
+        if "github.com" in self.source_repo and not re.fullmatch(
+            r"[0-9a-f]{40}", self.world_pin.strip()
+        ):
+            raise TaskContractError(
+                f"wrap {self.task_id}: --source-repo is a GitHub repository, so "
+                f"--world-pin must be a full 40-character commit; got "
+                f"{self.world_pin!r}. A tag can be moved and a short sha can collide, "
+                "so neither is an immutable identity for a replay claim"
             )
         if self.metrics_only and self.gate_mappings:
             raise TaskContractError(
@@ -429,7 +483,19 @@ class WrapRequest(_Frozen):
                             "construction. Audited note: "
                             f"{bound.note.strip().splitlines()[0] if bound.note.strip() else '-'}"
                         )
-                    if mapping.unit and mapping.unit != bound.unit:
+                    if not mapping.unit:
+                        raise TaskContractError(
+                            f"wrap {self.task_id}: gate {mapping.id!r} binds "
+                            f"{mapping.signal!r}, which is audited as a measurement in "
+                            f"{bound.unit!r}, but declares no unit. Omitting the unit does "
+                            "not make the gate unitless - it relabels an audited quantity "
+                            "as a bare flag and applies an uncited boundary (a bare signal "
+                            "is a zero test). Fix: declare "
+                            f"unit {bound.unit!r} with a cited threshold, or bind a signal "
+                            "the catalog records as non-physical. Audited note: "
+                            f"{bound.note.strip().splitlines()[0] if bound.note.strip() else '-'}"
+                        )
+                    if mapping.unit != bound.unit:
                         raise TaskContractError(
                             f"wrap {self.task_id}: gate {mapping.id!r} publishes "
                             f"{mapping.signal!r} in {mapping.unit!r}, but the audited reading "
@@ -438,6 +504,19 @@ class WrapRequest(_Frozen):
                             "gates by unit, so this would also make it falsely comparable to "
                             f"other worlds. Fix: publish it as {bound.unit!r}, or convert the "
                             "number explicitly and cite the conversion. Audited note: "
+                            f"{bound.note.strip().splitlines()[0] if bound.note.strip() else '-'}"
+                        )
+                    if mapping.threshold is None:
+                        raise TaskContractError(
+                            f"wrap {self.task_id}: gate {mapping.id!r} binds "
+                            f"{mapping.signal!r}, an audited quantity measured in "
+                            f"{bound.unit!r}, but declares no threshold. A predicate over a "
+                            "measured quantity with no cited number still has a boundary - "
+                            "a bare signal is a test against zero - it is just an uncited "
+                            "one wearing an audited signal's name. Fix: declare the "
+                            f"threshold in {bound.unit!r} with its normative source, or "
+                            "ship the wrap --metrics-only and publish the reading without "
+                            "a gate. Audited note: "
                             f"{bound.note.strip().splitlines()[0] if bound.note.strip() else '-'}"
                         )
                     continue
@@ -586,6 +665,37 @@ def _toml_str(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _toml_key(key: str) -> str:
+    """Render a TOML key.
+
+    Always quoted. A bare key is only legal for ``[A-Za-z0-9_-]``, and a
+    caller-supplied ``--param`` name is not checked against that: an unquoted
+    key containing ``}`` or a newline closes the inline table it sits in and
+    everything after it becomes top-level TOML.
+    """
+    return _toml_str(key)
+
+
+def _comment_safe(value: str) -> str:
+    """Collapse a value to something that cannot escape a ``#`` comment.
+
+    A TOML comment ends at the newline, so free text carried into one is
+    structure, not prose. Belt to the braces of :func:`_assert_renders_request`.
+    """
+    return " ".join(value.split())
+
+
+def _docstring_safe(value: str) -> str:
+    """Escape a value interpolated into a generated ``\"\"\"`` docstring.
+
+    Escapes quotes, backslashes *and* newlines. Quotes alone are not enough:
+    one of the two interpolation sites is a single-line docstring, where an
+    embedded newline breaks the module just as a quote sequence does. JSON
+    string escaping is a compatible subset of Python's, so borrow it whole.
+    """
+    return json.dumps(value, ensure_ascii=False)[1:-1]
+
+
 def _toml_value(value: bool | int | float | str) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -595,7 +705,7 @@ def _toml_value(value: bool | int | float | str) -> str:
 
 
 def _toml_inline(values: dict[str, bool | int | float | str]) -> str:
-    body = ", ".join(f"{key} = {_toml_value(values[key])}" for key in sorted(values))
+    body = ", ".join(f"{_toml_key(key)} = {_toml_value(values[key])}" for key in sorted(values))
     return "{ " + body + " }"
 
 
@@ -615,7 +725,7 @@ def _render_task_toml(
     oracle = OracleKind.PHYSICS if capabilities.physics else OracleKind.SCRIPT
     lines = [
         "# Generated by `surgeval wrap`. Regenerate rather than hand-patch the pins:",
-        f"# the wrapped world is {spec.env_id} at {spec.world_pin}.",
+        f"# the wrapped world is {_comment_safe(spec.env_id)} at {_comment_safe(spec.world_pin)}.",
         'format_version = "2"',
         f"id = {_toml_str(spec.task_id)}",
         'task_version = "0"',
@@ -821,7 +931,7 @@ def _render_verifier(spec: WrapRequest) -> str:
     """Render a verifier that reads reported state and defaults nothing."""
     metrics = _metrics(spec)
     lines = [
-        f'"""Generated verifier for the wrapped world `{spec.env_id}`.',
+        f'"""Generated verifier for the wrapped world `{_docstring_safe(spec.env_id)}`.',
         "",
         "Every value here comes from what the engine reported in `info`. A signal the",
         "engine did not report is emitted as `None` (an unassessable metric), never as",
@@ -847,6 +957,7 @@ def _render_verifier(spec: WrapRequest) -> str:
         "",
         "from __future__ import annotations",
         "",
+        "import math",
         "from typing import Any",
         "",
     ]
@@ -882,11 +993,29 @@ def _render_verifier(spec: WrapRequest) -> str:
     lines += [
         "",
         "",
+        "#: Mirrors ``or_audit.eval.gym_world.NONFINITE_TAG``. Duplicated rather",
+        "#: than imported: a generated package must stay standalone.",
+        'NONFINITE_TAG = "__nonfinite__:"',
+        "",
+        "",
         "def _reported(info: dict[str, Any], key: str, *aliases: str) -> Any:",
-        '    """First reported alias, or ``None`` when the engine reported none."""',
+        '    """First reported alias, or ``None`` when the engine reported none.',
+        "",
+        "    A non-finite reading is *not* reported. The recorder tags NaN and",
+        "    the infinities rather than writing 0.0, so a diverged solver arrives",
+        "    here as a tagged string; a raw float can arrive the same way from a",
+        "    world that never passed through the recorder. Either way nothing was",
+        "    measured, and the honest answer is None: ``bool()`` of the tag is",
+        "    True, which would turn a diverged run into a reported success.",
+        '    """',
         "    for name in (key, *aliases):",
         "        if name in info:",
-        "            return info[name]",
+        "            value = info[name]",
+        "            if isinstance(value, str) and value.startswith(NONFINITE_TAG):",
+        "                return None",
+        "            if isinstance(value, float) and not math.isfinite(value):",
+        "                return None",
+        "            return value",
         "    return None",
         "",
         "",
@@ -901,7 +1030,7 @@ def _render_verifier(spec: WrapRequest) -> str:
         "",
         "",
         "class WrapVerifier:",
-        f'    """Verifier for the wrapped world `{spec.env_id}`."""',
+        f'    """Verifier for the wrapped world `{_docstring_safe(spec.env_id)}`."""',
         "",
         "    def score(self, context: dict[str, Any]) -> dict[str, Any]:",
         '        raw_info = context.get("info")',
@@ -951,6 +1080,54 @@ def _render_verifier(spec: WrapRequest) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _assert_renders_request(contents: dict[str, str], spec: WrapRequest) -> None:
+    """Refuse to write a package that is not what the request asked for.
+
+    Every generated artifact here is assembled by concatenating strings, and a
+    string that carries structure can create structure. Escaping each site is
+    the fix; this is the check that the fix held. It is deliberately a
+    round-trip and not a syntax check: ``task.toml`` parsing proves only that
+    *something* valid was produced, not that it says what the caller asked
+    for, and a forged ``[attestation]`` table parses perfectly well.
+    """
+    try:
+        parsed = tomllib.loads(contents["task.toml"])
+    except tomllib.TOMLDecodeError as exc:
+        raise TaskContractError(
+            f"wrap {spec.task_id}: generated task.toml does not parse ({exc}). "
+            "This is a bug in the wrap kit, not in your arguments; nothing was written"
+        ) from exc
+
+    environment = parsed.get("environment", {})
+    expected: tuple[tuple[str, object, object], ...] = (
+        ("id", parsed.get("id"), spec.task_id),
+        ("environment.world_pin", environment.get("world_pin"), spec.world_pin),
+        ("environment.parameters", environment.get("parameters", {}), dict(spec.parameters)),
+    )
+    for name, produced, requested in expected:
+        if produced != requested:
+            raise TaskContractError(
+                f"wrap {spec.task_id}: generated task.toml says {name}={produced!r} "
+                f"but the request said {requested!r}. Refusing to write a package "
+                "that misstates its own provenance"
+            )
+    for table in ("attestation", "decision"):
+        if table in parsed:
+            raise TaskContractError(
+                f"wrap {spec.task_id}: generated task.toml declares [{table}], which "
+                "no wrap emits. A scaffold cannot mint a claim the kit does not make"
+            )
+
+    try:
+        ast.parse(contents["verifier.py"])
+    except SyntaxError as exc:
+        raise TaskContractError(
+            f"wrap {spec.task_id}: generated verifier.py does not parse ({exc}). "
+            "A package whose verifier cannot be imported is not a package; "
+            "nothing was written"
+        ) from exc
+
+
 def _render_wrap_json(
     spec: WrapRequest,
     *,
@@ -986,6 +1163,10 @@ def scaffold_wrap(spec: WrapRequest, out: Path) -> WrapResult:
 
     Deterministic: identical requests write byte-identical files, so a
     regenerated scaffold diffs cleanly against a hand-edited one.
+
+    Nothing is written until every artifact has been rendered *and* checked
+    against the request. A half-written package is worse than none: the kit
+    would have reported a failure while leaving something that looks loadable.
     """
     capabilities, kind_spec = _resolve(spec)
     root = Path(out)
@@ -998,6 +1179,7 @@ def scaffold_wrap(spec: WrapRequest, out: Path) -> WrapResult:
             spec, kind_spec=kind_spec, conformance_command=conformance_command
         ),
     }
+    _assert_renders_request(contents, spec)
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for name in sorted(contents):

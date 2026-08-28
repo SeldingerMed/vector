@@ -113,8 +113,18 @@ def _worlds_install(args: argparse.Namespace) -> int:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 1
     print(plan.render())
-    dry_run = not args.execute
-    outcome = execute_install(plan, dry_run=dry_run)
+    # `--dry-run` is honoured on its own account, not merely as the absence of
+    # `--execute`: if the mutual-exclusion group below is ever relaxed, an
+    # explicit dry-run request must still refuse to install.
+    dry_run = args.dry_run or not args.execute
+    try:
+        outcome = execute_install(plan, dry_run=dry_run)
+    except TaskContractError as exc:
+        # A plan carrying manual work refuses rather than half-running, and today
+        # that is most of the catalog. Refusing is a normal answer to `--execute`,
+        # so it has to reach the user as REFUSED, not as a traceback.
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
     if outcome.dry_run:
         print(f"\ndry run: {len(outcome.commands)} command(s) not executed (--execute to run)")
         return 0
@@ -161,13 +171,16 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
 
     install = worlds_sub.add_parser("install", help="plan (or run) a world install")
     install.add_argument("id", help="catalog world id")
-    install.add_argument(
+    # Asking to plan and to install in one command is a contradiction, and the
+    # dangerous reading (install anyway) used to win. argparse rejects the pair
+    # at parse time, before a plan exists to run.
+    intent = install.add_mutually_exclusive_group()
+    intent.add_argument(
         "--dry-run",
         action="store_true",
-        default=True,
         help="print the commands without running them (default)",
     )
-    install.add_argument(
+    intent.add_argument(
         "--execute",
         action="store_true",
         help="actually run the planned commands",

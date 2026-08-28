@@ -29,11 +29,14 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 
 from or_audit.errors import TaskContractError
 from or_audit.eval.enums import WorldKind
 
+#: Grammar a world-kind key is *written* in. Underscores are accepted on input
+#: and folded to hyphens by :func:`world_kind_key`, so the canonical key a
+#: registry is keyed by and provenance records never contains one.
 WorldKindSlug = Annotated[
     str, StringConstraints(min_length=1, max_length=80, pattern=r"^[a-z0-9][a-z0-9_-]*$")
 ]
@@ -127,6 +130,15 @@ class WorldKindSpec(_Frozen):
     #: Distribution that published the adapter, for provenance.
     provider: str = ""
 
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _canonical_kind(cls, value: Any) -> Any:
+        # A spec is keyed by ``spec.kind``, and a task looks its world up by
+        # ``world_kind_key``. Canonicalizing here keeps a registered plugin kind
+        # reachable from the task that names it: registering ``steve_sofa`` and
+        # loading a task declaring ``steve_sofa`` must hit the same entry.
+        return world_kind_key(value) if isinstance(value, str) else value
+
     @property
     def adapter_identity(self) -> str:
         """Stable adapter identity, or ``"unattached"`` when no adapter is registered."""
@@ -136,8 +148,16 @@ class WorldKindSpec(_Frozen):
 
 
 def world_kind_key(kind: WorldKind | str) -> str:
-    """Registry / provenance key for a declared or task-authored world kind."""
-    return kind.value if isinstance(kind, WorldKind) else str(kind)
+    """Canonical registry / provenance key for a declared or authored world kind.
+
+    Folds underscores to hyphens exactly as ``WorldSpec._normalize_kind`` does.
+    The two normalizations must stay identical: a registry keyed differently
+    from the task that names it silently loses the adapter, and a lost adapter
+    means an unpinned, unattested run rather than a refusal.
+    """
+    if isinstance(kind, WorldKind):
+        return kind.value
+    return str(kind).replace("_", "-").lower()
 
 
 def adapter_identity(factory: Callable[..., Any]) -> tuple[str, str]:
@@ -146,22 +166,34 @@ def adapter_identity(factory: Callable[..., Any]) -> tuple[str, str]:
     The digest pins adapter *behaviour*, not just its name: two distributions
     publishing the same world kind produce different identities, and a patched
     adapter changes the identity recorded on every artifact it touches.
+
+    Fails closed. A factory with no importable ``module:qualname`` or no
+    readable source cannot be pinned at all, and hashing its name instead would
+    mint an identity that pins nothing: two distinct callable objects of the
+    same class, or two C callables, would share one digest and could be
+    swapped for each other without moving a single job head.
     """
     module = getattr(factory, "__module__", "") or ""
-    symbol = getattr(factory, "__qualname__", "") or getattr(factory, "__name__", "")
-    adapter_id = f"{module}:{symbol}" if module and symbol else symbol or "anonymous"
+    symbol = getattr(factory, "__qualname__", "") or getattr(factory, "__name__", "") or ""
     try:
         source_file = inspect.getsourcefile(factory)
-    except TypeError:  # builtins / C callables carry no source
+    except TypeError:  # builtins / C callables / callable instances carry no source
         source_file = None
+    payload: bytes | None = None
     if source_file is not None:
         try:
             payload = Path(source_file).read_bytes()
-        except OSError:  # pragma: no cover - unreadable source is not a contract error
+        except OSError:
             payload = None
-        if payload is not None:
-            return adapter_id, hashlib.sha256(payload).hexdigest()
-    return adapter_id, hashlib.sha256(adapter_id.encode()).hexdigest()
+    if not module or not symbol or payload is None:
+        missing = "an importable module:qualname" if not module or not symbol else "readable source"
+        raise TaskContractError(
+            f"adapter factory {factory!r} cannot be content-pinned: it has no {missing}. "
+            "A world adapter must be a module-level function (or another callable whose "
+            "source file is readable) so its digest changes when its behaviour does; "
+            "wrap a callable object or a partial in a named module-level factory."
+        )
+    return f"{module}:{symbol}", hashlib.sha256(payload).hexdigest()
 
 
 #: Capabilities of the world kinds the kernel ships. These are declarations,
@@ -195,7 +227,11 @@ _WORLD_KIND_REGISTRY: dict[str, WorldKindSpec] = {}
 
 
 def register_world_kind(spec: WorldKindSpec, *, override: bool = False) -> None:
-    """Register a world kind's declared capabilities and adapter identity."""
+    """Register a world kind's declared capabilities and adapter identity.
+
+    ``spec.kind`` is already canonical (see ``WorldKindSpec._canonical_kind``),
+    so the key stored here is the same key :func:`world_kind_spec` looks up.
+    """
     if spec.kind in _WORLD_KIND_REGISTRY and not override:
         raise TaskContractError(f"world kind already registered for {spec.kind!r}")
     _WORLD_KIND_REGISTRY[spec.kind] = spec

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -32,6 +33,23 @@ class GateOutcome(BaseModel):
     #: Optional uncertainty/confidence for non-DSL realizations.
     confidence: float | None = None
     abstained: bool = False
+
+    @model_validator(mode="after")
+    def _confidence_is_a_number(self) -> Self:
+        """``None`` means "not reported"; ``nan`` is a number that is not one.
+
+        Same defect as a non-finite metric value, one field over: this is
+        hashed into the job head, ``canonical_json`` cannot render it, and
+        ``score_context``'s ``min(max(float(c), 0.0), 1.0)`` clamp does not
+        catch it - every comparison against ``nan`` is False, so it passes
+        through unchanged.
+        """
+        if self.confidence is not None and not math.isfinite(self.confidence):
+            raise TaskContractError(
+                f"gate {self.id} confidence {self.confidence!r} is not a number; report null "
+                "when no confidence was measured"
+            )
+        return self
 
 
 class MetricOutcome(BaseModel):
@@ -73,6 +91,20 @@ class MetricOutcome(BaseModel):
             raise TaskContractError(f"continuous metric {self.id} requires a number or null")
         if self.kind is MetricKind.CATEGORICAL and not isinstance(self.value, str):
             raise TaskContractError(f"categorical metric {self.id} requires text or null")
+        if isinstance(self.value, float) and not math.isfinite(self.value):
+            # A diverged solver's nan/inf is not a measurement, and the one
+            # thing it must never become is a number. Refused on the published
+            # record rather than only at the boundary because this value is
+            # hashed into the job head: `canonical_json` cannot render it, so a
+            # non-finite metric used to escape as a ValueError from inside head
+            # computation - the operator got a canonicalization error rather
+            # than a statement about their metric. ``score_context`` records
+            # the honest answer (null, unassessable), so reaching here means a
+            # construction path that bypassed it.
+            raise TaskContractError(
+                f"metric {self.id} value {self.value!r} is not a measurement; a non-finite "
+                "value must be recorded as null (unassessable), never as a number"
+            )
         return self
 
 
@@ -128,7 +160,23 @@ class TrialVector(BaseModel):
 
 
 def project(vector: TrialVector, spec: ProjectionSpec) -> float:
-    """Apply a digestable declarative rule to an authoritative vector."""
+    """Apply a digestable declarative rule to an authoritative vector.
+
+    Every return below is finite by construction: TOML spells ``inf`` and
+    ``nan``, so the declared reward values are checked here, and the source
+    metric cannot hold a non-finite number (see
+    :meth:`MetricOutcome._value_matches_kind`). This is the one point every
+    projection path passes through, and its result is hashed into the job head
+    as ``TrialRecord.projection`` - a non-finite reward would surface as a
+    canonicalization error three frames down rather than as a statement about
+    the projection.
+    """
+    for field, value in (("true_value", spec.true_value), ("false_value", spec.false_value)):
+        if not math.isfinite(value):
+            raise TaskContractError(
+                f"projection {spec.identity} declares {field}={value!r}; a reward must be a "
+                "finite number"
+            )
     if vector.any_gate_unassessable:
         if spec.gate_unassessable is GateProjectionPolicy.ZERO:
             return spec.false_value
