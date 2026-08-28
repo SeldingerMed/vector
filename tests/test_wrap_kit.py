@@ -578,6 +578,32 @@ class TestWorldPinIsARevision:
         with pytest.raises(TaskContractError, match="40-character commit"):
             _request(world_pin="aa430af")
 
+    @pytest.mark.parametrize(
+        "source_repo",
+        [
+            "https://GitHub.com/med-air/SurRoL",
+            "git@GITHUB.com:med-air/SurRoL.git",
+            "ssh://git@GitLab.com/group/world",
+            "https://BitBucket.org/team/world",
+        ],
+    )
+    def test_the_host_is_parsed_not_substring_matched(self, source_repo: str) -> None:
+        """Casing and scp-style remotes must not launder a branch into a pin.
+
+        The first version of this rule did `"github.com" in source_repo`, so
+        `https://GitHub.com/...` sailed past it and a branch name shipped as
+        immutable provenance. The host is now parsed and folded, and the two
+        other commit-addressed hosts are covered by the same rule.
+        """
+        with pytest.raises(TaskContractError, match="40-character commit"):
+            _request(world_pin="feature", source_repo=source_repo)
+
+    def test_an_unrecognised_host_keeps_its_own_pin_convention(self) -> None:
+        """The rule is about hosts where a revision *is* a commit, not all URLs."""
+        assert _request(
+            world_pin="2022.2.1", source_repo="https://example.com/vendor/world"
+        ).world_pin
+
     def test_a_non_github_world_may_pin_its_own_way(self) -> None:
         """First-party and synthetic worlds are not git repositories."""
         assert _request(world_pin="ortho-synthetic-v1", source_repo="").world_pin

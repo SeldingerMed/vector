@@ -50,6 +50,30 @@ if TYPE_CHECKING:
 #: Schema version of the emitted ``wrap.json`` provenance record.
 WRAP_FORMAT_VERSION = "1"
 
+#: Hosts where a revision *is* a 40-character commit, so a tag or branch name
+#: in ``world_pin`` is a moving reference wearing immutable clothes.
+COMMIT_ADDRESSED_HOSTS = frozenset({"github.com", "gitlab.com", "bitbucket.org"})
+
+
+def _commit_addressed_host(source_repo: str) -> str:
+    """The recognised git host in ``source_repo``, or ``""``.
+
+    Parses rather than substring-matches, and folds case. A substring test
+    against a raw URL missed ``https://GitHub.com/...`` and
+    ``git@GITHUB.com:o/r.git`` entirely, so a branch name shipped as a
+    replay pin. Handles both URL and scp-style remotes.
+    """
+    remote = source_repo.strip().lower()
+    if not remote:
+        return ""
+    if "://" in remote:
+        remote = remote.split("://", 1)[1]
+    if "@" in remote:
+        remote = remote.split("@", 1)[1]
+    host = re.split(r"[/:]", remote, maxsplit=1)[0]
+    return host if host in COMMIT_ADDRESSED_HOSTS else ""
+
+
 #: An engine ``info`` key. Constrained to a lowercase identifier because the
 #: same string becomes a gate evidence-binding name, a ``fail_when`` variable,
 #: and a metric id — three places with narrower rules than an arbitrary key.
@@ -395,14 +419,15 @@ class WrapRequest(_Frozen):
                 "later runs resolve different world code - the failure this pin exists to "
                 "prevent. Fix: pass the commit the branch currently points at"
             )
-        if "github.com" in self.source_repo and not re.fullmatch(
+        if _commit_addressed_host(self.source_repo) and not re.fullmatch(
             r"[0-9a-f]{40}", self.world_pin.strip()
         ):
             raise TaskContractError(
-                f"wrap {self.task_id}: --source-repo is a GitHub repository, so "
-                f"--world-pin must be a full 40-character commit; got "
-                f"{self.world_pin!r}. A tag can be moved and a short sha can collide, "
-                "so neither is an immutable identity for a replay claim"
+                f"wrap {self.task_id}: --source-repo is hosted on "
+                f"{_commit_addressed_host(self.source_repo)}, where a revision is a "
+                f"40-character commit; got --world-pin {self.world_pin!r}. A tag or "
+                "branch can be moved and a short sha can collide, so neither is an "
+                "immutable identity for a replay claim"
             )
         if self.metrics_only and self.gate_mappings:
             raise TaskContractError(
