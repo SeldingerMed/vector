@@ -18,9 +18,9 @@ from or_audit.eval.sim.base import (
     BaseSimulationBridge,
     SimulationEngine,
     module_distribution_version,
-    world_kind_key,
 )
 from or_audit.eval.task import TaskSpec
+from or_audit.eval.worlds import world_kind_key
 
 _WARP_MODULES = "'warp' / 'isaaclab'"
 
@@ -54,6 +54,7 @@ class WarpBridge(BaseSimulationBridge):
         allow_synthetic: bool = False,
         backend_version: str = "",
         world_kind: WorldKind | str | None = None,
+        max_steps: int = 100,
     ) -> None:
         kind = world_kind if world_kind is not None else self.world_kind
         if warp_env is None and not allow_synthetic:
@@ -65,6 +66,10 @@ class WarpBridge(BaseSimulationBridge):
         self.num_envs = int(parameters.get("num_envs", num_envs)) if parameters else num_envs
         self._env = warp_env
         self._backend_version = backend_version
+        #: Harness step limit, passed by the factory from ``task.harness.max_steps``.
+        #: Only the synthetic stand-in consults it; a real engine terminates itself.
+        self.max_steps = max_steps
+
         self._step_count = 0
 
     def engine_provenance(self) -> dict[str, Any]:
@@ -93,13 +98,14 @@ class WarpBridge(BaseSimulationBridge):
             "robot_joint_pos": [0.0] * 7,
             "tool_ee_pos": [0.0, 0.0, 0.0],
         }
+        # Same invariant as the Isaac and SOFA stand-ins: no physical safety key
+        # is synthesized. `max_pen` and `haptic_overshoot_mm` are penetration
+        # and haptic measurements, and an unsolved GPU scene has neither.
         info = {
             "warp_initialized": True,
             "gpu_device": self.parameters.get("device", "cuda:0"),
             "world_pin": self.world_pin,
             "seed": seed,
-            "max_pen": 0.0,
-            "haptic_overshoot_mm": 0.0,
             "backend": BACKEND_SYNTHETIC_STUB,
         }
         return obs, info
@@ -110,7 +116,11 @@ class WarpBridge(BaseSimulationBridge):
         if self._env is not None and hasattr(self._env, "step"):
             return self._env.step(action)  # type: ignore[no-any-return]
 
-        max_steps = int(self.parameters.get("max_steps", 100))
+        # Step budget comes from the harness, not from `environment.parameters`:
+        # that dict is forwarded verbatim to a real engine's constructor, so a
+        # magic `max_steps` key there is both an invalid kwarg for most envs and
+        # a second source of truth for a limit the harness already owns.
+        max_steps = self.max_steps
         terminated = self._step_count >= max_steps
         truncated = False
         reward = 1.0 if terminated else 0.0
@@ -123,11 +133,7 @@ class WarpBridge(BaseSimulationBridge):
         }
         info = {
             "step": self._step_count,
-            "safe_success": terminated,
             "raw_success": terminated,
-            "diverged": False,
-            "max_pen": 0.0,
-            "haptic_overshoot_mm": 0.05,
             "backend": BACKEND_SYNTHETIC_STUB,
         }
         return obs, reward, terminated, truncated, info
@@ -182,4 +188,5 @@ def make_warp_bridge(task: TaskSpec) -> SimulationEngine:
         allow_synthetic=task.environment.synthetic_stub,
         backend_version=backend_version,
         world_kind=task.environment.kind,
+        max_steps=task.harness.max_steps,
     )

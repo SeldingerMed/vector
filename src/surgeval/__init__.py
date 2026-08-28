@@ -50,7 +50,13 @@ from or_audit.eval.task import GateSpec, MetricSpec, TaskSpec
 from or_audit.eval.vector import GateOutcome, MetricOutcome, TrialVector
 from or_audit.version import PACKAGE_VERSION
 from surgeval.client import evaluate, load_agent, load_task, load_taskset
-from surgeval.decorators import agent
+from surgeval.decorators import (
+    AgentBinding,
+    agent,
+    capability_for,
+    describe_agent,
+    is_agent,
+)
 from surgeval.integrations import (
     GymnasiumPolicyWrapper,
     HuggingFacePredictorWrapper,
@@ -64,6 +70,7 @@ __version__ = PACKAGE_VERSION
 
 __all__ = [
     "PACKAGE_VERSION",
+    "AgentBinding",
     "AgentKind",
     "AuditChainError",
     "BaseModalityAdapter",
@@ -106,9 +113,12 @@ __all__ = [
     "WorldKind",
     "__version__",
     "agent",
+    "capability_for",
+    "describe_agent",
     "evaluate",
     "get_adapter",
     "get_simulation_engine",
+    "is_agent",
     "list_adapters",
     "list_simulation_engines",
     "load_agent",

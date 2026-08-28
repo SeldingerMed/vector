@@ -1,0 +1,237 @@
+name: install-smoke
+
+# Deliberately a separate workflow from kernel CI (§6.5 pattern).
+#
+# Kernel CI must stay fast, hermetic, and green on every PR: it proves the
+# harness contract. This workflow proves something different and structurally
+# flakier — that the *install ladder* still works against the outside world.
+# Its jobs depend on registries, vendor accounts, EULA gates, and GPU hosts we
+# do not control, so a broken upstream must never be able to red-flag a kernel
+# change. Hence: no `push`/`pull_request` trigger, manual dispatch plus a
+# weekly schedule, and a plan-only default for anything that would touch a
+# third-party registry.
+#
+# One job per install strategy *the catalog actually uses*, discovered from the
+# data rather than hardcoded here. The list moved once already — the audit
+# deleted both `pip-extra` rows (neither package is on PyPI) and added
+# `source-build` — and a hardcoded matrix answered that by failing on an empty
+# strategy instead of by testing the new one. Plus a real `surgeval quickstart`
+# job, the only one that runs a world end to end (CPU-only, no sim deps, no GPU).
+#
+# Until a strategy's entries are license-audited and pin-recorded, its plan
+# step *refuses*. That is a pass here: the ladder's job is to name the missing
+# artifact, and this workflow asserts it names one rather than guessing.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays 05:17 UTC. Off-hour so a registry hiccup does not land in
+    # the middle of a review cycle.
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  signals:
+    name: audited signal citations resolve at their pins
+    runs-on: ubuntu-latest
+    # Lives here, not in kernel CI, for the same reason as the ladder: it
+    # fetches third-party tarballs, so it must not sit in front of a PR. It is
+    # also the only check that can catch the class of defect it was written
+    # for - a citation pointing at code the pinned revision does not contain -
+    # because a prose evidence field cannot be checked by a machine.
+    #
+    # It fails closed, and being off the PR path is exactly what buys that: an
+    # unreachable upstream exits 2 and turns this job red. The alternative was
+    # tried and was worse - the first version printed SKIP and still exited 0
+    # as long as some other world checked, so a registry outage could have
+    # reported success while verifying none of the seven wrap targets. A green
+    # tick here means all of them were fetched and checked, or it means
+    # nothing at all.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Verify every audited env path and signal line at its world pin
+        # Exit 1 = a citation does not resolve. Exit 2 = something could not be
+        # checked. Neither is success; do not add continue-on-error here.
+        run: uv run python scripts/check_world_signals.py
+
+  quickstart:
+    name: quickstart (CPU-only, no sim deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # The N10 contract is "first vector in minutes on any machine" in <=3
+      # commands, so this installs the distribution the way a user would rather
+      # than syncing the dev environment. The wheel force-includes the
+      # reference pair under `or_audit/_examples`, so every step below runs
+      # from a scratch directory with no checkout in sight: if quickstart only
+      # worked inside a clone, the ladder's first rung would be a lie.
+      - name: Install the distribution the way a user would
+        run: |
+          uv tool install .
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Leave the checkout
+        run: mkdir -p "$RUNNER_TEMP/elsewhere"
+
+      - name: Doctor
+        working-directory: ${{ runner.temp }}/elsewhere
+        run: surgeval doctor
+
+      - name: Quickstart and record time-to-first-vector
+        working-directory: ${{ runner.temp }}/elsewhere
+        run: |
+          surgeval quickstart --out "$RUNNER_TEMP/quickstart" --json \
+            | tee "$RUNNER_TEMP/ttfv.json"
+
+      - name: Assert the metric is real and the vector replays
+        working-directory: ${{ runner.temp }}/elsewhere
+        run: |
+          python3 - "$RUNNER_TEMP/ttfv.json" > "$RUNNER_TEMP/replay.args" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              record = json.load(handle)
+          assert record["time_to_first_vector_sec"] > 0, record
+          assert record["task_id"], record
+          print(record["out"], record["head"])
+          PY
+          read -r OUT HEAD < "$RUNNER_TEMP/replay.args"
+          surgeval replay "$OUT" --expect-head "$HEAD"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: time-to-first-vector
+          path: ${{ runner.temp }}/ttfv.json
+
+  strategies:
+    name: discover strategies in use
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.read.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --all-extras
+      - name: Read the strategies the catalog uses
+        id: read
+        run: |
+          uv run python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+
+          from or_audit.install.catalog import load_catalog
+
+          used = sorted({pkg.strategy.value for pkg in load_catalog().worlds})
+          assert used, "catalog has no worlds at all"
+          print(f"list={json.dumps(used)}")
+          PY
+
+  ladder:
+    name: plan ${{ matrix.strategy }}
+    runs-on: ubuntu-latest
+    needs: strategies
+    strategy:
+      fail-fast: false
+      matrix:
+        strategy: ${{ fromJSON(needs.strategies.outputs.list) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --all-extras
+
+      - name: List the worlds using this strategy
+        run: uv run surgeval worlds list --strategy "${{ matrix.strategy }}"
+
+      - name: Plan every install for this strategy (dry run, no network)
+        env:
+          STRATEGY: ${{ matrix.strategy }}
+        run: |
+          uv run python - <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          from or_audit.install.catalog import (
+              InstallStrategy,
+              VendorRuntimeInstall,
+              iter_packages,
+          )
+
+          strategy = InstallStrategy(os.environ["STRATEGY"])
+          packages = iter_packages(strategy=strategy)
+          assert packages, f"catalog has no {strategy.value} entries"
+
+          planned, refused = 0, 0
+          for pkg in packages:
+              # Accepting the vendor EULA in CI is exactly what a user does
+              # interactively, and only a vendor runtime has one to accept. The
+              # plan still pulls nothing without --execute. Derived per package
+              # rather than per matrix row so a mixed strategy cannot silently
+              # skip the acceptance path.
+              extra = (
+                  ["--accept-vendor-eula"]
+                  if isinstance(pkg.install, VendorRuntimeInstall)
+                  else []
+              )
+              argv = ["uv", "run", "surgeval", "worlds", "install", pkg.id, *extra]
+              done = subprocess.run(argv, capture_output=True, text=True)
+              sys.stdout.write(done.stdout)
+              sys.stderr.write(done.stderr)
+              if done.returncode == 0:
+                  planned += 1
+                  # A dry run must never execute anything.
+                  assert "dry run" in done.stdout, pkg.id
+              elif done.returncode == 1:
+                  refused += 1
+                  # A refusal is a pass only when it names the fix.
+                  assert "REFUSED:" in done.stderr, pkg.id
+                  assert "Fix:" in done.stderr or "re-run with" in done.stderr, pkg.id
+              else:
+                  raise SystemExit(f"{pkg.id}: unexpected exit {done.returncode}")
+          print(f"{strategy.value}: {planned} planned, {refused} refused with a named fix")
+          PY
+
+      - name: Doctor for each world using this strategy
+        env:
+          STRATEGY: ${{ matrix.strategy }}
+        run: |
+          uv run python - <<'PY'
+          import os
+          import subprocess
+
+          from or_audit.install.catalog import Disposition, InstallStrategy, iter_packages
+
+          strategy = InstallStrategy(os.environ["STRATEGY"])
+          for pkg in iter_packages(strategy=strategy):
+              if pkg.disposition not in {Disposition.SHIPPED, Disposition.WRAP}:
+                  continue
+              # Exit 1 is expected on a runner with no SOFA/Isaac; the point is
+              # that every reported problem carries a fix, which the report's
+              # own contract enforces.
+              done = subprocess.run(
+                  ["uv", "run", "surgeval", "doctor", "--world", pkg.id, "--json"],
+                  capture_output=True,
+                  text=True,
+              )
+              assert done.returncode in {0, 1}, (pkg.id, done.returncode, done.stderr)
+              print(pkg.id, "->", "ok" if done.returncode == 0 else "needs work")
+          PY

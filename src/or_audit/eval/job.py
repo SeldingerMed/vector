@@ -41,6 +41,11 @@ class WorldEngineProvenance(BaseModel):
     states (``real`` / ``synthetic-stub`` / ``unknown``); any other value is a
     validation error, and unknown reporter fields are rejected, so a
     typo-ad-hoc value cannot silently pass the export provenance gate.
+
+    ``adapter_id``/``adapter_digest`` record the world adapter that produced
+    the observations, taken from the kernel's world-kind registry rather than
+    from the bridge's own report. A third-party adapter that changes content
+    therefore changes the head, even when the task and world pin are unchanged.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -49,6 +54,12 @@ class WorldEngineProvenance(BaseModel):
     backend: Literal["real", "synthetic-stub", "unknown"]
     backend_version: str = ""
     world_pin: str = ""
+    adapter_id: str = ""
+    adapter_digest: str = ""
+    #: Tier-0 honesty label carried from ``WorldSpec.metrics_only``: this row is
+    #: explicitly not safety-attested. Head-covered so a published artifact
+    #: cannot drop the label after the fact.
+    metrics_only: bool = False
 
 
 class JobResult(BaseModel):
@@ -209,8 +220,24 @@ def resolve_bundle_path(job_dir: Path, raw: object, *, label: str) -> Path:
 
 
 def _copy_package(source: Path, target: Path) -> None:
-    if source.resolve() == target.resolve():
+    """Copy a package into a job bundle, refusing a target nested inside it.
+
+    A nested target makes ``copytree`` walk the tree it is writing into, which
+    does not fail cleanly: it builds a path one level deeper per iteration
+    until the filesystem refuses the name, then reports a wall of nested paths
+    that names neither the cause nor the fix. Someone running
+    ``surgeval conformance ./task --out ./task/conf`` deserves a sentence.
+    """
+    resolved_source = source.resolve()
+    resolved_target = target.resolve()
+    if resolved_source == resolved_target:
         return
+    if resolved_source in resolved_target.parents:
+        raise TaskContractError(
+            f"output directory {target} is inside the package being copied ({source}): "
+            "the bundle copy would recurse into its own output. Fix: put --out somewhere "
+            "outside the package directory."
+        )
     target.mkdir(parents=True, exist_ok=True)
     shutil.copytree(
         source,

@@ -66,17 +66,76 @@ Hard gates remain separate. `TrialVector` raises on implicit `float`, `int`, or 
 
 RL exports use a task-declared `ProjectionSpec`. A projection is data, not Python: source metric, guard metrics, gate-failure behavior, gate-unassessable behavior, output values, version, and rule digest. Export recomputes every value from the authoritative vector and writes the complete rule plus its digest beside each reward.
 
-## Install and run locally
+## Install and get a vector
 
-The fastest path is the quickstart script, which creates a venv, installs the
-package, and runs the video, counterfactual, and CVS reference examples that
-need nothing beyond a CPU:
+Three commands on a fresh machine, no GPU and no simulator dependencies:
 
 ```bash
-./scripts/quickstart.sh
+uv tool install surgeval        # 1. install the harness
+surgeval quickstart             # 2. run the CPU-only reference task, print time-to-first-vector
+surgeval doctor                 # 3. check this machine and print the fix for anything broken
 ```
 
-To install by hand:
+`quickstart` runs a packaged reference task end to end, verifies the artifact
+head, prints the vector (gates separate from metrics) and hands you the
+`surgeval replay` line that reproduces it. `--json` emits
+`{time_to_first_vector_sec, task_id, head, out}`; that number is the metric the
+on-ramp is held to.
+
+Ten-minute path from your own model to a replayable vector:
+[`docs/ONRAMP.md`](docs/ONRAMP.md).
+
+### Simulated worlds
+
+Worlds install separately from the harness, because their runtimes differ in
+kind: SOFA needs specific builds, Isaac Sim cannot be redistributed,
+MuJoCo/PyBullet are pip-friendly, Unity worlds are their own runtime. Each
+catalog world declares its install strategy, and the installer refuses to
+pretend:
+
+```bash
+surgeval worlds list                     # catalog: domain, engine, strategy, disposition, license, pin state
+surgeval worlds info steve
+surgeval worlds install surrol           # prints the plan; a source-build world's
+                                         # build steps are yours, so it never claims
+                                         # to be executable
+surgeval worlds install orbit-surgical --accept-vendor-eula --execute
+```
+
+Four strategies, and which one a world gets is decided by the *worst first-hour
+experience* it can honestly promise, not by what is technically possible:
+
+- `first-party` — a world we publish ourselves.
+- `source-build` — the user compiles it (SOFA, PyBullet, AMBF). The plan fetches
+  a pinned commit and hands the build back with the upstream reference; it never
+  pretends a `pip install` will work. Most curated worlds are here.
+- `vendor-runtime` — we do not redistribute Isaac Sim: the plan drives NVIDIA's
+  own container pull, requires `--accept-vendor-eula`, then verifies the pinned
+  version.
+- `prebuilt-container` — a digest-pinned image we publish; an undigested image is
+  refused, not pulled. No world uses this yet.
+
+`pip-extra` exists and has no rows on purpose: the 2026-08 audit found neither
+candidate package (`cathsim`, `surrol`) is on PyPI at all, so both rows promised
+installs that could never resolve.
+
+### Wrapping a third-party world
+
+```bash
+surgeval wrap "SurRoL/NeedleReach-v0" --task-id surrol-needle-reach \
+  --world-pin <commit> --out ./packages \
+  --gate 'wall_force=contact_force_n:contact_force_n > 1.5@1.5:N:<citation>'
+surgeval conformance ./packages/surrol-needle-reach -a random --out ./conformance
+```
+
+`wrap` scaffolds a task package around an existing world (adapter-pinned by
+content digest); a wrap with no mapped safety signal must pass `--metrics-only`
+and is labelled, everywhere it is reported, as not safety-attested.
+`conformance` measures Tier-1: gate-state availability, license audit,
+evidence-replay round trip, and a *measured* execution-determinism class from
+two identical runs. See [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
+
+Working from a checkout instead:
 
 ```bash
 uv venv --python 3.13
@@ -170,6 +229,107 @@ uv run surgeval run -s docs/examples/tasksets/counterfactual-recovery-v1 \
 
 `datasets` and `-d/--dataset` remain input aliases for v0.2 automation during migration.
 
+## Extending the world catalog
+
+A world kind is an extension point, not a closed enum. A third-party
+distribution publishes an adapter under the `or_audit.world_kinds` entry-point
+group:
+
+```python
+# steve_adapter/__init__.py
+from or_audit.eval.sim import WorldAdapter
+from or_audit.eval.worlds import WorldCapabilities
+
+ADAPTER = WorldAdapter(
+    kind="steve-sofa",
+    capabilities=WorldCapabilities(
+        physics=True, closed_loop=True, requires_gym_id=True, requires_world_pin=True
+    ),
+    factory=make_steve_world,  # (TaskSpec) -> SimulationEngine
+    provider="steve-adapter",
+)
+```
+
+```toml
+[project.entry-points."or_audit.world_kinds"]
+steve-sofa = "steve_adapter:ADAPTER"
+```
+
+`surgeval sim kinds` lists what is registered, what each kind is eligible for,
+its measured determinism class, and the digest-pinned adapter identity — plus
+any entry point that failed to load, with its error. A task may declare the
+adapter it was authored against (`environment.adapter` + `adapter_digest`); the
+loader refuses a mismatch, and the identity is recorded in the head-covered
+`world_engine` provenance, so a swapped adapter cannot run under an unchanged
+task and world pin.
+
+Capabilities are declarations the kernel gates on: a physics oracle needs
+`physics`, a closed-loop task needs `closed_loop`. A task may declare
+`[environment.capabilities]` so its package stays loadable where the adapter is
+absent, but a declaration that disagrees with an installed adapter is refused —
+a package cannot grant itself eligibility the adapter withholds.
+
+## Benchmark shelves: legible now, comparable when earned
+
+A shared vector vocabulary makes results legible side by side; it does not make
+them comparable. `surgeval shelf` builds **per-world** leaderboards for a
+modality shelf, pairs every sim shelf with a real-data bench whose job bundle
+must actually be present, and refuses any cross-world aggregate, ranking, or
+ordering:
+
+```bash
+surgeval shelf build docs/examples/shelves/endovascular.toml --jobs ./runs/* --out ./shelf
+surgeval shelf rank ./shelf/shelf.json                       # per-world orderings
+surgeval shelf equivalence check ./equivalence/lumen-vs-steve.json
+surgeval shelf rank ./shelf/shelf.json --cross-world \
+  --equivalence ./equivalence/lumen-vs-steve.json            # only with a validated artifact
+```
+
+Cross-world comparison unlocks only through a published `EquivalenceArtifact`
+that establishes matched task semantics, gate equivalence in physical units with
+per-engine calibration, scenario-distribution alignment, and agreement with an
+external referent (rank correlation recomputed from the declared rankings, never
+trusted as a stated number).
+
+## Train-time surface
+
+`surgeval export-verifiers` exports a task as a verifiers-style environment
+whose reward is the task-declared projection recomputed from a freshly scored
+vector — zero on hard-gate failure — with the projection digest and parent
+vector reference attached to every reward record:
+
+```bash
+surgeval export-verifiers docs/examples/tasks/lumen-nav-safe \
+  --projection gated_reach_v0 --out ./envs/lumen-nav-safe
+```
+
+No scalar leaves the export without its provenance, and a synthetic-stub or
+metrics-only task is refused: a training reward derived from fabricated physics
+or from a world with no safety instrumentation is the failure this harness
+exists to prevent.
+
+## Hosted concierge (open rails, paid judgment)
+
+`surgeval concierge` implements the untrusted-model intake gate, capability
+assessment, catalog selection, and adaptive stress testing:
+
+```bash
+surgeval concierge intake --manifest manifest.json --artifact model.safetensors
+surgeval concierge assess --intake intake.json --out proposal.json
+surgeval concierge select --capability capability.json --catalog docs/examples/tasks --budget 200
+surgeval concierge adapt --task docs/examples/tasks/lumen-nav-safe --out ./adapted
+```
+
+Intake is a security boundary before it is a feature: a signed tenant manifest,
+an allowlist of non-executing weight formats (a pickle/checkpoint is refused
+with the reason), digest verification, a no-egress sandbox policy that cannot be
+constructed with egress or `trust_remote_code`, and endpoint allowlisting that
+refuses private, loopback and link-local ranges. Assessment only ever *proposes*
+a `CapabilitySpec`; `bind` still disposes. An adapted scenario space is frozen
+into a new versioned, digest-pinned package marked `authored_by: agent` and
+excluded from public leaderboards before a single scored trial, and the
+concierge can never edit a published verifier, gate, or projection.
+
 ## Public registry
 
 Published tasksets and agents live in [`SeldingerMed/seldinger-tasks`](https://github.com/SeldingerMed/seldinger-tasks). Vector loads `registry.json` from that repo by default; packages are pinned by git ref and content digest.
@@ -229,7 +389,7 @@ uv run mypy
 uv run pytest
 ```
 
-Implementation plan and migration details: [`docs/V0.3.md`](docs/V0.3.md). Product architecture and invariants: [`docs/BUILD.md`](docs/BUILD.md). Evaluation rationale: [`docs/ASSESSMENT.md`](docs/ASSESSMENT.md). Dataset licensing and data usage: [`docs/DATASETS.md`](docs/DATASETS.md). Conformance and claim ledger: [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
+Ten-minute on-ramp: [`docs/ONRAMP.md`](docs/ONRAMP.md). Strategy-to-tree status map: [`docs/NEXT_STATUS.md`](docs/NEXT_STATUS.md). Implementation plan and migration details: [`docs/V0.3.md`](docs/V0.3.md). Product architecture and invariants: [`docs/BUILD.md`](docs/BUILD.md). Evaluation rationale: [`docs/ASSESSMENT.md`](docs/ASSESSMENT.md). Dataset licensing and data usage: [`docs/DATASETS.md`](docs/DATASETS.md). Conformance and claim ledger: [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
 
 ## Publishing to PyPI
 

@@ -16,6 +16,7 @@ import numpy as np
 from or_audit.errors import TaskContractError
 from or_audit.eval.enums import WorldKind
 from or_audit.eval.task import TaskSpec
+from or_audit.eval.worlds import world_kind_key
 
 GymFactory = Callable[[TaskSpec], "GymEnv"]
 
@@ -47,7 +48,7 @@ def make_gym(task: TaskSpec) -> GymEnv:
         )
     if kind is WorldKind.GYM:
         return _make_gymnasium(task.environment.gym_id, parameters=task.environment.parameters)
-    msg = f"task {task.id} world kind {kind.value} is not a gym-policy world"
+    msg = f"task {task.id} world kind {world_kind_key(kind)} is not a gym-policy world"
     raise TaskContractError(msg)
 
 
@@ -112,9 +113,28 @@ def _make_gymnasium(gym_id: str, *, parameters: dict[str, bool | int | float | s
 
 
 def sample_action(env: GymEnv, *, seed: int, step: int) -> Any:
-    """Deterministic random action for a ``kind=random`` agent."""
+    """Deterministic random action for a ``kind=random`` agent.
+
+    Discrete spaces are handled before the ``low``/``high`` box path: they
+    expose ``n`` rather than bounds, and a real ``Discrete`` env indexes its
+    transition table with the action, so handing it a float array raises
+    ``TypeError: unhashable type: 'numpy.ndarray'`` inside the env. The seeded
+    ``default_rng`` is kept rather than ``space.sample()`` because the harness
+    owns reproducibility here; ``space.sample()`` would draw from the env's own
+    RNG and make the action depend on env internals instead of the trial seed.
+    """
     rng = np.random.default_rng(seed * 1_000_003 + step)
+    # The runner hands us the *bridge*, which does not forward `action_space`;
+    # without unwrapping, every space looked unbounded and every action became a
+    # 2-vector of floats - silently wrong for Box envs and a hard TypeError for
+    # Discrete ones.
     space = getattr(env, "action_space", None)
+    if space is None:
+        inner = getattr(env, "unwrapped", None)
+        space = getattr(inner, "action_space", None)
+    n = getattr(space, "n", None)
+    if n is not None:
+        return int(rng.integers(0, int(n)))
     low = getattr(space, "low", None)
     high = getattr(space, "high", None)
     if low is not None and high is not None:

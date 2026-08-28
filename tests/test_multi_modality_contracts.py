@@ -244,7 +244,7 @@ def test_multi_stream_preprocessing_composes_by_stream_id() -> None:
     import types
 
     from or_audit.eval.contracts import StreamSpec
-    from or_audit.eval.runner import _preprocess_observation
+    from or_audit.eval.runner import preprocess_observation
 
     class Vid(ModalityAdapter):
         def preprocess_observation(self, observation: Any) -> Any:
@@ -284,7 +284,7 @@ def test_multi_stream_preprocessing_composes_by_stream_id() -> None:
     from or_audit.eval.task import TaskSpec
 
     task_like = cast(TaskSpec, types.SimpleNamespace(interface=task))
-    out = _preprocess_observation(
+    out = preprocess_observation(
         task_like, adapters, {"clip": [1, 2, 3], "joint": {"x": 1}, "other": 9}
     )
     # Each stream's processed slice lands under its own stream id, untouched

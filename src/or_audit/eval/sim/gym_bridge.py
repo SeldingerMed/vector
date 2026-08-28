@@ -11,9 +11,9 @@ from or_audit.eval.sim.base import (
     BaseSimulationBridge,
     SimulationEngine,
     module_distribution_version,
-    world_kind_key,
 )
 from or_audit.eval.task import TaskSpec
+from or_audit.eval.worlds import world_kind_key
 
 
 class GymnasiumBridge(BaseSimulationBridge):

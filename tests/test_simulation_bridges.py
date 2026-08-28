@@ -19,6 +19,7 @@ from or_audit.eval.runner import builtin_random_agent, run_job
 from or_audit.eval.sim import (
     BaseSimulationBridge,
     GymnasiumBridge,
+    IsaacBridge,
     SimulationEngine,
     SofaBridge,
     WarpBridge,
@@ -142,9 +143,10 @@ def test_sofa_bridge_reset_and_step_plumbing() -> None:
 def test_warp_bridge_reset_and_step_plumbing() -> None:
     warp = WarpBridge(
         env_name="SurgicalSuture-v0",
-        parameters={"max_steps": 2, "num_envs": 16, "device": "cuda:0"},
+        parameters={"num_envs": 16, "device": "cuda:0"},
         world_pin="warp-pin-v1",
         allow_synthetic=True,
+        max_steps=2,
     )
     assert warp.world_kind == WorldKind.WARP
     assert warp.num_envs == 16
@@ -161,6 +163,60 @@ def test_warp_bridge_reset_and_step_plumbing() -> None:
     assert step_info["backend"] == "synthetic-stub"
     assert warp.get_state()["backend"] == "synthetic-stub"
     warp.close()
+
+
+def test_the_harness_owns_the_step_limit_not_environment_parameters() -> None:
+    """``environment.parameters`` is forwarded verbatim to a real constructor.
+
+    Putting the harness step limit in that dict is how the generator produced a
+    task that ``gymnasium.make`` rejects with an unexpected keyword argument, so
+    a stray ``max_steps`` there must have no effect on termination.
+    """
+    warp = WarpBridge(
+        env_name="e",
+        parameters={"max_steps": 1},
+        allow_synthetic=True,
+        max_steps=3,
+    )
+    warp.reset(seed=1)
+    assert warp.step([0.0])[2] is False
+    assert warp.step([0.0])[2] is False
+    assert warp.step([0.0])[2] is True
+    warp.close()
+
+
+def test_a_stand_in_synthesizes_no_physical_safety_key() -> None:
+    """A stub may report progress; it may never report physics.
+
+    The earlier stand-ins emitted ``max_pen``, ``wall_force_n``,
+    ``tissue_stress_kpa``, and ``haptic_overshoot_mm`` - numbers with physical
+    units that a gate binds to and resolves *pass* against. That is the most
+    convincing possible lie, so the invariant covers all three bridges.
+    """
+    forbidden = {
+        "max_pen",
+        "wall_force_n",
+        "tissue_stress_kpa",
+        "haptic_overshoot_mm",
+        "contact_force_n",
+        "safe_success",
+        "workspace_violation",
+    }
+    bridges = (
+        WarpBridge(env_name="e", parameters={}, allow_synthetic=True, max_steps=1),
+        SofaBridge(scene_name="s", parameters={}, allow_synthetic=True, max_steps=1),
+        IsaacBridge(env_id="e", parameters={}, allow_synthetic=True, max_steps=1),
+    )
+    for bridge in bridges:
+        name = type(bridge).__name__
+        _obs, info = bridge.reset(seed=1)
+        assert not forbidden & set(info), f"{name} reset invented physics"
+        _obs, _reward, _term, _trunc, step_info = bridge.step([0.0])
+        leaked = forbidden & set(step_info)
+        assert not leaked, f"{name} step invented {sorted(leaked)}"
+        # It must still be honest about what it *is*.
+        assert step_info["backend"] == "synthetic-stub"
+        bridge.close()
 
 
 def test_sofa_bridge_refuses_to_fabricate_physics() -> None:
@@ -416,13 +472,17 @@ def test_run_closed_loop_records_world_engine_provenance(tmp_path: Path) -> None
     assert m_safe.value is True
 
     config = json.loads((out_dir / "config.json").read_text(encoding="utf-8"))
-    # An injected factory exposes no reporter, so the backend is recorded as unattested.
-    assert config["world_engine"] == {
-        "engine": "gym",
-        "backend": "unknown",
-        "backend_version": "",
-        "world_pin": "broncho-synthetic-v1",
-    }
+    # An injected factory exposes no reporter, so the backend is recorded as unattested,
+    # but the adapter identity still comes from the world-kind registry.
+    world_engine = config["world_engine"]
+    assert world_engine["engine"] == "gym"
+    assert world_engine["backend"] == "unknown"
+    assert world_engine["backend_version"] == ""
+    assert world_engine["world_pin"] == "broncho-synthetic-v1"
+    assert world_engine["adapter_id"] == "or_audit.eval.sim.gym_bridge:make_gym_bridge"
+    assert len(world_engine["adapter_digest"]) == 64
+    assert res.world_engine is not None
+    assert res.world_engine.adapter_digest == world_engine["adapter_digest"]
     scorecard = json.loads((out_dir / "scorecard.json").read_text(encoding="utf-8"))
     assert scorecard["world_engine"]["backend"] == "unknown"
     markdown = (out_dir / "scorecard.md").read_text(encoding="utf-8")
@@ -450,7 +510,11 @@ def test_stub_job_is_stamped_and_refused_by_export_rl(tmp_path: Path) -> None:
         "backend": "synthetic-stub",
         "backend_version": "",
         "world_pin": "sofa-pin-v1",
+        "adapter_id": "or_audit.eval.sim.sofa_bridge:make_sofa_bridge",
+        "adapter_digest": config["world_engine"]["adapter_digest"],
+        "metrics_only": False,
     }
+    assert len(config["world_engine"]["adapter_digest"]) == 64
 
     markdown = (out_dir / "scorecard.md").read_text(encoding="utf-8")
     assert "NOT PHYSICAL EVIDENCE - SYNTHETIC STAND-IN" in markdown

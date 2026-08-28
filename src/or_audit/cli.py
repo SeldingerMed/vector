@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from or_audit.audit.trail import AuditTrail
+from or_audit.commands import register_all
 from or_audit.decision.rule import DecisionRule
 from or_audit.demo import run_demo
 from or_audit.domain.enums import ThresholdOwner
@@ -436,6 +437,39 @@ def _sim_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sim_kinds(args: argparse.Namespace) -> int:
+    """Print the world-kind registry: what each kind is eligible for, and who serves it."""
+    del args
+    from or_audit.eval.sim import list_world_kinds, world_adapter_discovery
+
+    kinds = list_world_kinds()
+    print(f"Registered World Kinds ({len(kinds)}):")
+    for kind, spec in kinds.items():
+        capabilities = spec.capabilities
+        flags = ",".join(
+            name
+            for name, enabled in (
+                ("physics", capabilities.physics),
+                ("closed-loop", capabilities.closed_loop),
+                ("counterfactual", capabilities.counterfactual),
+            )
+            if enabled
+        )
+        print(f"  {kind:<25} {flags or '(no eligibility)'}")
+        print(f"    determinism {capabilities.determinism_class.value}")
+        print(f"    adapter     {spec.adapter_identity}")
+        if spec.provider:
+            print(f"    provider    {spec.provider}")
+    failures = tuple(item for item in world_adapter_discovery() if not item.ok)
+    if failures:
+        print()
+        print(f"Failed world-kind plugins ({len(failures)}):")
+        for failure in failures:
+            print(f"  {failure.name}: {failure.error}")
+        return 1
+    return 0
+
+
 def _cli_prog() -> str:
     """Return the installed command name for help output."""
     if not sys.argv:
@@ -628,7 +662,12 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sim_sub = sim.add_subparsers(dest="sim_command", required=True)
     sim_list = sim_sub.add_parser("list", help="list registered simulation engine bridges")
     sim_list.set_defaults(func=_sim_list)
+    sim_kinds = sim_sub.add_parser(
+        "kinds", help="list registered world kinds, capabilities, and adapter identities"
+    )
+    sim_kinds.set_defaults(func=_sim_kinds)
 
+    register_all(sub)
     return parser
 
 

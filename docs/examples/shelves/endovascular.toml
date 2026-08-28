@@ -1,0 +1,57 @@
+# The endovascular shelf (next.md N5): one policy class run across every
+# endovascular world we curate, reported as PER-WORLD leaderboards.
+#
+# This file deliberately does not, and cannot, declare a cross-world ranking.
+# Lumen (first-party continuum/deformable) and stEVE (SOFA + BeamAdapter) differ
+# in observation/action interface, anatomy and scenario distribution, dynamics
+# fidelity, termination semantics, and in what their safety state physically
+# means. Ordering agents across those worlds requires a published equivalence
+# artifact (§2.6) whose external referent is the N9 phantom study; until then
+# `surgeval shelf rank --cross-world` is refused and `shelf.json` carries no
+# cross-world number.
+#
+# The worlds listed here are the shelf's target composition. A world only
+# appears in a built shelf when a verified job bundle for its task is supplied,
+# so this spec describes the shelf's scope, not a claim that both have run.
+#
+# A third engine is a known coverage gap, not an oversight. CathSim (MuJoCo)
+# was the intended third row and was verified to run and report real contact
+# forces, but its terms are CC-BY-NC-SA-4.0 plus a field-of-use TERMS.md, so its
+# catalog row is `skip` and `ShelfSpec` refuses to name it. Closing the gap
+# means a differently-licensed MuJoCo endovascular world, not more engineering.
+#
+# One honest wrinkle: `surgeval worlds install lumen` refuses today, because the
+# catalog does not yet record an SPDX expression for `seldinger-lumen` and the
+# installer will not direct a fetch under terms nobody read. That is an unfilled
+# field on our own first-party row, not a restriction — a world under restricted
+# terms cannot be disposition `wrap`/`shipped` at all, so it could never reach
+# this file. Naming Lumen here is legitimate; installing it is not, yet.
+
+id = "endovascular"
+title = "Endovascular navigation shelf"
+modality = "endovascular-sim"
+
+# The §2.6 equivalence program for this shelf: two engines today, one task
+# family, deliberately overlapping so the comparability question is answerable
+# at all. A third engine strengthens the artifact; it is not a prerequisite.
+[[worlds]]
+world_id = "lumen"
+world_kind = "lumen-gym"
+world_pin = "3c6bb39ecc916c73e81131b94353ad8deee62bd4"
+task_id = "lumen-nav-safe"
+task_family = "guidewire-branch-navigation"
+
+[[worlds]]
+world_id = "steve"
+world_kind = "sofa"
+task_id = "steve-arch-variety-nav"
+task_family = "guidewire-branch-navigation"
+
+# §2.5: every sim domain shelf pairs with a real-data bench, and no external
+# claim ships from sim rows alone. AngioStress is a real-data frozen-model
+# contract, not a world: it is where the shelf's sim claims get stress-tested.
+# `build_shelf` refuses unless a verified bench job bundle is supplied.
+[[benches]]
+task_id = "angiostress-dias"
+kind = "bench"
+description = "Real-data frozen-model perception contract (DIAS angiography), claim-footer bound"

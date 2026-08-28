@@ -15,8 +15,28 @@ def _gate(
     source: str = "contact_force",
     fail_when: str = "contact_force > 1.5",
     kind: str = "force-threshold",
+    threshold: float | None = 1.5,
 ) -> GateSpec:
-    return GateSpec(id=gate_id, source=source, fail_when=fail_when, kind=kind)
+    """A gate whose cited number is the number its predicate enforces.
+
+    ``threshold`` is declared by default because the schema now requires the
+    two to agree: a bare ``contact_force > 1.5`` is an uncited safety number,
+    which is precisely what §2.2 refuses. Pass ``threshold=None`` to build a
+    boolean gate.
+    """
+    basis = (
+        ThresholdBasis(value=threshold, unit="N", citation="fixture force envelope")
+        if threshold is not None
+        else None
+    )
+    return GateSpec(
+        id=gate_id,
+        source=source,
+        fail_when=fail_when,
+        kind=kind,
+        threshold=threshold,
+        threshold_basis=basis,
+    )
 
 
 def test_gate_passes_when_below_threshold() -> None:
@@ -56,7 +76,10 @@ def test_gate_resolves_dotted_source_to_full_path() -> None:
 
 def test_gate_boolean_equality() -> None:
     gate = _gate(
-        source="cbd_violation", fail_when="cbd_violation == true", kind="spatial-exclusion"
+        source="cbd_violation",
+        fail_when="cbd_violation == true",
+        kind="spatial-exclusion",
+        threshold=None,
     )
     fail = evaluate_gate(gate, {"cbd_violation": True})
     assert fail is not None
@@ -82,17 +105,44 @@ def test_gate_with_threshold_field() -> None:
     assert outcome.status is GateStatus.FAIL
 
 
-def test_gate_compound_expression() -> None:
+def test_a_compound_gate_may_not_inline_two_uncited_numbers() -> None:
+    """One gate carries one cited threshold, so two inline bounds cannot both be cited.
+
+    Splitting is also the more legible artifact: two gates tell a reader which
+    bound failed, where one compound gate reports a single opaque FAIL.
+    """
+    with pytest.raises(TaskContractError, match="declares no threshold"):
+        GateSpec(
+            id="g",
+            inputs={"force": "force", "speed": "speed"},
+            fail_when="force > 1.5 and speed > 10",
+            kind="force-threshold",
+        )
+
+
+def test_a_compound_gate_over_declared_bounds_is_supported() -> None:
+    """The pattern ``lumen-nav-safe`` ships: bounds are inputs, not literals.
+
+    Nothing about compound evaluation is restricted - only inline numbers that
+    no basis explains. Declaring the bound as an input makes it a value the
+    package states and the kernel resolves, which is what a gate should do.
+    """
     gate = GateSpec(
         id="g",
-        inputs={"force": "force", "speed": "speed"},
-        fail_when="force > 1.5 and speed > 10",
+        inputs={
+            "force": "force",
+            "speed": "speed",
+            "force_limit": "force_limit",
+            "speed_limit": "speed_limit",
+        },
+        fail_when="force > force_limit and speed > speed_limit",
         kind="force-threshold",
     )
-    fail = evaluate_gate(gate, {"force": 2.0, "speed": 15})
+    bounds = {"force_limit": 1.5, "speed_limit": 10}
+    fail = evaluate_gate(gate, {"force": 2.0, "speed": 15, **bounds})
     assert fail is not None
     assert fail.status is GateStatus.FAIL
-    passing = evaluate_gate(gate, {"force": 2.0, "speed": 5})
+    passing = evaluate_gate(gate, {"force": 2.0, "speed": 5, **bounds})
     assert passing is not None
     assert passing.status is GateStatus.PASS
 
