@@ -13,7 +13,6 @@ Written against ``argparse`` rather than a CLI framework.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import tempfile
 from collections.abc import Sequence
@@ -365,50 +364,6 @@ def _leaderboard_build(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cloud_serve(args: argparse.Namespace) -> int:
-    """Run the optional Vector Cloud control plane."""
-    if (args.allow_anonymous or args.enable_local) and args.host not in {
-        "127.0.0.1",
-        "::1",
-        "localhost",
-    }:
-        print("cloud local development may only bind a loopback host", file=sys.stderr)
-        return 2
-    os.environ["VECTOR_CLOUD_DB"] = args.db
-    os.environ["VECTOR_CLOUD_DATA"] = args.data
-    os.environ["VECTOR_CLOUD_PACKAGE_ROOT"] = str(Path(args.package_root).resolve())
-    if args.enable_local:
-        os.environ["VECTOR_CLOUD_ENABLE_LOCAL"] = "1"
-    else:
-        os.environ.pop("VECTOR_CLOUD_ENABLE_LOCAL", None)
-    if args.allow_anonymous:
-        os.environ["VECTOR_CLOUD_ALLOW_ANONYMOUS"] = "1"
-    else:
-        os.environ.pop("VECTOR_CLOUD_ALLOW_ANONYMOUS", None)
-    try:
-        import uvicorn
-
-        from or_audit.cloud.api import app_from_env
-
-        app = app_from_env()
-    except ImportError:
-        print('cloud dependencies missing; install "surgeval[cloud]"', file=sys.stderr)
-        return 1
-    except TaskContractError as exc:
-        print(f"REFUSED: {exc}", file=sys.stderr)
-        return 1
-    uvicorn.run(app, host=args.host, port=args.port)
-    return 0
-
-
-def _cloud_worker(args: argparse.Namespace) -> int:
-    """Run one provider job and return its evidence to the control plane."""
-    del args
-    from or_audit.cloud.worker import run_from_env
-
-    return run_from_env()
-
-
 def _adapters_list(args: argparse.Namespace) -> int:
     del args
     from or_audit.eval.adapters import list_adapters, reset_default_adapters
@@ -630,28 +585,6 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     )
     export_rl.add_argument("--out", required=True, help="jsonl output path")
     export_rl.set_defaults(func=_export_rl)
-
-    cloud = sub.add_parser("cloud", help="run the optional Vector Cloud control plane")
-    cloud_sub = cloud.add_subparsers(dest="cloud_command", required=True)
-    cloud_serve = cloud_sub.add_parser("serve", help="serve the job API")
-    cloud_serve.add_argument("--host", default="127.0.0.1")
-    cloud_serve.add_argument("--port", type=int, default=8787)
-    cloud_serve.add_argument("--db", default=".vector-cloud/jobs.sqlite")
-    cloud_serve.add_argument("--data", default=".vector-cloud/jobs")
-    cloud_serve.add_argument("--package-root", default=".")
-    cloud_serve.add_argument(
-        "--enable-local",
-        action="store_true",
-        help="development only: execute task packages on this host",
-    )
-    cloud_serve.add_argument(
-        "--allow-anonymous",
-        action="store_true",
-        help="development only: disable bearer auth (loopback only)",
-    )
-    cloud_serve.set_defaults(func=_cloud_serve)
-    cloud_worker = cloud_sub.add_parser("worker", help="run one configured provider job")
-    cloud_worker.set_defaults(func=_cloud_worker)
 
     adapters = sub.add_parser("adapters", help="inspect registered modality adapters")
     adapters_sub = adapters.add_subparsers(dest="adapters_command", required=True)

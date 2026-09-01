@@ -142,38 +142,6 @@ uv venv --python 3.13
 uv pip install -e ".[dev]"
 ```
 
-## Vector Cloud control plane
-
-The optional cloud extra adds the persisted HTTP control plane:
-
-```bash
-uv sync --extra cloud
-
-# Local development only. The CLI enforces a loopback bind.
-uv run surgeval cloud serve --enable-local --allow-anonymous
-```
-
-Production requires bearer authentication and configures remote executors
-through the environment. RunPod execution additionally requires
-`RUNPOD_API_KEY`, an HTTPS `VECTOR_CLOUD_PUBLIC_URL`, and the worker image from
-this repository pinned as `image@sha256:<digest>` in
-`VECTOR_CLOUD_RUNPOD_IMAGE`. Private images also set the RunPod credential ID in
-`VECTOR_CLOUD_RUNPOD_REGISTRY`. Build the same image for the control plane and
-workers:
-
-```bash
-docker buildx build --platform linux/amd64 -t registry/vector-cloud:VERSION --push .
-```
-
-RunPod job `task` values are immutable single-task taskset references such as
-`seldingermed/video-nextstep@1`; `agent` values use the same versioned registry
-format, for example `example/video-predictor@1`. The hosted beta accepts public
-or de-identified packages only. Each
-remote job receives a one-time callback credential bound to that job; the
-control plane validates the returned `result.json` head before committing the
-evidence bundle. Local execution is opt-in development behavior and cannot bind
-a non-loopback host.
-
 ## Run the packaged reference paths
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
