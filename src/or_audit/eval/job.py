@@ -210,7 +210,11 @@ def assemble_job_result(
         unique_trajectories=unique_trajectories,
         duplicate_trajectories=len(trials) - unique_trajectories,
         gate_outcome=(
-            "failed" if gate_failed else "not-assessable" if gate_unassessable else "passed"
+            "failed"
+            if gate_failed
+            else "not-assessable"
+            if gate_unassessable or not task.verifier.gates
+            else "passed"
         ),
         claim_footer=claim_footer,
     )

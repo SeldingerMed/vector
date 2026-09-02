@@ -367,6 +367,7 @@ def test_metrics_only_wrap_refuses_gates_and_is_stamped(tmp_path: Path) -> None:
     )
     assert result.world_engine is not None
     assert result.world_engine.metrics_only is True
+    assert result.gate_outcome == "not-assessable"
     scorecard = json.loads(
         (tmp_path / "metrics-only-job" / "scorecard.json").read_text(encoding="utf-8")
     )
