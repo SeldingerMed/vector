@@ -17,11 +17,6 @@ surgeval = "or_audit.cli:main"
 vector = "or_audit.cli:main"
 or-audit = "or_audit.cli:main"
 [project.optional-dependencies]
-cloud = [
-    "fastapi>=0.115,<0.120",
-    "huggingface-hub>=0.23",
-    "uvicorn>=0.30,<1",
-]
 dev = [
     "httpx>=0.27",
     "pytest>=8.0",

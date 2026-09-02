@@ -42,3 +42,5 @@ coverage.xml
 .env
 .env.*
 !.env.example
+.projects/
+.pnpm-store/
