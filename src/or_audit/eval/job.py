@@ -89,6 +89,9 @@ class JobResult(BaseModel):
     headline_false: int
     headline_unassessable: int
     any_gate_failed: int
+    unique_trajectories: Annotated[int, Field(ge=1)] | None = None
+    duplicate_trajectories: Annotated[int, Field(ge=0)] | None = None
+    gate_outcome: Literal["passed", "failed", "not-assessable", "unknown"] = "unknown"
     claim_footer: str = ""
     head: str = ""
 
@@ -170,6 +173,7 @@ def assemble_job_result(
     headline_false = 0
     headline_unassessable = 0
     gate_failed = 0
+    gate_unassessable = 0
     for trial in trials:
         value = trial.vector.headline.value
         if value is None:
@@ -181,6 +185,9 @@ def assemble_job_result(
                 headline_false += 1
         if trial.vector.any_gate_failed:
             gate_failed += 1
+        if trial.vector.any_gate_unassessable:
+            gate_unassessable += 1
+    unique_trajectories = len({digest(list(trial.trajectory)) for trial in trials})
     result = JobResult(
         task_id=task.id,
         task_version=task.task_version,
@@ -200,6 +207,11 @@ def assemble_job_result(
         headline_false=headline_false,
         headline_unassessable=headline_unassessable,
         any_gate_failed=gate_failed,
+        unique_trajectories=unique_trajectories,
+        duplicate_trajectories=len(trials) - unique_trajectories,
+        gate_outcome=(
+            "failed" if gate_failed else "not-assessable" if gate_unassessable else "passed"
+        ),
         claim_footer=claim_footer,
     )
     return result.model_copy(update={"head": compute_head(result)})

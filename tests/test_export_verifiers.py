@@ -55,7 +55,10 @@ class StubLumenWorld:
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
     ) -> tuple[Any, dict[str, Any]]:
         self._step = 0
-        return {"tip": 0.0}, {"seed": seed, "options": options}
+        info = {"seed": seed, "options": options}
+        if options:
+            info["or_audit"] = options["or_audit"]
+        return {"tip": 0.0}, info
 
     def step(self, action: Any) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         self.actions.append(action)
@@ -75,6 +78,11 @@ class StubLumenWorld:
                 "unsafe": unsafe,
                 "max_pen": self._max_pen,
                 "diverged": self._diverged,
+                **(
+                    {"or_audit": {"applied_perturbations": ["transient-wall-force"]}}
+                    if self._step == 1
+                    else {}
+                ),
             },
         )
 

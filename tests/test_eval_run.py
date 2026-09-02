@@ -56,7 +56,7 @@ class FakeLumenEnv:
     ) -> tuple[np.ndarray, dict[str, object]]:
         self._seed = 0 if seed is None else seed
         self._step = 0
-        return np.zeros(5, dtype=np.float32), {}
+        return np.zeros(5, dtype=np.float32), {"or_audit": options["or_audit"]} if options else {}
 
     def step(self, action: object) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]:
         del action
@@ -79,6 +79,8 @@ class FakeLumenEnv:
             "max_pen": max_pen,
             "diverged": False,
         }
+        if self._seed == 0 and self._step == 1:
+            info["or_audit"] = {"applied_perturbations": ["transient-wall-force"]}
         return np.zeros(5, dtype=np.float32), 0.0, done, False, info
 
 
@@ -111,6 +113,9 @@ def test_random_gym_job_emits_raw_and_safe(tmp_path: Path) -> None:
     )
     assert result.n == 30
     assert result.headline == "safe_success"
+    assert result.unique_trajectories == 30
+    assert result.duplicate_trajectories == 0
+    assert result.gate_outcome == "failed"
     seed0 = result.trials[0].vector
     safe0 = seed0.metric("safe_success")
     raw0 = seed0.metric("raw_success")

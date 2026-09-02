@@ -360,6 +360,20 @@ def _run_closed_loop(
                     )
                 )
                 if active_perturbations:
+                    reported = raw_step.get("info", {}).get("or_audit", {}).get(
+                        "applied_perturbations", []
+                    )
+                    expected_ids = {item.id for item in active_perturbations}
+                    reported_ids = {
+                        str(item.get("id", "")) if isinstance(item, dict) else str(item)
+                        for item in reported
+                    }
+                    if reported_ids != expected_ids:
+                        raise TaskContractError(
+                            "gym did not report the declared perturbation at its scheduled "
+                            f"step {index}: expected {sorted(expected_ids)}, got "
+                            f"{sorted(reported_ids)}"
+                        )
                     trace_step["perturbations"] = active_perturbations
                 trace_steps.append(trace_step)
             trace = ProceduralTrace.from_steps(

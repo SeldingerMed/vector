@@ -225,7 +225,15 @@ def run_gym_episode(
     episodes; returning raw engine output here meant a diverged ``nan`` was
     scored live and ``0.0`` on replay, and both happened to pass.
     """
-    obs, _reset_info = env.reset(seed=seed, options=reset_options)
+    obs, reset_info = env.reset(seed=seed, options=reset_options)
+    if reset_options is not None:
+        expected = reset_options.get("or_audit")
+        acknowledged = reset_info.get("or_audit") if isinstance(reset_info, dict) else None
+        if acknowledged != expected:
+            raise TaskContractError(
+                "gym ignored or changed the declared scenario/perturbation contract; "
+                "reset info must echo options['or_audit'] exactly"
+            )
     steps: list[dict[str, Any]] = []
     info: Any = {}
     for step_i in range(max_steps):
@@ -239,6 +247,7 @@ def run_gym_episode(
                 "terminated": bool(terminated),
                 "truncated": bool(truncated),
                 "info": jsonable(info) if isinstance(info, dict) else {},
+                **({"reset_info": jsonable(reset_info)} if step_i == 0 else {}),
             }
         )
         if terminated or truncated:

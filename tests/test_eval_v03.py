@@ -49,7 +49,7 @@ class RecoveryLumenEnv:
         del seed
         self.step_index = 0
         self.reset_options = options
-        return [0.0] * 5, {}
+        return [0.0] * 5, {"or_audit": options["or_audit"]} if options else {}
 
     def step(self, action: Any) -> tuple[list[float], float, bool, bool, dict[str, Any]]:
         del action
@@ -61,6 +61,7 @@ class RecoveryLumenEnv:
                 "unsafe": True,
                 "max_pen": 0.4,
                 "diverged": False,
+                "or_audit": {"applied_perturbations": ["transient-wall-force"]},
                 "failure": {
                     "kind": "wall-contact",
                     "detected": True,
@@ -135,6 +136,41 @@ def test_lumen_scenario_perturbation_and_recovery_are_typed(tmp_path: Path) -> N
     assert first.failure.detected
     assert recovered.recovery is not None
     assert recovered.recovery.successful
+
+
+def test_declared_gym_controls_must_be_acknowledged(tmp_path: Path) -> None:
+    class IgnoringEnv(RecoveryLumenEnv):
+        def reset(self, *, seed=None, options=None):
+            observation, _ = super().reset(seed=seed, options=options)
+            return observation, {}
+
+    with pytest.raises(TaskContractError, match="ignored or changed"):
+        run_job(
+            task=load_task(LUMEN_TASK),
+            task_dir=LUMEN_TASK,
+            agent=builtin_random_agent(),
+            agent_dir=None,
+            out=tmp_path / "ignored-controls",
+            n=1,
+            gym_factory=lambda _task: IgnoringEnv(),
+        )
+
+    class NotApplyingEnv(RecoveryLumenEnv):
+        def step(self, action):
+            observation, reward, terminated, truncated, info = super().step(action)
+            info.pop("or_audit", None)
+            return observation, reward, terminated, truncated, info
+
+    with pytest.raises(TaskContractError, match="did not report"):
+        run_job(
+            task=load_task(LUMEN_TASK),
+            task_dir=LUMEN_TASK,
+            agent=builtin_random_agent(),
+            agent_dir=None,
+            out=tmp_path / "ignored-perturbation",
+            n=1,
+            gym_factory=lambda _task: NotApplyingEnv(),
+        )
 
 
 def test_legacy_trace_rows_normalize_to_typed_steps() -> None:

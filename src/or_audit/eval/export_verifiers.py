@@ -971,6 +971,28 @@ def rollout_vector(
         max_steps=task.harness.max_steps,
         reset_options=reset_options,
     )
+    for index, step in enumerate(steps):
+        active = tuple(
+            item
+            for item in perturbations
+            if item.at_step == index or (item.at_step is None and index == 0)
+        )
+        if not active:
+            continue
+        reported = step.get("info", {}).get("or_audit", {}).get(
+            "applied_perturbations", []
+        )
+        expected_ids = {item.id for item in active}
+        reported_ids = {
+            str(item.get("id", "")) if isinstance(item, dict) else str(item)
+            for item in reported
+        }
+        if reported_ids != expected_ids:
+            raise TaskContractError(
+                "gym did not report the declared perturbation at its scheduled "
+                f"step {index}: expected {sorted(expected_ids)}, got "
+                f"{sorted(reported_ids)}"
+            )
     unwrapped = getattr(world, "unwrapped", world)
     nested = getattr(unwrapped, "_env", unwrapped)
     safety = float(getattr(nested, "safety_max_pen", SAFETY_MAX_PEN))
