@@ -171,7 +171,7 @@ def test_legacy_gym_box_restores_array_actions_from_json_plugins() -> None:
         dtype = np.dtype(np.float32)
 
         def contains(self, action: object) -> bool:
-            return isinstance(action, np.ndarray) and action.shape == (2,)
+            return isinstance(action, (list, np.ndarray)) and len(action) == 2
 
         def from_jsonable(self, samples: list[object]) -> list[object]:
             return samples

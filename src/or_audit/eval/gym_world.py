@@ -199,7 +199,17 @@ def _decode_action(env: GymEnv, action: Any) -> Any:
     """Restore a JSON subprocess action through the environment's own space."""
     space = _action_space(env)
     contains = getattr(space, "contains", None)
-    if space is None or not callable(contains) or contains(action):
+    if space is None or not callable(contains):
+        return action
+    box_like = getattr(space, "low", None) is not None and getattr(space, "high", None) is not None
+    if box_like:
+        try:
+            native = np.asarray(action, dtype=getattr(space, "dtype", None))
+        except (TypeError, ValueError):
+            native = action
+        if contains(native):
+            return native
+    elif contains(action):
         return action
     from_jsonable = getattr(space, "from_jsonable", None)
     if not callable(from_jsonable):
@@ -210,11 +220,7 @@ def _decode_action(env: GymEnv, action: Any) -> Any:
         raise TaskContractError(
             "policy action cannot be decoded by the environment action space"
         ) from exc
-    if (
-        not contains(decoded)
-        and getattr(space, "low", None) is not None
-        and getattr(space, "high", None) is not None
-    ):
+    if not contains(decoded) and box_like:
         # Gym 0.21 Box inherits Space.from_jsonable(), which returns the input
         # list unchanged. Restore the native ndarray at this legacy boundary.
         decoded = np.asarray(action, dtype=getattr(space, "dtype", None))
