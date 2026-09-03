@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -23,6 +23,59 @@ NonEmptyPath = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 
 BUILTIN_RANDOM = "random"
 
+StageName = Literal["integration-smoke", "pilot", "qualification", "stress"]
+_STAGE_PREREQUISITES: dict[str, tuple[str, ...]] = {
+    "integration-smoke": (),
+    "pilot": ("integration-smoke",),
+    "qualification": ("integration-smoke", "pilot"),
+    "stress": ("integration-smoke", "pilot", "qualification"),
+}
+
+
+class EvaluationStageSpec(BaseModel):
+    """Provider-neutral execution contract for one gated evaluation stage."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: StageName
+    evaluation_unit: NonEmptyPath
+    target_units: Annotated[int, Field(ge=1)]
+    independent_case_unit: NonEmptyPath
+    independent_cases: Annotated[int, Field(ge=1)]
+    scenarios: tuple[NonEmptyPath, ...]
+    event_injections: tuple[NonEmptyPath, ...] = ()
+    operator_contexts: tuple[NonEmptyPath, ...]
+    stop_conditions: tuple[NonEmptyPath, ...]
+    prerequisites: tuple[StageName, ...] = ()
+
+    @model_validator(mode="after")
+    def _coherent(self) -> Self:
+        if self.independent_cases > self.target_units:
+            raise TaskContractError(
+                f"stage {self.name} declares {self.independent_cases} independent cases "
+                f"but only {self.target_units} evaluation units"
+            )
+        for label, values in (
+            ("scenarios", self.scenarios),
+            ("operator_contexts", self.operator_contexts),
+            ("stop_conditions", self.stop_conditions),
+        ):
+            if not values:
+                raise TaskContractError(f"stage {self.name} must declare {label}")
+            if len(set(values)) != len(values):
+                raise TaskContractError(f"stage {self.name} declares duplicate {label}")
+        if len(set(self.event_injections)) != len(self.event_injections):
+            raise TaskContractError(f"stage {self.name} declares duplicate event_injections")
+        expected = _STAGE_PREREQUISITES[self.name]
+        if self.prerequisites != expected:
+            raise TaskContractError(
+                f"stage {self.name} prerequisites must be {list(expected)}, "
+                f"got {list(self.prerequisites)}"
+            )
+        if self.name == "stress" and not self.event_injections:
+            raise TaskContractError("stage stress must declare injected events")
+        return self
+
 
 class JobConfig(BaseModel):
     """Loadable cartesian job. Paths are as written; resolve against the file."""
@@ -35,6 +88,7 @@ class JobConfig(BaseModel):
     tasks: tuple[NonEmptyPath, ...]
     agents: tuple[NonEmptyPath, ...]
     projection: ProjectionSpec | None = None
+    stage: EvaluationStageSpec | None = None
 
     @model_validator(mode="after")
     def _non_empty_unique(self) -> Self:

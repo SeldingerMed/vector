@@ -111,6 +111,67 @@ def test_job_refuses_extra_keys(tmp_path: Path) -> None:
         load_job_config(dest)
 
 
+def test_stage_contract_validates_sequence_and_independence(tmp_path: Path) -> None:
+    task_dir = _pinned_lumen(tmp_path)
+    stage = """
+[stage]
+name = "qualification"
+evaluation_unit = "seeded simulator episode"
+target_units = 2
+independent_case_unit = "scenario-target seed"
+independent_cases = 2
+scenarios = ["lumen-nav-safe"]
+operator_contexts = ["autonomous"]
+stop_conditions = ["stop on any hard gate failure"]
+prerequisites = ["integration-smoke", "pilot"]
+"""
+    resolved = resolve_job(_write_job(tmp_path, task_dir, n=2, extra=stage))
+    assert resolved.config.stage is not None
+    assert resolved.config.stage.independent_cases == 2
+
+    (tmp_path / "bad").mkdir()
+    bad = stage.replace('prerequisites = ["integration-smoke", "pilot"]', 'prerequisites = []')
+    with pytest.raises(TaskContractError, match="prerequisites must be"):
+        load_job_config(_write_job(tmp_path / "bad", task_dir, n=2, extra=bad))
+
+
+def test_stage_run_enforces_units_supported_axes_and_head_covers_outcome(
+    tmp_path: Path,
+) -> None:
+    task_dir = _pinned_lumen(tmp_path)
+    stage = """
+[stage]
+name = "qualification"
+evaluation_unit = "seeded simulator episode"
+target_units = 2
+independent_case_unit = "scenario-target seed"
+independent_cases = 2
+scenarios = ["lumen-nav-safe"]
+operator_contexts = ["autonomous"]
+stop_conditions = ["stop on any hard gate failure"]
+prerequisites = ["integration-smoke", "pilot"]
+"""
+    resolved = resolve_job(_write_job(tmp_path, task_dir, n=2, extra=stage))
+    out = tmp_path / "staged"
+    manifest = run_cartesian_job(resolved, out=out, gym_factory=_fake)
+    assert manifest.gate_outcome == "failed"
+    assert manifest.stage is not None
+    assert manifest.stage.target_units == sum(pair.n for pair in manifest.pairs)
+    assert read_manifest(out).head == manifest.head
+
+    with pytest.raises(TaskContractError, match="schedules 3"):
+        run_cartesian_job(resolved, out=tmp_path / "wrong-n", n=3, gym_factory=_fake)
+
+    (tmp_path / "unsupported").mkdir()
+    unsupported = stage.replace('scenarios = ["lumen-nav-safe"]', 'scenarios = ["invented-world"]')
+    with pytest.raises(TaskContractError, match="unsupported scenarios"):
+        run_cartesian_job(
+            resolve_job(_write_job(tmp_path / "unsupported", task_dir, n=2, extra=unsupported)),
+            out=tmp_path / "unsupported-out",
+            gym_factory=_fake,
+        )
+
+
 def test_job_missing_agent_path(tmp_path: Path) -> None:
     dest = tmp_path / "missing-agent"
     dest.mkdir()

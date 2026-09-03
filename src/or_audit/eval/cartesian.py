@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -14,7 +14,7 @@ from or_audit.errors import TaskContractError
 from or_audit.eval.agent import AgentPackage
 from or_audit.eval.gym_world import GymFactory
 from or_audit.eval.job import JobResult
-from or_audit.eval.job_config import BUILTIN_RANDOM, ResolvedJob
+from or_audit.eval.job_config import BUILTIN_RANDOM, EvaluationStageSpec, ResolvedJob
 from or_audit.eval.loader import load_agent, load_task
 from or_audit.eval.runner import builtin_random_agent, replay_job, run_job
 from or_audit.eval.task import ProjectionSpec, TaskSpec
@@ -43,6 +43,8 @@ class CartesianManifest(BaseModel):
     n: Annotated[int, Field(ge=1)] | None = None
     pairs: tuple[PairRecord, ...]
     projection: ProjectionSpec | None = None
+    stage: EvaluationStageSpec | None = None
+    gate_outcome: Literal["passed", "failed", "not-assessable", "unknown"] | None = None
     head: str = ""
 
 
@@ -55,6 +57,10 @@ def manifest_head_payload(manifest: CartesianManifest) -> dict[str, Any]:
     """Bytes that define cartesian replay identity. Excludes ``head`` itself."""
     dumped = manifest.model_dump(mode="json")
     dumped.pop("head", None)
+    if manifest.stage is None:
+        # Preserve v0.3 manifest heads written before optional stage metadata.
+        dumped.pop("stage", None)
+        dumped.pop("gate_outcome", None)
     return dumped
 
 
@@ -141,7 +147,42 @@ def run_cartesian_job(
             used_dirs.add(dirname)
             planned.append((task_dir, task, agent, agent_dir, dirname))
 
+    stage = resolved.config.stage
+    if stage is not None:
+        if n_eval is None:
+            raise TaskContractError(f"stage {stage.name} must declare job n")
+        scheduled = len(planned) * n_eval
+        if scheduled != stage.target_units:
+            raise TaskContractError(
+                f"stage {stage.name} targets {stage.target_units} {stage.evaluation_unit} "
+                f"but tasks x agents x n schedules {scheduled}"
+            )
+        supported_scenarios = {
+            value
+            for _, task, _, _, _ in planned
+            for value in (task.id, *(scenario.id for scenario in task.scenarios))
+        }
+        unsupported_scenarios = set(stage.scenarios) - supported_scenarios
+        if unsupported_scenarios:
+            raise TaskContractError(
+                f"stage {stage.name} names unsupported scenarios "
+                f"{sorted(unsupported_scenarios)}"
+            )
+        supported_events = {
+            value
+            for _, task, _, _, _ in planned
+            for perturbation in task.perturbations
+            for value in (perturbation.id, perturbation.kind)
+        }
+        unsupported_events = set(stage.event_injections) - supported_events
+        if unsupported_events:
+            raise TaskContractError(
+                f"stage {stage.name} names unsupported injected events "
+                f"{sorted(unsupported_events)}"
+            )
+
     pairs: list[PairRecord] = []
+    outcomes: list[str] = []
     for task_dir, task, agent, agent_dir, dirname in planned:
         result: JobResult = run_job(
             task=task,
@@ -162,6 +203,19 @@ def run_cartesian_job(
                 head=result.head,
             )
         )
+        outcomes.append(result.gate_outcome)
+
+    gate_outcome = None
+    if stage is not None:
+        gate_outcome = (
+            "failed"
+            if "failed" in outcomes
+            else "not-assessable"
+            if "not-assessable" in outcomes
+            else "unknown"
+            if "unknown" in outcomes
+            else "passed"
+        )
 
     manifest = CartesianManifest(
         format_version=resolved.config.format_version,
@@ -169,6 +223,8 @@ def run_cartesian_job(
         n=n_eval,
         pairs=tuple(pairs),
         projection=resolved.config.projection,
+        stage=stage,
+        gate_outcome=gate_outcome,
     )
     stamped = manifest.model_copy(update={"head": compute_manifest_head(manifest)})
     write_manifest(out, stamped)
