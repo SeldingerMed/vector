@@ -190,6 +190,8 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', needs.build.outputs.version) }}
+          prerelease: ${{ contains(needs.build.outputs.version, 'a') || contains(needs.build.outputs.version, 'b') || contains(needs.build.outputs.version, 'rc') }}
+          make_latest: ${{ (contains(needs.build.outputs.version, 'a') || contains(needs.build.outputs.version, 'b') || contains(needs.build.outputs.version, 'rc')) && 'false' || 'true' }}
           files: |
             dist/surgeval-*.whl
             dist/surgeval-*.tar.gz
