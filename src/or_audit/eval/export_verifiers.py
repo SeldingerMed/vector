@@ -979,13 +979,10 @@ def rollout_vector(
         )
         if not active:
             continue
-        reported = step.get("info", {}).get("or_audit", {}).get(
-            "applied_perturbations", []
-        )
+        reported = step.get("info", {}).get("or_audit", {}).get("applied_perturbations", [])
         expected_ids = {item.id for item in active}
         reported_ids = {
-            str(item.get("id", "")) if isinstance(item, dict) else str(item)
-            for item in reported
+            str(item.get("id", "")) if isinstance(item, dict) else str(item) for item in reported
         }
         if reported_ids != expected_ids:
             raise TaskContractError(

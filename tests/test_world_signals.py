@@ -17,6 +17,7 @@ these tests must stay hermetic.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -24,6 +25,7 @@ import pytest
 from or_audit.errors import TaskContractError
 from or_audit.eval.wrap import GateMapping, WrapRequest
 from or_audit.install.catalog import (
+    PLANNER_CATALOG_PATH,
     AuditedEnv,
     Disposition,
     SignalKind,
@@ -31,11 +33,16 @@ from or_audit.install.catalog import (
     WorldPackage,
     WorldSignal,
     load_catalog,
+    planner_catalog_data,
     world_package,
 )
 
 LAPGYM_PIN = "85bf7e05dd088b824794dda0046679df13b13e6e"
 SURROL_PIN = "aa430af5ca3ee62a69d677d2c8dfd031efe20204"
+
+
+def test_checked_in_planner_catalog_matches_audited_source() -> None:
+    assert json.loads(PLANNER_CATALOG_PATH.read_text(encoding="utf-8")) == planner_catalog_data()
 
 
 def _gate(signal: str, gate_id: str = "g", unit: str = "scaled-N") -> GateMapping:

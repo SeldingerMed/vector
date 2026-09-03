@@ -40,6 +40,7 @@ UNVERIFIED = "unverified"
 #: Packaged catalog resource, resolved relative to this module so the catalog
 #: travels with the wheel rather than depending on a source checkout.
 CATALOG_PATH = Path(__file__).resolve().parent / "catalog.toml"
+PLANNER_CATALOG_PATH = Path(__file__).resolve().parent / "planner-catalog.json"
 
 _SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -757,6 +758,56 @@ def load_catalog(path: Path | None = None) -> WorldCatalog:
 def world_package(world_id: str, *, catalog: WorldCatalog | None = None) -> WorldPackage:
     """One world by id, or refuse with the known ids listed."""
     return (catalog or load_catalog()).require(world_id)
+
+
+def planner_catalog_data(catalog: WorldCatalog | None = None) -> dict[str, object]:
+    """Compact, machine-readable world evidence for evaluation planners."""
+    resolved = catalog or load_catalog()
+    return {
+        "format_version": "1",
+        "catalog_version": resolved.catalog_version,
+        "worlds": [
+            {
+                "id": world.id,
+                "display_name": world.display_name,
+                "domain": world.domain,
+                "engine": world.engine,
+                "disposition": world.disposition.value,
+                "license": world.license,
+                "sources": list(world.source),
+                "world_kind": world.world_kind,
+                "world_pin": world.world_pin,
+                "metrics_only": world.metrics_only,
+                "determinism": world.determinism.value,
+                "install": {
+                    "strategy": world.strategy.value,
+                    "pin_state": world.pin_state,
+                    "installable": world.installable,
+                },
+                "environments": [
+                    {
+                        "env_id": environment.env_id,
+                        "safety_eligible": environment.safety_eligible,
+                        "signals": [
+                            {
+                                "key": signal.key,
+                                "kind": signal.kind.value,
+                                "unit": signal.unit,
+                                "published": signal.published,
+                                "gate_eligible": signal.gate_eligible,
+                                "requires_parameters": signal.requires_parameters,
+                            }
+                            for signal in environment.signals
+                        ],
+                    }
+                    for environment in world.envs
+                ],
+                "safety_evidence": world.safety_evidence.strip(),
+                "risks": world.risks.strip(),
+            }
+            for world in resolved.worlds
+        ],
+    }
 
 
 def iter_packages(
