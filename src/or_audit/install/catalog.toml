@@ -38,18 +38,16 @@ display_name = "Seldinger Lumen"
 domain = "Endovascular navigation (continuum instrument, deformable lumen)"
 engine = "Lumen (first-party continuum/deformable physics)"
 disposition = "shipped"
-license = "unverified"
+license = "Apache-2.0"
 source = ["https://github.com/SeldingerMed/seldinger-lumen"]
 world_kind = "lumen-gym"
 world_pin = "3c6bb39ecc916c73e81131b94353ad8deee62bd4"
 metrics_only = false
 determinism = "unmeasured"
 determinism_evidence = """
-Unmeasured. Blocker is our own catalog, not the engine: `lumen` has no SPDX expression \
-recorded, so `surgeval worlds install lumen` refuses and the world cannot be stepped \
-through a sanctioned install. The in-tree conformance runs use the injected CI factory, \
-which measures the harness, not this world. Unblock: record the license, then `surgeval \
-conformance <task> -a random -n 2`, which reports the class.
+Unmeasured. The in-tree conformance runs use the injected CI factory, which measures the \
+harness, not this world. Run `surgeval conformance <task> -a random -n 2` against the \
+first-party distribution before making a reproducibility claim.
 """
 safety_evidence = """
 docs/examples/tasks/lumen-nav-safe/task.toml binds hard gates to \
@@ -63,18 +61,16 @@ first-party `seldinger-lumen` distribution, which is why this is an install \
 strategy at all rather than nothing.
 """
 risks = """
-License stays `unverified` on purpose: the harness LICENSE (Apache-2.0) covers \
-the adapter in this repository, not the seldinger-lumen content distribution. \
-Recording our own content as audited without reading its LICENSE would be \
-exactly the fabrication this file forbids - and `license_permitted` is false \
-while it stands, so this row is not installable either.
+The pinned sibling repository contains the Apache License 2.0 text and declares \
+`Apache-2.0` in `pyproject.toml`. Determinism remains unmeasured, so a successful \
+local import and rollout cannot establish replay equivalence.
 """
 
 [worlds.install]
 strategy = "first-party"
 distribution = "seldinger-lumen"
 verify_import = "lumen"
-pinned_version = ""
+pinned_version = "0.0.0"
 
 # --------------------------------------------------------------------------
 # WRAP — verified as legally and technically wrappable

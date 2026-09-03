@@ -520,7 +520,7 @@ def test_a_blocked_world_gets_the_blocker_as_its_fix():
     """When no command helps, the fix is the blocker, stated once."""
     report = run_doctor(packages=["lumen", "cathsim"], discovery=())
     lumen = next(item for item in report.checks if item.id == "world:lumen")
-    assert "audit the upstream LICENSE" in (lumen.fix or "")
+    assert "worlds install lumen" in (lumen.fix or "")
     cathsim = next(item for item in report.checks if item.id == "world:cathsim")
     assert not cathsim.required
     assert "worlds install" not in (cathsim.fix or "")
