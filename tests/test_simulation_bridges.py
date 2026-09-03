@@ -648,12 +648,14 @@ def test_gym_bridge_reports_a_real_backend() -> None:
     provenance = bridge.engine_provenance()
     assert provenance["engine"] == "lumen-gym"
     assert provenance["backend"] == "real"
-    assert provenance["world_pin"] == "lumen-pin-v1"
+    assert provenance["world_pin"] == ""
     # A test double ships no distribution metadata; the field stays empty rather than guessed.
     assert provenance["backend_version"] == ""
 
 
-def test_gym_factory_carries_the_task_world_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gym_factory_does_not_self_attest_the_task_world_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         "or_audit.eval.sim.gym_bridge.make_gym",
         lambda spec: FakePhysicsEnv(),
@@ -663,7 +665,7 @@ def test_gym_factory_carries_the_task_world_pin(monkeypatch: pytest.MonkeyPatch)
         "engine": "gym",
         "backend": "real",
         "backend_version": "",
-        "world_pin": "broncho-synthetic-v1",
+        "world_pin": "",
     }
 
 
@@ -682,7 +684,20 @@ def test_pybullet_kind_uses_the_generic_gym_factory(
     )
     bridge = make_gym_bridge(task)
     assert bridge.engine_provenance()["engine"] == "pybullet"
-    assert bridge.engine_provenance()["world_pin"] == "pybullet-pin-v1"
+    assert bridge.engine_provenance()["world_pin"] == ""
+
+
+def test_gym_bridge_reports_observed_vcs_pin_and_refuses_a_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "or_audit.eval.sim.gym_bridge.module_distribution_revision",
+        lambda _module: "observed-commit",
+    )
+    bridge = GymnasiumBridge(FakePhysicsEnv(), world_pin="observed-commit")
+    assert bridge.engine_provenance()["world_pin"] == "observed-commit"
+    with pytest.raises(TaskContractError, match="world pin mismatch"):
+        GymnasiumBridge(FakePhysicsEnv(), world_pin="different-commit")
 
 
 def test_legacy_gym_prefix_normalizes_reset_and_step(monkeypatch: pytest.MonkeyPatch) -> None:

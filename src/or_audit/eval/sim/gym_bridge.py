@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from or_audit.errors import TaskContractError
 from or_audit.eval.enums import WorldKind
 from or_audit.eval.gym_world import GymEnv, make_gym
 from or_audit.eval.sim.base import (
     BACKEND_REAL,
     BaseSimulationBridge,
     SimulationEngine,
+    module_distribution_revision,
     module_distribution_version,
 )
 from or_audit.eval.task import TaskSpec
@@ -28,7 +30,12 @@ class GymnasiumBridge(BaseSimulationBridge):
     ) -> None:
         self.env = env
         self.world_kind = world_kind
-        self.world_pin = world_pin
+        self.world_pin = module_distribution_revision(type(self.unwrapped).__module__)
+        if self.world_pin and world_pin and self.world_pin != world_pin:
+            raise TaskContractError(
+                f"{world_kind_key(world_kind)} world pin mismatch: task requires "
+                f"{world_pin}, installed {self.world_pin}"
+            )
 
     @property
     def unwrapped(self) -> Any:

@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Final
 
 #: Version of the SurgEval package as a whole.
-PACKAGE_VERSION: Final = "0.3.0a9"
+PACKAGE_VERSION: Final = "0.3.0a10"
 
 #: Version of the domain and record schema. Carried on every persisted audit
 #: entry and covered by the entry hash, so a record is self-describing and a

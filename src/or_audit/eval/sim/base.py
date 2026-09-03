@@ -6,10 +6,12 @@ PyBullet) into a unified reset/step/render/inspect interface for procedural eval
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import (
     PackageNotFoundError,
+    distribution,
     entry_points,
     packages_distributions,
     version,
@@ -46,6 +48,26 @@ def module_distribution_version(module_name: str) -> str:
             return version(dist_name)
         except PackageNotFoundError:  # pragma: no cover - metadata race only
             continue
+    return ""
+
+
+def module_distribution_revision(module_name: str) -> str:
+    """Observed VCS commit or version of the distribution providing a module."""
+    root = module_name.split(".")[0]
+    for dist_name in packages_distributions().get(root) or []:
+        try:
+            dist = distribution(dist_name)
+        except PackageNotFoundError:  # pragma: no cover - metadata race only
+            continue
+        metadata = dist.read_text("direct_url.json")
+        if metadata:
+            try:
+                commit = json.loads(metadata).get("vcs_info", {}).get("commit_id", "")
+            except (AttributeError, TypeError, json.JSONDecodeError):
+                commit = ""
+            if commit:
+                return str(commit)
+        return dist.version
     return ""
 
 
