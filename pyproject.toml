@@ -1,6 +1,6 @@
 [project]
 name = "surgeval"
-version = "0.3.0a3"
+version = "0.3.0a4"
 description = "Vector — independent evaluation infrastructure for procedural medical AI"
 readme = "README.md"
 requires-python = ">=3.11"

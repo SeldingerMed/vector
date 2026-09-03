@@ -26,4 +26,4 @@ def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["--version"])
     assert exc.value.code == 0
-    assert "0.3.0a3" in capsys.readouterr().out
+    assert "0.3.0a4" in capsys.readouterr().out
