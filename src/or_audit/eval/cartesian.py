@@ -119,13 +119,14 @@ def _agent_from_ref(ref: str) -> tuple[AgentPackage, Path | None]:
 
 
 def _independent_case_count(
-    planned: list[tuple[Path, TaskSpec, AgentPackage, Path | None, str]],
+    planned: list[tuple[Path, TaskSpec, AgentPackage, Path | None, str, int | None]],
     stage: EvaluationStageSpec,
-    n: int,
 ) -> int:
     """Count task-owned cases once, even when several agents evaluate them."""
-    tasks = {(str(root), task.id): (root, task) for root, task, _, _, _ in planned}.values()
-    modes = {task.harness.interaction_mode for _, task in tasks}
+    tasks = {
+        (str(root), task.id): (root, task, trials) for root, task, _, _, _, trials in planned
+    }.values()
+    modes = {task.harness.interaction_mode for _, task, _ in tasks}
     if len(modes) != 1:
         raise TaskContractError(f"stage {stage.name} cannot mix interaction modes")
     mode = next(iter(modes))
@@ -134,14 +135,14 @@ def _independent_case_count(
             raise TaskContractError(
                 f"closed-loop stage {stage.name} independent_case_key must be '$seed'"
             )
-        return len({(task.id, seed) for _, task in tasks for seed in range(n)})
+        return len({(task.id, seed) for _, task, trials in tasks for seed in range(trials or 0)})
     if stage.independent_case_key == "$seed":
         raise TaskContractError(
             f"dataset-backed stage {stage.name} must name an input field as independent_case_key"
         )
     cases: set[str] = set()
-    for root, task in tasks:
-        for item in load_items(root / task.environment.inputs_path)[:n]:
+    for root, task, trials in tasks:
+        for item in load_items(root / task.environment.inputs_path)[:trials]:
             if stage.independent_case_key not in item:
                 raise TaskContractError(
                     f"task {task.id} input {item['id']!r} has no independent-case field "
@@ -163,7 +164,12 @@ def _observed_units(result: JobResult, source: str) -> int:
     for trial in result.trials:
         metric = trial.vector.metric(metric_id)
         value = metric.value if metric is not None else None
-        if isinstance(value, bool) or not isinstance(value, int | float) or value < 0 or int(value) != value:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or value < 0
+            or int(value) != value
+        ):
             raise TaskContractError(
                 f"stage unit source {source!r} must resolve to a non-negative integer "
                 f"for every trial"
@@ -185,11 +191,12 @@ def run_cartesian_job(
         msg = f"job {resolved.config.id} n must be >= 1, got {n_eval}"
         raise TaskContractError(msg)
 
-    planned: list[tuple[Path, TaskSpec, AgentPackage, Path | None, str]] = []
+    planned: list[tuple[Path, TaskSpec, AgentPackage, Path | None, str, int | None]] = []
     used_dirs: set[str] = set()
-    for task_path in resolved.task_paths:
+    for task_ref, task_path in zip(resolved.config.tasks, resolved.task_paths, strict=True):
         task_dir = task_path if task_path.is_dir() else task_path.parent
         task: TaskSpec = load_task(task_path)
+        pair_trials = n_eval if n_eval is not None else resolved.config.task_trials.get(task_ref)
         if resolved.config.projection is not None and task.projection != resolved.config.projection:
             raise TaskContractError(
                 f"job {resolved.config.id} projection does not match the "
@@ -205,13 +212,13 @@ def run_cartesian_job(
                 )
                 raise TaskContractError(msg)
             used_dirs.add(dirname)
-            planned.append((task_dir, task, agent, agent_dir, dirname))
+            planned.append((task_dir, task, agent, agent_dir, dirname, pair_trials))
 
     stage = resolved.config.stage
     if stage is not None:
-        if n_eval is None:
-            raise TaskContractError(f"stage {stage.name} must declare job n")
-        scheduled = len(planned) * n_eval
+        if any(trials is None for *_, trials in planned):
+            raise TaskContractError(f"stage {stage.name} must declare job n or task_trials")
+        scheduled = sum(trials or 0 for *_, trials in planned)
         if stage.unit_source == "trials" and scheduled != stage.target_units:
             raise TaskContractError(
                 f"stage {stage.name} targets {stage.target_units} {stage.evaluation_unit} "
@@ -219,7 +226,7 @@ def run_cartesian_job(
             )
         supported_scenarios = {
             value
-            for _, task, _, _, _ in planned
+            for _, task, _, _, _, _ in planned
             for value in (task.id, *(scenario.id for scenario in task.scenarios))
         }
         unsupported_scenarios = set(stage.scenarios) - supported_scenarios
@@ -229,7 +236,7 @@ def run_cartesian_job(
             )
         supported_events = {
             value
-            for _, task, _, _, _ in planned
+            for _, task, _, _, _, _ in planned
             for perturbation in task.perturbations
             for value in (perturbation.id, perturbation.kind)
         }
@@ -238,9 +245,9 @@ def run_cartesian_job(
             raise TaskContractError(
                 f"stage {stage.name} names unsupported injected events {sorted(unsupported_events)}"
             )
-        for task_dir, task, _, _, _ in planned:
-            assert_trial_capacity(task, task_dir, n_eval)
-        observed_cases = _independent_case_count(planned, stage, n_eval)
+        for task_dir, task, _, _, _, trials in planned:
+            assert_trial_capacity(task, task_dir, trials or 0)
+        observed_cases = _independent_case_count(planned, stage)
         if observed_cases != stage.independent_cases:
             raise TaskContractError(
                 f"stage {stage.name} declares {stage.independent_cases} independent cases but "
@@ -250,14 +257,14 @@ def run_cartesian_job(
     pairs: list[PairRecord] = []
     outcomes: list[str] = []
     observed_units = 0
-    for task_dir, task, agent, agent_dir, dirname in planned:
+    for task_dir, task, agent, agent_dir, dirname, pair_trials in planned:
         result: JobResult = run_job(
             task=task,
             task_dir=task_dir,
             agent=agent,
             agent_dir=agent_dir,
             out=out / dirname,
-            n=n_eval,
+            n=pair_trials,
             gym_factory=gym_factory,
         )
         pairs.append(
@@ -274,12 +281,11 @@ def run_cartesian_job(
         if stage is not None:
             observed_units += _observed_units(result, stage.unit_source)
 
-    if stage is not None:
-        if observed_units != stage.target_units:
-            raise TaskContractError(
-                f"stage {stage.name} observed {observed_units} {stage.evaluation_unit}, "
-                f"expected exactly {stage.target_units}"
-            )
+    if stage is not None and observed_units != stage.target_units:
+        raise TaskContractError(
+            f"stage {stage.name} observed {observed_units} {stage.evaluation_unit}, "
+            f"expected exactly {stage.target_units}"
+        )
 
     gate_outcome = None
     if stage is not None:

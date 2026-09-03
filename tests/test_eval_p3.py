@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -197,10 +198,11 @@ prerequisites = ["integration-smoke", "pilot"]
     )
     assert step_manifest.observed_units == 6
 
+
 def test_dataset_stage_recomputes_independent_cases_from_input_field(tmp_path: Path) -> None:
     job = tmp_path / "dataset-stage"
     job.mkdir()
-    body = f'''format_version = "1"
+    body = f"""format_version = "1"
 id = "video-stage"
 n = 3
 tasks = [{json.dumps(str(VIDEO_TASK))}]
@@ -217,7 +219,7 @@ scenarios = ["video-nextstep"]
 operator_contexts = ["offline"]
 stop_conditions = ["stop on any hard gate failure"]
 prerequisites = ["integration-smoke", "pilot"]
-'''
+"""
     (job / "job.toml").write_text(body, encoding="utf-8")
     manifest = run_cartesian_job(resolve_job(job), out=tmp_path / "dataset-out")
     assert sum(pair.n for pair in manifest.pairs) == 3
@@ -229,6 +231,55 @@ prerequisites = ["integration-smoke", "pilot"]
     )
     with pytest.raises(TaskContractError, match="'id' identifies 3"):
         run_cartesian_job(resolve_job(wrong), out=tmp_path / "dataset-wrong-out")
+
+
+def test_stage_supports_heterogeneous_per_task_trial_counts(tmp_path: Path) -> None:
+    first = _pinned_lumen(tmp_path)
+    second = tmp_path / "lumen-task-2"
+    shutil.copytree(first, second)
+    task_file = second / "task.toml"
+    task_file.write_text(
+        task_file.read_text(encoding="utf-8").replace(
+            'id = "lumen-nav-safe"', 'id = "lumen-nav-safe-2"', 1
+        ),
+        encoding="utf-8",
+    )
+    job = tmp_path / "heterogeneous-stage"
+    job.mkdir()
+    first_ref, second_ref = str(first), str(second)
+    (job / "job.toml").write_text(
+        f"""format_version = "1"
+id = "heterogeneous-stage"
+tasks = [{json.dumps(first_ref)}, {json.dumps(second_ref)}]
+agents = ["random"]
+
+[task_trials]
+{json.dumps(first_ref)} = 1
+{json.dumps(second_ref)} = 2
+
+[stage]
+name = "qualification"
+evaluation_unit = "seeded simulator episode"
+target_units = 3
+independent_case_unit = "scenario seed"
+independent_case_key = "$seed"
+independent_cases = 3
+scenarios = ["lumen-nav-safe", "lumen-nav-safe-2"]
+operator_contexts = ["autonomous"]
+stop_conditions = ["stop on any hard gate failure"]
+prerequisites = ["integration-smoke", "pilot"]
+""",
+        encoding="utf-8",
+    )
+
+    manifest = run_cartesian_job(
+        resolve_job(job), out=tmp_path / "heterogeneous-out", gym_factory=_fake
+    )
+    assert [(pair.task_id, pair.n) for pair in manifest.pairs] == [
+        ("lumen-nav-safe", 1),
+        ("lumen-nav-safe-2", 2),
+    ]
+    assert manifest.observed_units == 3
 
 
 def test_stage_counts_task_reported_scored_targets(
@@ -250,7 +301,7 @@ def test_stage_counts_task_reported_scored_targets(
     job = tmp_path / "metric-stage"
     job.mkdir()
     (job / "job.toml").write_text(
-        f'''format_version = "1"
+        f"""format_version = "1"
 id = "angiostress-stage"
 n = 1
 tasks = [{json.dumps(str(ANGIO_TASK))}]
@@ -268,7 +319,7 @@ scenarios = ["angiostress-dias"]
 operator_contexts = ["offline"]
 stop_conditions = ["stop on release audit failure"]
 prerequisites = ["integration-smoke"]
-''',
+""",
         encoding="utf-8",
     )
     manifest = run_cartesian_job(resolve_job(job), out=tmp_path / "metric-stage-out")

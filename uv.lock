@@ -840,7 +840,7 @@ wheels = [
 
 [[package]]
 name = "surgeval"
-version = "0.3.0a4"
+version = "0.3.0a6"
 source = { editable = "." }
 dependencies = [
     { name = "cloudpickle" },

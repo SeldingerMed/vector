@@ -92,6 +92,7 @@ class JobConfig(BaseModel):
     id: Slug
     n: Annotated[int, Field(ge=1)] | None = None
     tasks: tuple[NonEmptyPath, ...]
+    task_trials: dict[str, Annotated[int, Field(ge=1)]] = Field(default_factory=dict)
     agents: tuple[NonEmptyPath, ...]
     projection: ProjectionSpec | None = None
     stage: EvaluationStageSpec | None = None
@@ -110,6 +111,10 @@ class JobConfig(BaseModel):
         if len(set(self.agents)) != len(self.agents):
             msg = f"job {self.id} lists the same agent twice"
             raise TaskContractError(msg)
+        if self.n is not None and self.task_trials:
+            raise TaskContractError(f"job {self.id} cannot declare both n and task_trials")
+        if self.task_trials and set(self.task_trials) != set(self.tasks):
+            raise TaskContractError(f"job {self.id} task_trials keys must exactly match tasks")
         return self
 
 
