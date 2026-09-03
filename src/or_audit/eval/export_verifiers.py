@@ -39,7 +39,14 @@ from or_audit.audit.canonical import digest
 from or_audit.errors import ScoreContractError, TaskContractError
 from or_audit.eval.contracts import GateProjectionPolicy, InteractionMode
 from or_audit.eval.enums import ProjectionId
-from or_audit.eval.gym_world import GymEnv, GymFactory, make_gym, run_gym_episode, sample_action
+from or_audit.eval.gym_world import (
+    GymEnv,
+    GymFactory,
+    make_gym,
+    run_gym_episode,
+    sample_action,
+    split_perturbations,
+)
 from or_audit.eval.integrity import tree_digest
 from or_audit.eval.loader import load_task
 from or_audit.eval.plugins import VerifierRuntime, load_verifier_runtime
@@ -946,16 +953,17 @@ def rollout_vector(
         if perturbation.scenario_id is None
         or (scenario is not None and perturbation.scenario_id == scenario.id)
     )
+    harness_perturbations, world_perturbations = split_perturbations(perturbations)
     reset_options = (
         {
             "or_audit": {
                 "scenario": (scenario.model_dump(mode="json") if scenario is not None else None),
                 "perturbations": [
-                    perturbation.model_dump(mode="json") for perturbation in perturbations
+                    perturbation.model_dump(mode="json") for perturbation in world_perturbations
                 ],
             }
         }
-        if scenario is not None or perturbations
+        if scenario is not None or world_perturbations
         else None
     )
 
@@ -970,6 +978,7 @@ def rollout_vector(
         action_fn=action_fn,
         max_steps=task.harness.max_steps,
         reset_options=reset_options,
+        harness_perturbations=harness_perturbations,
     )
     for index, step in enumerate(steps):
         active = tuple(

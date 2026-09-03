@@ -13,7 +13,13 @@ from or_audit.eval.agent import AgentPackage
 from or_audit.eval.bind import assert_bind
 from or_audit.eval.contracts import CapabilitySpec, InteractionMode
 from or_audit.eval.enums import AgentKind, PortId, WorldKind
-from or_audit.eval.gym_world import GymFactory, make_gym, run_gym_episode, sample_action
+from or_audit.eval.gym_world import (
+    GymFactory,
+    make_gym,
+    run_gym_episode,
+    sample_action,
+    split_perturbations,
+)
 from or_audit.eval.integrity import tree_digest
 from or_audit.eval.job import (
     JobResult,
@@ -325,6 +331,7 @@ def _run_closed_loop(
                 if perturbation.scenario_id is None
                 or (scenario is not None and perturbation.scenario_id == scenario.id)
             )
+            harness_perturbations, world_perturbations = split_perturbations(perturbations)
             reset_options = (
                 {
                     "or_audit": {
@@ -332,11 +339,12 @@ def _run_closed_loop(
                             scenario.model_dump(mode="json") if scenario is not None else None
                         ),
                         "perturbations": [
-                            perturbation.model_dump(mode="json") for perturbation in perturbations
+                            perturbation.model_dump(mode="json")
+                            for perturbation in world_perturbations
                         ],
                     }
                 }
-                if scenario is not None or perturbations
+                if scenario is not None or world_perturbations
                 else None
             )
 
@@ -357,6 +365,7 @@ def _run_closed_loop(
                 action_fn=action_fn,
                 max_steps=task.harness.max_steps,
                 reset_options=reset_options,
+                harness_perturbations=harness_perturbations,
             )
             trace_steps = []
             for index, raw_step in enumerate(steps):

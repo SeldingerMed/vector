@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pydantic
@@ -11,6 +12,8 @@ import pytest
 
 from or_audit.cli import main
 from or_audit.errors import TaskContractError
+from or_audit.eval.contracts import PerturbationSpec
+from or_audit.eval.gym_world import run_gym_episode, split_perturbations
 from or_audit.eval.job import TrialRecord, assemble_job_result, read_job_result
 from or_audit.eval.loader import load_agent, load_task
 from or_audit.eval.runner import builtin_random_agent, replay_job, run_job
@@ -86,6 +89,70 @@ class FakeLumenEnv:
 
 def _fake(_task: object) -> FakeLumenEnv:
     return FakeLumenEnv()
+
+
+def test_harness_applies_and_records_portable_interface_faults() -> None:
+    class RecordingEnv:
+        def __init__(self) -> None:
+            self.actions: list[np.ndarray] = []
+            self.step_index = 0
+
+        def reset(
+            self, *, seed: int | None = None, options: object = None
+        ) -> tuple[np.ndarray, dict[str, object]]:
+            del seed, options
+            self.step_index = 0
+            return np.array([2.0, 3.0]), {}
+
+        def step(self, action: object) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]:
+            self.actions.append(np.asarray(action))
+            self.step_index += 1
+            return (
+                np.array([2.0 + self.step_index, 3.0 + self.step_index]),
+                0.0,
+                self.step_index == 3,
+                False,
+                {},
+            )
+
+    events = (
+        PerturbationSpec(id="drop", kind="harness-observation-zero", at_step=0),
+        PerturbationSpec(
+            id="noise",
+            kind="harness-observation-gaussian-noise",
+            at_step=1,
+            parameters={"std": 0.1},
+        ),
+        PerturbationSpec(id="hold", kind="harness-action-hold", at_step=2),
+    )
+
+    def roll() -> tuple[RecordingEnv, list[np.ndarray], tuple[dict[str, Any], ...]]:
+        env = RecordingEnv()
+        observations: list[np.ndarray] = []
+
+        def act(_env: object, observation: object, step: int) -> np.ndarray:
+            observations.append(np.asarray(observation))
+            return np.full(2, step + 1, dtype=float)
+
+        _, steps = run_gym_episode(
+            env,
+            seed=7,
+            action_fn=act,
+            harness_perturbations=events,
+            max_steps=3,
+        )
+        return env, observations, steps
+
+    env, observations, steps = roll()
+    _, repeated_observations, _ = roll()
+    np.testing.assert_array_equal(observations[0], np.zeros(2))
+    np.testing.assert_array_equal(observations[1], repeated_observations[1])
+    assert not np.array_equal(observations[1], np.array([3.0, 4.0]))
+    np.testing.assert_array_equal(env.actions[2], np.array([2.0, 2.0]))
+    assert steps[0]["info"]["or_audit"]["applied_perturbations"][0]["id"] == "drop"
+    assert steps[2]["applied_action"] == [2.0, 2.0]
+    with pytest.raises(TaskContractError, match="unsupported harness perturbation"):
+        split_perturbations((PerturbationSpec(id="bad", kind="harness-invented"),))
 
 
 def _pinned_lumen(tmp_path: Path) -> Path:

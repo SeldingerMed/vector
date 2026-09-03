@@ -14,11 +14,16 @@ from typing import Any, Protocol, cast
 import numpy as np
 
 from or_audit.errors import TaskContractError
+from or_audit.eval.contracts import PerturbationSpec
 from or_audit.eval.enums import WorldKind
 from or_audit.eval.task import TaskSpec
 from or_audit.eval.worlds import world_kind_key
 
 GymFactory = Callable[[TaskSpec], "GymEnv"]
+
+HARNESS_PERTURBATION_KINDS = frozenset(
+    {"harness-observation-zero", "harness-observation-gaussian-noise", "harness-action-hold"}
+)
 
 
 class GymEnv(Protocol):
@@ -142,6 +147,54 @@ def sample_action(env: GymEnv, *, seed: int, step: int) -> Any:
     return rng.uniform(-1.0, 1.0, size=2)
 
 
+def split_perturbations(
+    perturbations: tuple[PerturbationSpec, ...],
+) -> tuple[tuple[PerturbationSpec, ...], tuple[PerturbationSpec, ...]]:
+    """Separate portable harness faults from world-native perturbations."""
+    unknown = sorted(
+        {item.kind for item in perturbations if item.kind.startswith("harness-")}
+        - HARNESS_PERTURBATION_KINDS
+    )
+    if unknown:
+        raise TaskContractError(f"unsupported harness perturbation kinds: {unknown}")
+    harness = tuple(item for item in perturbations if item.kind in HARNESS_PERTURBATION_KINDS)
+    world = tuple(item for item in perturbations if item.kind not in HARNESS_PERTURBATION_KINDS)
+    return harness, world
+
+
+def _numeric_array(value: Any, *, label: str) -> np.ndarray[Any, Any]:
+    array = np.asarray(value)
+    if not np.issubdtype(array.dtype, np.number) or not np.isfinite(array).all():
+        raise TaskContractError(f"{label} requires a finite numeric array")
+    return array
+
+
+def _apply_harness_observation(
+    observation: Any,
+    perturbations: tuple[PerturbationSpec, ...],
+    *,
+    seed: int,
+    step: int,
+) -> Any:
+    result = observation
+    for index, perturbation in enumerate(perturbations):
+        if perturbation.kind == "harness-observation-zero":
+            result = np.zeros_like(_numeric_array(result, label=perturbation.kind))
+        elif perturbation.kind == "harness-observation-gaussian-noise":
+            std = perturbation.parameters.get("std")
+            if (
+                isinstance(std, bool)
+                or not isinstance(std, int | float)
+                or not np.isfinite(std)
+                or std <= 0
+            ):
+                raise TaskContractError(f"{perturbation.kind} requires parameters.std > 0")
+            array = _numeric_array(result, label=perturbation.kind)
+            noise = np.random.default_rng([seed, step, index]).normal(0.0, float(std), array.shape)
+            result = array + noise
+    return result
+
+
 #: Prefix marking a float the engine reported as ``nan``/``+inf``/``-inf``.
 #: Deliberately not a number: nothing downstream may coerce it back into one,
 #: so a gate bound to it abstains (``float(...)`` and ``x > threshold`` both
@@ -215,6 +268,7 @@ def run_gym_episode(
     seed: int,
     action_fn: Callable[[GymEnv, Any, int], Any],
     reset_options: dict[str, Any] | None = None,
+    harness_perturbations: tuple[PerturbationSpec, ...] = (),
     max_steps: int = 10_000,
 ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
     """Roll out one episode. Returns final info and the trajectory.
@@ -236,9 +290,35 @@ def run_gym_episode(
             )
     steps: list[dict[str, Any]] = []
     info: Any = {}
+    previous_action: Any = None
     for step_i in range(max_steps):
-        action = action_fn(env, obs, step_i)
-        obs, reward, terminated, truncated, info = env.step(action)
+        active = tuple(
+            item
+            for item in harness_perturbations
+            if item.at_step == step_i or (item.at_step is None and step_i == 0)
+        )
+        observation_events = tuple(item for item in active if "observation" in item.kind)
+        policy_obs = _apply_harness_observation(obs, observation_events, seed=seed, step=step_i)
+        action = action_fn(env, policy_obs, step_i)
+        hold_action = any(item.kind == "harness-action-hold" for item in active)
+        applied_action = previous_action if hold_action and previous_action is not None else action
+        if hold_action and previous_action is None:
+            applied_action = np.zeros_like(_numeric_array(action, label="harness-action-hold"))
+        obs, reward, terminated, truncated, info = env.step(applied_action)
+        previous_action = applied_action
+        recorded_info = jsonable(info) if isinstance(info, dict) else {}
+        if active:
+            raw_audit = recorded_info.get("or_audit", {})
+            if not isinstance(raw_audit, dict) or not isinstance(
+                raw_audit.get("applied_perturbations", []), list
+            ):
+                raise TaskContractError("gym reported malformed or_audit perturbation evidence")
+            audit = dict(raw_audit)
+            audit["applied_perturbations"] = [
+                *audit.get("applied_perturbations", []),
+                *(item.model_dump(mode="json") for item in active),
+            ]
+            recorded_info["or_audit"] = audit
         steps.append(
             {
                 "action": jsonable(action),
@@ -246,7 +326,9 @@ def run_gym_episode(
                 "reward": jsonable(reward),
                 "terminated": bool(terminated),
                 "truncated": bool(truncated),
-                "info": jsonable(info) if isinstance(info, dict) else {},
+                "info": recorded_info,
+                **({"policy_observation": jsonable(policy_obs)} if observation_events else {}),
+                **({"applied_action": jsonable(applied_action)} if hold_action else {}),
                 **({"reset_info": jsonable(reset_info)} if step_i == 0 else {}),
             }
         )
