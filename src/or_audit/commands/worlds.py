@@ -13,6 +13,7 @@ default is "execute" cannot be inspected before it runs.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from or_audit.errors import TaskContractError
@@ -22,6 +23,7 @@ from or_audit.install.catalog import (
     InstallStrategy,
     WorldPackage,
     iter_packages,
+    planner_catalog_data,
     world_package,
 )
 from or_audit.install.installer import execute_install, plan_install
@@ -61,6 +63,9 @@ def _render_table(rows: list[tuple[str, ...]]) -> str:
 
 def _worlds_list(args: argparse.Namespace) -> int:
     """Print the catalog, including the WATCH/SKIP rows and their pin state."""
+    if args.json:
+        print(json.dumps(planner_catalog_data(), indent=2, sort_keys=True))
+        return 0
     try:
         packages = iter_packages(
             disposition=Disposition(args.disposition) if args.disposition else None,
@@ -163,6 +168,7 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
         choices=[item.value for item in InstallStrategy],
         help="only rows using this install strategy",
     )
+    listing.add_argument("--json", action="store_true", help="emit planner-oriented JSON")
     listing.set_defaults(func=_worlds_list)
 
     info = worlds_sub.add_parser("info", help="describe one catalog world")

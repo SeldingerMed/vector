@@ -1,0 +1,636 @@
+{
+  "catalog_version": "2",
+  "format_version": "1",
+  "worlds": [
+    {
+      "determinism": "unmeasured",
+      "display_name": "Seldinger Lumen",
+      "disposition": "shipped",
+      "domain": "Endovascular navigation (continuum instrument, deformable lumen)",
+      "engine": "Lumen (first-party continuum/deformable physics)",
+      "environments": [],
+      "id": "lumen",
+      "install": {
+        "installable": false,
+        "pin_state": "install-unpinned",
+        "strategy": "first-party"
+      },
+      "license": "unverified",
+      "metrics_only": false,
+      "risks": "License stays `unverified` on purpose: the harness LICENSE (Apache-2.0) covers the adapter in this repository, not the seldinger-lumen content distribution. Recording our own content as audited without reading its LICENSE would be exactly the fabrication this file forbids - and `license_permitted` is false while it stands, so this row is not installable either.",
+      "safety_evidence": "docs/examples/tasks/lumen-nav-safe/task.toml binds hard gates to `lumen.info.unsafe` and `lumen.info.max_pen`, and the in-tree conformance run resolves both to pass/fail per trial rather than to an abstention.",
+      "sources": [
+        "https://github.com/SeldingerMed/seldinger-lumen"
+      ],
+      "world_kind": "lumen-gym",
+      "world_pin": "3c6bb39ecc916c73e81131b94353ad8deee62bd4"
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "ORBIT-Surgical (NVIDIA Isaac for Healthcare)",
+      "disposition": "wrap",
+      "domain": "dVRK manipulation (needle handover, lift, reach, suturing subtasks)",
+      "engine": "Isaac Lab 1.0 / Isaac Sim 4.1 / PhysX",
+      "environments": [
+        {
+          "env_id": "Isaac-Lift-Needle-PSM-v0",
+          "safety_eligible": false,
+          "signals": [
+            {
+              "gate_eligible": false,
+              "key": "object_dropping",
+              "kind": "geometric",
+              "published": true,
+              "requires_parameters": {},
+              "unit": ""
+            },
+            {
+              "gate_eligible": false,
+              "key": "time_out",
+              "kind": "bookkeeping",
+              "published": true,
+              "requires_parameters": {},
+              "unit": ""
+            }
+          ]
+        }
+      ],
+      "id": "orbit-surgical",
+      "install": {
+        "installable": true,
+        "pin_state": "pinned",
+        "strategy": "vendor-runtime"
+      },
+      "license": "BSD-3-Clause",
+      "metrics_only": true,
+      "risks": "Pins Isaac Lab 1.0.0 / Isaac Sim 4.1.0, an older generation than SonoGym's 2.1.0 / 4.5.0, so one Isaac bridge cannot serve both without a compatibility path. Not install-tested here: needs an NVIDIA GPU and Linux.",
+      "safety_evidence": "source/extensions/orbit.surgical.tasks/.../lift/lift_env_cfg.py declares shaped rewards plus an `object_dropping` termination; no contact-force or collision term reaches the observation or `info`. PhysX computes contact internally, which is not the same as the env exposing it, so hard gates are refused until an upstream PR surfaces the force channel.",
+      "sources": [
+        "https://github.com/orbit-surgical/orbit-surgical",
+        "https://orbit-surgical.github.io",
+        "arXiv:2404.16027"
+      ],
+      "world_kind": "isaac-lab",
+      "world_pin": "6e47534f7d412e4be523116f250c992a63146883"
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "SonoGym",
+      "disposition": "wrap",
+      "domain": "Robotic ultrasound (spine; US-guided surgery)",
+      "engine": "Isaac Lab 2.1 / Isaac Sim 4.5",
+      "environments": [
+        {
+          "env_id": "robot_US_guided_surgery",
+          "safety_eligible": false,
+          "signals": [
+            {
+              "gate_eligible": false,
+              "key": "cost",
+              "kind": "geometric",
+              "published": true,
+              "requires_parameters": {},
+              "unit": ""
+            },
+            {
+              "gate_eligible": false,
+              "key": "human_to_tip_pos",
+              "kind": "geometric",
+              "published": true,
+              "requires_parameters": {},
+              "unit": "m"
+            },
+            {
+              "gate_eligible": false,
+              "key": "safe_height",
+              "kind": "geometric",
+              "published": true,
+              "requires_parameters": {},
+              "unit": "m"
+            }
+          ]
+        }
+      ],
+      "id": "sonogym",
+      "install": {
+        "installable": true,
+        "pin_state": "pinned",
+        "strategy": "vendor-runtime"
+      },
+      "license": "MIT",
+      "metrics_only": true,
+      "risks": "Isaac Sim 4.5.0 pin diverges from ORBIT-Surgical's 4.1.0. Not install-tested here: needs an NVIDIA GPU and Linux.",
+      "safety_evidence": "source/spinal_surgery/spinal_surgery/tasks/robot_US_guided_surgery/robotic_US_guided_surgery.py publishes a geometric soft-constraint cost in step extras (`extras['cost']`, line 974) for the surgery task only; there is no probe contact-force channel and no force-limit termination. The cost is `logical_and(not safe_close, safety_critical)` (line 893) - a proximity predicate over drill-tip pose, not a physical safety measurement - so this wraps metrics-only. PATH CORRECTED 2026-08: the earlier citation read `robot_US_guided_surgery.py`, transcribing the directory name; the file is `robotIC_...` and the old path resolved to nothing at the pin.",
+      "sources": [
+        "https://github.com/SonoGym/SonoGym",
+        "https://sonogym.github.io",
+        "arXiv:2507.01152"
+      ],
+      "world_kind": "isaac-lab",
+      "world_pin": "e67be58334d1a5274f0913af36f56e4b0b7ffe5a"
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "stEVE (+ stEVE_bench)",
+      "disposition": "wrap",
+      "domain": "Endovascular guidewire/catheter",
+      "engine": "SOFA + BeamAdapter",
+      "environments": [
+        {
+          "env_id": "eve.env:Env",
+          "safety_eligible": false,
+          "signals": [
+            {
+              "gate_eligible": false,
+              "key": "simulation_error",
+              "kind": "diagnostic",
+              "published": true,
+              "requires_parameters": {},
+              "unit": ""
+            }
+          ]
+        }
+      ],
+      "id": "steve",
+      "install": {
+        "installable": false,
+        "pin_state": "pinned",
+        "strategy": "source-build"
+      },
+      "license": "MIT",
+      "metrics_only": true,
+      "risks": "Upstream states SOFA binaries v23.06 or earlier; BeamAdapter scenes drift on v23.12+. Optional VMR anatomy downloads carry per-model licenses from vascularmodel.com that must be audited separately before any asset ships. Determinism class unmeasured - the N3 conformance suite must classify it before any replay claim. Not install-tested here: requires a compiled SOFA.",
+      "safety_evidence": "eve/truncation/simerror.py binds `SimError.truncated` to a `simulation_error` NaN-tracking flag - a solver-instability signal, not a tissue-contact one - and examples/function_check.py runs with TargetReached + MaxSteps only. BeamAdapter's collision/LCP stack computes contact in eve/intervention/simulation/sofabeamadapter.py but nothing exports a wall-force channel to `info`, so no hard gate can bind yet.",
+      "sources": [
+        "https://github.com/lkarstensen/stEVE",
+        "https://github.com/lkarstensen/stEVE_bench",
+        "arXiv:2410.01956"
+      ],
+      "world_kind": "sofa",
+      "world_pin": "f909e7122d846a3c2fec91eedddaa0ba88b6391d"
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "LapGym / sofa_env",
+      "disposition": "wrap",
+      "domain": "Laparoscopic (14 scenes: rope, tissue retraction, ligating loop, ...)",
+      "engine": "SOFA",
+      "environments": [
+        {
+          "env_id": "grasp_lift_touch",
+          "safety_eligible": true,
+          "signals": [
+            {
+              "gate_eligible": true,
+              "key": "dynamic_force_on_gallbladder",
+              "kind": "physical",
+              "published": true,
+              "requires_parameters": {},
+              "unit": "scaled-N"
+            },
+            {
+              "gate_eligible": true,
+              "key": "collision_cauter_gallbladder",
+              "kind": "physical",
+              "published": true,
+              "requires_parameters": {},
+              "unit": "contacts"
+            }
+          ]
+        },
+        {
+          "env_id": "tissue_dissection",
+          "safety_eligible": true,
+          "signals": [
+            {
+              "gate_eligible": true,
+              "key": "collision_with_board",
+              "kind": "physical",
+              "published": true,
+              "requires_parameters": {
+                "with_board_collision": true
+              },
+              "unit": "contacts"
+            },
+            {
+              "gate_eligible": false,
+              "key": "unstable_deformation",
+              "kind": "diagnostic",
+              "published": true,
+              "requires_parameters": {},
+              "unit": ""
+            },
+            {
+              "gate_eligible": false,
+              "key": "workspace_violation",
+              "kind": "geometric",
+              "published": true,
+              "requires_parameters": {},
+              "unit": ""
+            }
+          ]
+        },
+        {
+          "env_id": "pick_and_place",
+          "safety_eligible": true,
+          "signals": [
+            {
+              "gate_eligible": true,
+              "key": "gripper_jaw_peg_collisions",
+              "kind": "physical",
+              "published": true,
+              "requires_parameters": {},
+              "unit": "contacts"
+            },
+            {
+              "gate_eligible": false,
+              "key": "unstable_deformation",
+              "kind": "diagnostic",
+              "published": true,
+              "requires_parameters": {},
+              "unit": ""
+            }
+          ]
+        }
+      ],
+      "id": "lapgym",
+      "install": {
+        "installable": false,
+        "pin_state": "pinned",
+        "strategy": "source-build"
+      },
+      "license": "MIT",
+      "metrics_only": false,
+      "risks": "Strategy corrected from prebuilt-container to source-build: upstream setup.py hard-requires x86_64 and Python 3.10 and downloads a SOFA v24.06.00 x86_64 zip, so there is no arm64 path at all, and the runtime closure is copyleft (SOFA core LGPL-2.1, SofaPython3/BeamAdapter LGPL-2.1, SoftRobots/Cosserat LGPL-3.0, ModelOrderReduction GPL-2.0), which forbids us publishing an image containing it. Not install-tested here: refused by upstream on this architecture.",
+      "safety_evidence": "Per-scene, and the only WRAP row where a hard gate can honestly bind today: grasp_lift_touch_env.py exposes `dynamic_force_on_gallbladder` (a scalar internal force) plus contact counts in `info`; tissue_dissection_env.py exposes `collision_with_board` and `unstable_deformation`; pick_and_place_env.py exposes gripper collision counts and workspace violations. These are per-scene, so gate eligibility is per-task and not a property of the world: scenes without those keys (e.g. magnetic_continuum_robot, workspace-violation only) publish metrics-only. SOFA contact-force *vectors* stay engine-internal - the ContactListener API is documented but not wired into any env.",
+      "sources": [
+        "https://github.com/ScheiklP/sofa_env",
+        "https://github.com/ScheiklP/lap_gym",
+        "arXiv:2302.09606"
+      ],
+      "world_kind": "sofa",
+      "world_pin": "85bf7e05dd088b824794dda0046679df13b13e6e"
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "SurRoL / SurRoL-v2",
+      "disposition": "wrap",
+      "domain": "dVRK manipulation, 14 tasks",
+      "engine": "PyBullet",
+      "environments": [
+        {
+          "env_id": "surrol.gym.surrol_env:SurRoLEnv",
+          "safety_eligible": false,
+          "signals": [
+            {
+              "gate_eligible": false,
+              "key": "is_success",
+              "kind": "bookkeeping",
+              "published": true,
+              "requires_parameters": {},
+              "unit": ""
+            },
+            {
+              "gate_eligible": false,
+              "key": "getContactPoints",
+              "kind": "physical",
+              "published": false,
+              "requires_parameters": {},
+              "unit": "contacts"
+            }
+          ]
+        }
+      ],
+      "id": "surrol",
+      "install": {
+        "installable": false,
+        "pin_state": "pinned",
+        "strategy": "source-build"
+      },
+      "license": "MIT",
+      "metrics_only": true,
+      "risks": "Strategy corrected from pip-extra: `surrol` is not on PyPI (404), so the previous row named a package that could never resolve. Install-tested here and blocked upstream: pybullet 3.2.7 publishes no macOS wheel for any Python version, and its sdist fails to compile against Xcode clang 21 on arm64 (`error: expected identifier or '('` in the bundled zlib). SurRoL-v2 additionally compiles vendored `ext/bullet3` and targets Python 3.7 on Ubuntu.",
+      "safety_evidence": "surrol/gym/surrol_env.py returns `info` containing only `is_success` (or `achieved_goal`), and reward is task-only. surrol/tasks/psm_env.py *does* call `p.getContactPoints` in `_step_callback`/`_activate`, but purely for grasp logic, and workspace clipping in `_set_action` silently corrects rather than reporting a violation - so nothing physical is observable to a gate.",
+      "sources": [
+        "https://github.com/med-air/SurRoL",
+        "https://med-air.github.io/SurRoL",
+        "arXiv:2108.13035"
+      ],
+      "world_kind": "pybullet",
+      "world_pin": "aa430af5ca3ee62a69d677d2c8dfd031efe20204"
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "SurgicAI",
+      "disposition": "wrap",
+      "domain": "dVRK fine-grained suturing subtask hierarchy",
+      "engine": "AMBF",
+      "environments": [
+        {
+          "env_id": "surgicai.RL.Approach_env:SRC_approach",
+          "safety_eligible": false,
+          "signals": [
+            {
+              "gate_eligible": false,
+              "key": "is_success",
+              "kind": "bookkeeping",
+              "published": true,
+              "requires_parameters": {},
+              "unit": ""
+            }
+          ]
+        },
+        {
+          "env_id": "surgicai.RL.Low_level_env_complete:SRC_low_level",
+          "safety_eligible": false,
+          "signals": [
+            {
+              "gate_eligible": false,
+              "key": "is_success",
+              "kind": "bookkeeping",
+              "published": true,
+              "requires_parameters": {},
+              "unit": ""
+            }
+          ]
+        }
+      ],
+      "id": "surgicai",
+      "install": {
+        "installable": false,
+        "pin_state": "pinned",
+        "strategy": "source-build"
+      },
+      "license": "MIT",
+      "metrics_only": true,
+      "risks": "The env repo is MIT, but the AMBF runtime it needs (WPI-AIM/ambf) ships no license file at all on its default branch, so the runtime's redistribution status is NOASSERTION - which is why this stays source-build rather than a container we publish. ROS-heavy build; not install-tested here.",
+      "safety_evidence": "next.md's claim that SurgicAI \"arrives with metric definitions, the easiest gate mapping\" is OVERSTATED, and this row records the correction: the metrics are task-progress scalars - pose error, subtask success rate, trajectory length, timestep count - with no needle-tissue contact force, no penetration depth, and no instrument-collision channel. Easiest *metric* mapping, not easiest gate mapping.",
+      "sources": [
+        "https://github.com/surgical-robotics-ai/SurgicAI",
+        "arXiv:2406.13865"
+      ],
+      "world_kind": "ambf",
+      "world_pin": "b7ce5465ec0be897beeecb24791c0eaf7045abae"
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "Surgical Gym",
+      "disposition": "wrap",
+      "domain": "dVRK/STAR arm control",
+      "engine": "Isaac Gym (omni.isaac.gym, Isaac Sim 2022.2.1)",
+      "environments": [
+        {
+          "env_id": "surgicalgym.tasks.psm:PSM",
+          "safety_eligible": false,
+          "signals": []
+        }
+      ],
+      "id": "surgical-gym",
+      "install": {
+        "installable": true,
+        "pin_state": "pinned",
+        "strategy": "vendor-runtime"
+      },
+      "license": "MIT",
+      "metrics_only": true,
+      "risks": "Legacy Isaac Sim 2022.2.1 needs its own bridge, so the \"cheap because it shares the N2 bridge\" premise does not hold. Not install-tested here: needs an NVIDIA GPU and Linux.",
+      "safety_evidence": "surgicalgym/tasks/psm.py computes an L2 distance-to-target reward, terminates on episode length only, and disables collision on the target geometry outright. There is nothing physical to gate on, and disabled collision means even a synthesized contact signal would be meaningless.",
+      "sources": [
+        "https://github.com/SamuelSchmidgall/SurgicalGym",
+        "arXiv:2310.04676"
+      ],
+      "world_kind": "",
+      "world_pin": "57fd88d296f63cc9bebc30c5b332ceba70a04ff6"
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "AMBF-RL + Surgical Robotics Challenge",
+      "disposition": "watch",
+      "domain": "dVRK (debris removal, needle passing)",
+      "engine": "AMBF",
+      "environments": [],
+      "id": "ambf-rl",
+      "install": {
+        "installable": false,
+        "pin_state": "install-unpinned",
+        "strategy": "source-build"
+      },
+      "license": "NOASSERTION",
+      "metrics_only": true,
+      "risks": "WPI-AIM/ambf, the surgical_robotics_challenge assets, ambf_rl, and docker_SRC all lack a root license file, so their redistribution status is NOASSERTION - no license means no permission. That must be resolved with upstream before any wrap, not assumed permissive because the code is public.",
+      "safety_evidence": "Not assessed for gate eligibility: the license question blocks it first. Recorded so the reason survives rather than being rediscovered.",
+      "sources": [
+        "https://surgical-robotics-ai.github.io",
+        "https://github.com/WPI-AIM/ambf"
+      ],
+      "world_kind": "",
+      "world_pin": "d816d708ed868bc0bbf82f936ec7371584b6a991"
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "SofaGym",
+      "disposition": "watch",
+      "domain": "Generic SOFA->Gym wrapper (soft robotics)",
+      "engine": "SOFA",
+      "environments": [],
+      "id": "sofagym",
+      "install": {
+        "installable": false,
+        "pin_state": "install-unpinned",
+        "strategy": "source-build"
+      },
+      "license": "NOASSERTION",
+      "metrics_only": true,
+      "risks": "No root license file (NOASSERTION), and requires a source-built SOFA v23.06. Listing it as a world would misrepresent infrastructure as shelf content.",
+      "safety_evidence": "sofagym/AbstractEnv.py returns `info={}` unconditionally, so there is no safety channel to a policy or a gate at all. Only CartStemContact exposes contact *positions* (not forces) in its observation.",
+      "sources": [
+        "https://github.com/SofaDefrost/SofaGym"
+      ],
+      "world_kind": "",
+      "world_pin": "f5ad4e44a0dc522d8018c184245b7aa630292118"
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "VR-Caps",
+      "disposition": "watch",
+      "domain": "Active capsule endoscopy",
+      "engine": "Unity + ML-Agents",
+      "environments": [],
+      "id": "vr-caps",
+      "install": {
+        "installable": false,
+        "pin_state": "unpinned",
+        "strategy": "source-build"
+      },
+      "license": "unverified",
+      "metrics_only": true,
+      "risks": "Unity/ML-Agents runtime is heavy and its own distribution channel; repo is old (2020).",
+      "safety_evidence": "Not assessed: outside this audit's scope (no GI design partner yet).",
+      "sources": [
+        "https://github.com/CapsuleEndoscope/VirtualCapsuleEndoscopy"
+      ],
+      "world_kind": "",
+      "world_pin": ""
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "ROOM",
+      "disposition": "watch",
+      "domain": "Bronchoscopy continuum robot",
+      "engine": "Physics-based (2025)",
+      "environments": [],
+      "id": "room",
+      "install": {
+        "installable": false,
+        "pin_state": "unpinned",
+        "strategy": "source-build"
+      },
+      "license": "unverified",
+      "metrics_only": true,
+      "risks": "Repository referenced by the paper does not resolve.",
+      "safety_evidence": "Cannot assess: no reachable code.",
+      "sources": [
+        "https://github.com/iamsalvatore/room"
+      ],
+      "world_kind": "",
+      "world_pin": ""
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "AI-Co-Pilot-Bronchoscope-Robot",
+      "disposition": "watch",
+      "domain": "Bronchoscopy",
+      "engine": "Bespoke sim",
+      "environments": [],
+      "id": "ai-co-pilot-bronchoscope-robot",
+      "install": {
+        "installable": false,
+        "pin_state": "unpinned",
+        "strategy": "source-build"
+      },
+      "license": "NOASSERTION",
+      "metrics_only": true,
+      "risks": "The default branch carries no license file (NOASSERTION); only the Zenodo publish branch is CC-BY-4.0, and a data-only license on one branch does not grant rights to the code on another.",
+      "safety_evidence": "No airway-wall contact force or collision signal identified, so it could not support the gate our own broncho-airway-nav task uses even if licensed.",
+      "sources": [
+        "https://github.com/ai-co-pilot/AI-Co-Pilot-Bronchoscope-Robot"
+      ],
+      "world_kind": "",
+      "world_pin": ""
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "BronchoCopilot",
+      "disposition": "watch",
+      "domain": "Bronchoscopy",
+      "engine": "Bespoke sim",
+      "environments": [],
+      "id": "bronchocopilot",
+      "install": {
+        "installable": false,
+        "pin_state": "unpinned",
+        "strategy": "source-build"
+      },
+      "license": "unverified",
+      "metrics_only": true,
+      "risks": "No public code artifact exists to wrap.",
+      "safety_evidence": "Cannot assess: no public code.",
+      "sources": [
+        "arXiv:2403.01683"
+      ],
+      "world_kind": "",
+      "world_pin": ""
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "Spine pedicle-screw safe-RL",
+      "disposition": "watch",
+      "domain": "Orthopedic drilling",
+      "engine": "Bespoke",
+      "environments": [],
+      "id": "spine-pedicle-screw-safe-rl",
+      "install": {
+        "installable": false,
+        "pin_state": "unpinned",
+        "strategy": "source-build"
+      },
+      "license": "unverified",
+      "metrics_only": true,
+      "risks": "Code availability unverified.",
+      "safety_evidence": "Cannot assess: no public code located.",
+      "sources": [
+        "arXiv:2305.05354"
+      ],
+      "world_kind": "",
+      "world_pin": ""
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "CathSim",
+      "disposition": "skip",
+      "domain": "Endovascular",
+      "engine": "MuJoCo / dm-control",
+      "environments": [],
+      "id": "cathsim",
+      "install": {
+        "installable": false,
+        "pin_state": "pinned",
+        "strategy": "source-build"
+      },
+      "license": "CC-BY-NC-SA-4.0",
+      "metrics_only": true,
+      "risks": "Also technically broken as a pip target, which the previous `pip-extra` row would have promised: `cathsim` is not on PyPI (404), `pip install git+...` yields a namespace package whose `dm/config/env.yaml` is missing so no env can be constructed, `pympler` is imported but undeclared, and upstream is incompatible with Gymnasium 1.x (`wrappers.FrameStack` removed) so it needs `gymnasium==0.29.1`. A working local run required a source checkout plus both fixes. Recorded because someone will otherwise retry this and lose the day.",
+      "safety_evidence": "Technically the best safety instrumentation in the survey, which is what makes the license loss real rather than academic. Verified by running it: `info[\"forces\"]` and `info[\"contact_forces\"]` carry live contact-force magnitudes (observed series 0.5564, 0.3580, 0.2629, 0.0, 0.0, 0.8761 N over 10 random steps; 7/10 non-zero), produced by Navigate.get_total_force / get_contact_forces in src/cathsim/dm/env.py. Both are opt-in (`use_force=True`, `use_contact_forces=True`, `return_info=True`; all default False), and termination is success-only.",
+      "sources": [
+        "https://github.com/airvlab/cathsim",
+        "arXiv:2208.01455"
+      ],
+      "world_kind": "",
+      "world_pin": "adfabb2f291e31e6d656e66d0052269f38db01bd"
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "dVRL",
+      "disposition": "skip",
+      "domain": "dVRK reach/pick",
+      "engine": "V-REP/CoppeliaSim",
+      "environments": [],
+      "id": "dvrl",
+      "install": {
+        "installable": false,
+        "pin_state": "unpinned",
+        "strategy": "source-build"
+      },
+      "license": "unverified",
+      "metrics_only": true,
+      "risks": "V-REP/CoppeliaSim runtime distribution.",
+      "safety_evidence": "Not assessed: superseded before gate mapping was worth doing.",
+      "sources": [
+        "https://github.com/ucsdarclab/dVRL"
+      ],
+      "world_kind": "",
+      "world_pin": ""
+    },
+    {
+      "determinism": "unmeasured",
+      "display_name": "RL_cataract / surgeon-in-the-loop ophthalmic apprentice",
+      "disposition": "skip",
+      "domain": "Ophthalmic",
+      "engine": "Unity/bespoke",
+      "environments": [],
+      "id": "rl-cataract",
+      "install": {
+        "installable": false,
+        "pin_state": "unpinned",
+        "strategy": "source-build"
+      },
+      "license": "unverified",
+      "metrics_only": true,
+      "risks": "Unmaintained; no runnable open artifact identified.",
+      "safety_evidence": "Cannot assess: no runnable open artifact identified.",
+      "sources": [],
+      "world_kind": "",
+      "world_pin": ""
+    }
+  ]
+}
