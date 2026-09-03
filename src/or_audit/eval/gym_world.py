@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, distribution
 from typing import Any, Protocol, cast
 
@@ -36,6 +37,40 @@ class GymEnv(Protocol):
 
     def step(self, action: Any) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         """One transition: obs, reward, terminated, truncated, info."""
+
+
+class _LegacyGymAdapter:
+    """Normalize the Gym <=0.21 reset/step API at the optional runtime boundary."""
+
+    def __init__(self, env: Any) -> None:
+        self.env = env
+
+    @property
+    def unwrapped(self) -> Any:
+        return getattr(self.env, "unwrapped", self.env)
+
+    @property
+    def action_space(self) -> Any:
+        return self.env.action_space
+
+    def reset(
+        self, *, seed: int | None = None, options: dict[str, Any] | None = None
+    ) -> tuple[Any, dict[str, Any]]:
+        if options is not None:
+            raise TaskContractError("legacy Gym environments cannot acknowledge reset options")
+        seed_fn = getattr(self.env, "seed", None)
+        if seed is not None and callable(seed_fn):
+            seed_fn(seed)
+        return self.env.reset(), {}
+
+    def step(self, action: Any) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+        observation, reward, done, info = self.env.step(action)
+        return observation, float(reward), bool(done), False, cast(dict[str, Any], info)
+
+    def close(self) -> None:
+        close_fn = getattr(self.env, "close", None)
+        if callable(close_fn):
+            close_fn()
 
 
 def make_gym(task: TaskSpec) -> GymEnv:
@@ -105,6 +140,15 @@ def _require_lumen_pin(expected: str) -> None:
 
 
 def _make_gymnasium(gym_id: str, *, parameters: dict[str, bool | int | float | str]) -> GymEnv:
+    if gym_id.startswith("legacy:"):
+        try:
+            gym = import_module("gym")
+        except ImportError as exc:
+            raise TaskContractError(
+                f"task names legacy Gym {gym_id[7:]!r} but gym is not installed; "
+                "install the environment's pinned runtime"
+            ) from exc
+        return _LegacyGymAdapter(gym.make(gym_id[7:], **parameters))
     try:
         import gymnasium
     except ImportError as exc:

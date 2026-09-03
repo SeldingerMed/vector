@@ -685,6 +685,41 @@ def test_pybullet_kind_uses_the_generic_gym_factory(
     assert bridge.engine_provenance()["world_pin"] == "pybullet-pin-v1"
 
 
+def test_legacy_gym_prefix_normalizes_reset_and_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    class LegacyEnv:
+        action_space = object()
+
+        def __init__(self) -> None:
+            self.seed_value: int | None = None
+
+        def seed(self, seed: int) -> None:
+            self.seed_value = seed
+
+        def reset(self) -> dict[str, list[float]]:
+            return {"observation": [1.0]}
+
+        def step(self, action: Any) -> tuple[Any, float, bool, dict[str, Any]]:
+            del action
+            return {"observation": [2.0]}, 1.0, True, {"is_success": True}
+
+    legacy = LegacyEnv()
+    monkeypatch.setitem(sys.modules, "gym", _module("gym", make=lambda *_a, **_kw: legacy))
+    from or_audit.eval.gym_world import _make_gymnasium
+
+    env = _make_gymnasium("legacy:surrol.gym:NeedleReach-v0", parameters={})
+    assert env.reset(seed=7) == ({"observation": [1.0]}, {})
+    assert legacy.seed_value == 7
+    assert env.step([0.0]) == (
+        {"observation": [2.0]},
+        1.0,
+        True,
+        False,
+        {"is_success": True},
+    )
+    with pytest.raises(TaskContractError, match="cannot acknowledge reset options"):
+        env.reset(seed=7, options={"or_audit": {}})
+
+
 def test_base_bridge_default_provenance() -> None:
     class BareBridge(BaseSimulationBridge):
         world_kind = "custom-sim"
