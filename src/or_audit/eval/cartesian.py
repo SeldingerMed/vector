@@ -165,8 +165,7 @@ def run_cartesian_job(
         unsupported_scenarios = set(stage.scenarios) - supported_scenarios
         if unsupported_scenarios:
             raise TaskContractError(
-                f"stage {stage.name} names unsupported scenarios "
-                f"{sorted(unsupported_scenarios)}"
+                f"stage {stage.name} names unsupported scenarios {sorted(unsupported_scenarios)}"
             )
         supported_events = {
             value
@@ -177,8 +176,7 @@ def run_cartesian_job(
         unsupported_events = set(stage.event_injections) - supported_events
         if unsupported_events:
             raise TaskContractError(
-                f"stage {stage.name} names unsupported injected events "
-                f"{sorted(unsupported_events)}"
+                f"stage {stage.name} names unsupported injected events {sorted(unsupported_events)}"
             )
 
     pairs: list[PairRecord] = []

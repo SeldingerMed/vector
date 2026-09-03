@@ -130,7 +130,7 @@ prerequisites = ["integration-smoke", "pilot"]
     assert resolved.config.stage.independent_cases == 2
 
     (tmp_path / "bad").mkdir()
-    bad = stage.replace('prerequisites = ["integration-smoke", "pilot"]', 'prerequisites = []')
+    bad = stage.replace('prerequisites = ["integration-smoke", "pilot"]', "prerequisites = []")
     with pytest.raises(TaskContractError, match="prerequisites must be"):
         load_job_config(_write_job(tmp_path / "bad", task_dir, n=2, extra=bad))
 
