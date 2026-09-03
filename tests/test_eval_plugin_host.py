@@ -47,11 +47,15 @@ _PREDICTOR = """
 from pathlib import Path
 from typing import Any
 
+print("import log")
+
 class Predictor:
     def predict(self, item: dict[str, Any]) -> dict[str, Any]:
+        print("prediction log")
         return {"echo": item}
 
 def load_predictor(*, root: Path, weights_path: Path) -> Predictor:
+    print("load log")
     del root, weights_path
     return Predictor()
 """
@@ -200,7 +204,9 @@ def test_main_predictor_and_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyP
         ),
     )
     stdout = io.StringIO()
+    stderr = io.StringIO()
     monkeypatch.setattr("sys.stdout", stdout)
+    monkeypatch.setattr("sys.stderr", stderr)
     main(
         [
             "--role",
@@ -214,6 +220,8 @@ def test_main_predictor_and_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyP
         ]
     )
     assert json.loads(stdout.getvalue().splitlines()[0])["result"] == {"echo": {"k": 1}}
+    assert stdout.getvalue().count("\n") == 2
+    assert "import log\nload log\nprediction log\n" in stderr.getvalue()
 
     monkeypatch.setattr(
         "sys.stdin",

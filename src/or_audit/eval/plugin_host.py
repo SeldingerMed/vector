@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    runtime = _build_runtime(args)
+    protocol_stdout = sys.stdout
+    with redirect_stdout(sys.stderr):
+        runtime = _build_runtime(args)
     for line in sys.stdin:
         try:
             request = json.loads(line)
@@ -72,7 +75,8 @@ def main(argv: list[str] | None = None) -> int:
             payload = request.get("payload")
             if not isinstance(payload, dict):
                 raise ValueError("payload must be an object")
-            result = _dispatch(runtime, args.role, op, payload)
+            with redirect_stdout(sys.stderr):
+                result = _dispatch(runtime, args.role, op, payload)
             response = {"request_id": request_id, "ok": True, "result": _jsonable(result)}
         except Exception as exc:
             response = {
@@ -80,13 +84,14 @@ def main(argv: list[str] | None = None) -> int:
                 "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
             }
-        sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
-        sys.stdout.flush()
+        protocol_stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+        protocol_stdout.flush()
         if locals().get("op") == "close":
             break
     close = getattr(runtime, "close", None)
     if callable(close):
-        close()
+        with redirect_stdout(sys.stderr):
+            close()
     return 0
 
 
