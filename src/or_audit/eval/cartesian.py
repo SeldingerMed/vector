@@ -12,11 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from or_audit.audit.canonical import digest
 from or_audit.errors import TaskContractError
 from or_audit.eval.agent import AgentPackage
+from or_audit.eval.contracts import InteractionMode
 from or_audit.eval.gym_world import GymFactory
 from or_audit.eval.job import JobResult
 from or_audit.eval.job_config import BUILTIN_RANDOM, EvaluationStageSpec, ResolvedJob
 from or_audit.eval.loader import load_agent, load_task
-from or_audit.eval.runner import builtin_random_agent, replay_job, run_job
+from or_audit.eval.predict import load_items
+from or_audit.eval.runner import assert_trial_capacity, builtin_random_agent, replay_job, run_job
 from or_audit.eval.task import ProjectionSpec, TaskSpec
 
 
@@ -44,6 +46,7 @@ class CartesianManifest(BaseModel):
     pairs: tuple[PairRecord, ...]
     projection: ProjectionSpec | None = None
     stage: EvaluationStageSpec | None = None
+    observed_units: Annotated[int, Field(ge=1)] | None = None
     gate_outcome: Literal["passed", "failed", "not-assessable", "unknown"] | None = None
     head: str = ""
 
@@ -60,7 +63,10 @@ def manifest_head_payload(manifest: CartesianManifest) -> dict[str, Any]:
     if manifest.stage is None:
         # Preserve v0.3 manifest heads written before optional stage metadata.
         dumped.pop("stage", None)
+        dumped.pop("observed_units", None)
         dumped.pop("gate_outcome", None)
+    elif manifest.observed_units is None:
+        dumped.pop("observed_units", None)
     return dumped
 
 
@@ -112,6 +118,60 @@ def _agent_from_ref(ref: str) -> tuple[AgentPackage, Path | None]:
     return load_agent(path), agent_dir
 
 
+def _independent_case_count(
+    planned: list[tuple[Path, TaskSpec, AgentPackage, Path | None, str]],
+    stage: EvaluationStageSpec,
+    n: int,
+) -> int:
+    """Count task-owned cases once, even when several agents evaluate them."""
+    tasks = {(str(root), task.id): (root, task) for root, task, _, _, _ in planned}.values()
+    modes = {task.harness.interaction_mode for _, task in tasks}
+    if len(modes) != 1:
+        raise TaskContractError(f"stage {stage.name} cannot mix interaction modes")
+    mode = next(iter(modes))
+    if mode is InteractionMode.CLOSED_LOOP:
+        if stage.independent_case_key != "$seed":
+            raise TaskContractError(
+                f"closed-loop stage {stage.name} independent_case_key must be '$seed'"
+            )
+        return len({(task.id, seed) for _, task in tasks for seed in range(n)})
+    if stage.independent_case_key == "$seed":
+        raise TaskContractError(
+            f"dataset-backed stage {stage.name} must name an input field as independent_case_key"
+        )
+    cases: set[str] = set()
+    for root, task in tasks:
+        for item in load_items(root / task.environment.inputs_path)[:n]:
+            if stage.independent_case_key not in item:
+                raise TaskContractError(
+                    f"task {task.id} input {item['id']!r} has no independent-case field "
+                    f"{stage.independent_case_key!r}"
+                )
+            cases.add(
+                json.dumps(item[stage.independent_case_key], sort_keys=True, separators=(",", ":"))
+            )
+    return len(cases)
+
+
+def _observed_units(result: JobResult, source: str) -> int:
+    if source == "trials":
+        return result.n
+    if source == "trajectory-steps":
+        return sum(len(trial.trajectory) for trial in result.trials)
+    metric_id = source.removeprefix("metric:")
+    total = 0
+    for trial in result.trials:
+        metric = trial.vector.metric(metric_id)
+        value = metric.value if metric is not None else None
+        if isinstance(value, bool) or not isinstance(value, int | float) or value < 0 or int(value) != value:
+            raise TaskContractError(
+                f"stage unit source {source!r} must resolve to a non-negative integer "
+                f"for every trial"
+            )
+        total += int(value)
+    return total
+
+
 def run_cartesian_job(
     resolved: ResolvedJob,
     *,
@@ -152,7 +212,7 @@ def run_cartesian_job(
         if n_eval is None:
             raise TaskContractError(f"stage {stage.name} must declare job n")
         scheduled = len(planned) * n_eval
-        if scheduled != stage.target_units:
+        if stage.unit_source == "trials" and scheduled != stage.target_units:
             raise TaskContractError(
                 f"stage {stage.name} targets {stage.target_units} {stage.evaluation_unit} "
                 f"but tasks x agents x n schedules {scheduled}"
@@ -178,9 +238,18 @@ def run_cartesian_job(
             raise TaskContractError(
                 f"stage {stage.name} names unsupported injected events {sorted(unsupported_events)}"
             )
+        for task_dir, task, _, _, _ in planned:
+            assert_trial_capacity(task, task_dir, n_eval)
+        observed_cases = _independent_case_count(planned, stage, n_eval)
+        if observed_cases != stage.independent_cases:
+            raise TaskContractError(
+                f"stage {stage.name} declares {stage.independent_cases} independent cases but "
+                f"{stage.independent_case_key!r} identifies {observed_cases}"
+            )
 
     pairs: list[PairRecord] = []
     outcomes: list[str] = []
+    observed_units = 0
     for task_dir, task, agent, agent_dir, dirname in planned:
         result: JobResult = run_job(
             task=task,
@@ -202,6 +271,15 @@ def run_cartesian_job(
             )
         )
         outcomes.append(result.gate_outcome)
+        if stage is not None:
+            observed_units += _observed_units(result, stage.unit_source)
+
+    if stage is not None:
+        if observed_units != stage.target_units:
+            raise TaskContractError(
+                f"stage {stage.name} observed {observed_units} {stage.evaluation_unit}, "
+                f"expected exactly {stage.target_units}"
+            )
 
     gate_outcome = None
     if stage is not None:
@@ -222,6 +300,7 @@ def run_cartesian_job(
         pairs=tuple(pairs),
         projection=resolved.config.projection,
         stage=stage,
+        observed_units=observed_units if stage is not None else None,
         gate_outcome=gate_outcome,
     )
     stamped = manifest.model_copy(update={"head": compute_manifest_head(manifest)})

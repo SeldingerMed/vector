@@ -48,6 +48,17 @@ from or_audit.eval.verifier import score_context
 SAFETY_MAX_PEN = 0.3
 
 
+def assert_trial_capacity(task: TaskSpec, task_dir: Path, n: int) -> None:
+    """Refuse dataset-backed runs that request more trials than exist."""
+    if task.harness.interaction_mode is InteractionMode.CLOSED_LOOP:
+        return
+    available = len(load_items(task_dir / task.environment.inputs_path))
+    if n > available:
+        raise TaskContractError(
+            f"task {task.id} has {available} input items; cannot execute {n:,} distinct trials"
+        )
+
+
 def stream_adapters(task: TaskSpec) -> dict[str, Any]:
     """Resolve every stream's adapter, keyed by stream id (raises on unknown)."""
     from or_audit.eval.adapters import require_adapter
@@ -190,6 +201,7 @@ def run_job(
     episodes = n if n is not None else task.environment.n_eval_episodes
     if episodes < 1:
         raise TaskContractError(f"n must be >= 1, got {episodes}")
+    assert_trial_capacity(task, task_dir, episodes)
     extra: dict[str, Any] = {
         "interaction_mode": task.harness.interaction_mode.value,
         "world_engine": _engine_provenance(task, None),

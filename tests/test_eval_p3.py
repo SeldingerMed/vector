@@ -23,6 +23,8 @@ from or_audit.eval.loader import load_agent, load_task
 from or_audit.eval.reconstitute import reconstitute_trial_vector
 from or_audit.eval.runner import replay_job, run_job
 from tests.test_eval_run import (
+    ANGIO_TASK,
+    CATH_SEG,
     ROOT,
     VIDEO_AGENT,
     VIDEO_TASK,
@@ -119,6 +121,7 @@ name = "qualification"
 evaluation_unit = "seeded simulator episode"
 target_units = 2
 independent_case_unit = "scenario-target seed"
+independent_case_key = "$seed"
 independent_cases = 2
 scenarios = ["lumen-nav-safe"]
 operator_contexts = ["autonomous"]
@@ -128,6 +131,15 @@ prerequisites = ["integration-smoke", "pilot"]
     resolved = resolve_job(_write_job(tmp_path, task_dir, n=2, extra=stage))
     assert resolved.config.stage is not None
     assert resolved.config.stage.independent_cases == 2
+
+    (tmp_path / "wrong-cases").mkdir()
+    wrong_cases = stage.replace("independent_cases = 2", "independent_cases = 1")
+    with pytest.raises(TaskContractError, match="identifies 2"):
+        run_cartesian_job(
+            resolve_job(_write_job(tmp_path / "wrong-cases", task_dir, n=2, extra=wrong_cases)),
+            out=tmp_path / "wrong-cases-out",
+            gym_factory=_fake,
+        )
 
     (tmp_path / "bad").mkdir()
     bad = stage.replace('prerequisites = ["integration-smoke", "pilot"]', "prerequisites = []")
@@ -145,6 +157,7 @@ name = "qualification"
 evaluation_unit = "seeded simulator episode"
 target_units = 2
 independent_case_unit = "scenario-target seed"
+independent_case_key = "$seed"
 independent_cases = 2
 scenarios = ["lumen-nav-safe"]
 operator_contexts = ["autonomous"]
@@ -156,6 +169,7 @@ prerequisites = ["integration-smoke", "pilot"]
     manifest = run_cartesian_job(resolved, out=out, gym_factory=_fake)
     assert manifest.gate_outcome == "failed"
     assert manifest.stage is not None
+    assert manifest.observed_units == 2
     assert manifest.stage.target_units == sum(pair.n for pair in manifest.pairs)
     assert read_manifest(out).head == manifest.head
 
@@ -170,6 +184,95 @@ prerequisites = ["integration-smoke", "pilot"]
             out=tmp_path / "unsupported-out",
             gym_factory=_fake,
         )
+
+    (tmp_path / "steps").mkdir()
+    step_stage = stage.replace(
+        'evaluation_unit = "seeded simulator episode"',
+        'evaluation_unit = "observed simulator transition"\nunit_source = "trajectory-steps"',
+    ).replace("target_units = 2", "target_units = 6")
+    step_manifest = run_cartesian_job(
+        resolve_job(_write_job(tmp_path / "steps", task_dir, n=2, extra=step_stage)),
+        out=tmp_path / "steps-out",
+        gym_factory=_fake,
+    )
+    assert step_manifest.observed_units == 6
+
+def test_dataset_stage_recomputes_independent_cases_from_input_field(tmp_path: Path) -> None:
+    job = tmp_path / "dataset-stage"
+    job.mkdir()
+    body = f'''format_version = "1"
+id = "video-stage"
+n = 3
+tasks = [{json.dumps(str(VIDEO_TASK))}]
+agents = [{json.dumps(str(VIDEO_AGENT))}]
+
+[stage]
+name = "qualification"
+evaluation_unit = "scored clip"
+target_units = 3
+independent_case_unit = "held-out clip"
+independent_case_key = "id"
+independent_cases = 3
+scenarios = ["video-nextstep"]
+operator_contexts = ["offline"]
+stop_conditions = ["stop on any hard gate failure"]
+prerequisites = ["integration-smoke", "pilot"]
+'''
+    (job / "job.toml").write_text(body, encoding="utf-8")
+    manifest = run_cartesian_job(resolve_job(job), out=tmp_path / "dataset-out")
+    assert sum(pair.n for pair in manifest.pairs) == 3
+
+    wrong = tmp_path / "dataset-stage-wrong"
+    wrong.mkdir()
+    (wrong / "job.toml").write_text(
+        body.replace("independent_cases = 3", "independent_cases = 2"), encoding="utf-8"
+    )
+    with pytest.raises(TaskContractError, match="'id' identifies 3"):
+        run_cartesian_job(resolve_job(wrong), out=tmp_path / "dataset-wrong-out")
+
+
+def test_stage_counts_task_reported_scored_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Predictor:
+        def predict(self, item: dict[str, object]) -> dict[str, object]:
+            return {
+                "id": item["id"],
+                "release_audit_passed": True,
+                "dias_prediction_count": 345,
+                "cathaction_prediction_count": 5225,
+                "sam_vit_b_mean_dice": 0.8,
+                "sam_vit_l_mean_dice": 0.7,
+                "medsam_vit_b_mean_dice": 0.6,
+            }
+
+    monkeypatch.setattr("or_audit.eval.runner.load_predictor_runtime", lambda *args: Predictor())
+    job = tmp_path / "metric-stage"
+    job.mkdir()
+    (job / "job.toml").write_text(
+        f'''format_version = "1"
+id = "angiostress-stage"
+n = 1
+tasks = [{json.dumps(str(ANGIO_TASK))}]
+agents = [{json.dumps(str(CATH_SEG))}]
+
+[stage]
+name = "pilot"
+evaluation_unit = "scored DIAS prediction"
+unit_source = "metric:dias_prediction_count"
+target_units = 345
+independent_case_unit = "benchmark release"
+independent_case_key = "id"
+independent_cases = 1
+scenarios = ["angiostress-dias"]
+operator_contexts = ["offline"]
+stop_conditions = ["stop on release audit failure"]
+prerequisites = ["integration-smoke"]
+''',
+        encoding="utf-8",
+    )
+    manifest = run_cartesian_job(resolve_job(job), out=tmp_path / "metric-stage-out")
+    assert manifest.observed_units == 345
 
 
 def test_job_missing_agent_path(tmp_path: Path) -> None:

@@ -291,6 +291,19 @@ def test_video_nextstep_run(tmp_path: Path) -> None:
     assert result.claim_footer == ""
 
 
+def test_dataset_run_refuses_to_claim_more_trials_than_inputs(tmp_path: Path) -> None:
+    with pytest.raises(TaskContractError, match="has 3 input items; cannot execute 10,000"):
+        run_job(
+            task=load_task(VIDEO_TASK),
+            task_dir=VIDEO_TASK,
+            agent=load_agent(VIDEO_AGENT),
+            agent_dir=VIDEO_AGENT,
+            out=tmp_path / "false-scale",
+            n=10_000,
+        )
+    assert not (tmp_path / "false-scale").exists()
+
+
 def test_angiostress_requires_claim_footer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class Predictor:
         def predict(self, item: dict[str, object]) -> dict[str, object]:

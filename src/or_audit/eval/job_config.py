@@ -20,6 +20,10 @@ from or_audit.eval.loader import _read_toml
 from or_audit.eval.task import ProjectionSpec, Slug
 
 NonEmptyPath = Annotated[str, StringConstraints(min_length=1, max_length=500)]
+UnitSource = Annotated[
+    str,
+    StringConstraints(pattern=r"^(?:trials|trajectory-steps|metric:[a-z0-9][a-z0-9_-]*)$"),
+]
 
 BUILTIN_RANDOM = "random"
 
@@ -39,8 +43,10 @@ class EvaluationStageSpec(BaseModel):
 
     name: StageName
     evaluation_unit: NonEmptyPath
+    unit_source: UnitSource = "trials"
     target_units: Annotated[int, Field(ge=1)]
     independent_case_unit: NonEmptyPath
+    independent_case_key: NonEmptyPath
     independent_cases: Annotated[int, Field(ge=1)]
     scenarios: tuple[NonEmptyPath, ...]
     event_injections: tuple[NonEmptyPath, ...] = ()
