@@ -164,6 +164,59 @@ def test_harness_applies_and_records_portable_interface_faults() -> None:
         split_perturbations((PerturbationSpec(id="bad", kind="harness-invented"),))
 
 
+def test_harness_observation_faults_transform_gym_dict_numeric_leaves() -> None:
+    class DictObservationEnv:
+        def __init__(self) -> None:
+            self.step_index = 0
+
+        def reset(
+            self, *, seed: int | None = None, options: object = None
+        ) -> tuple[object, dict[str, object]]:
+            del seed, options
+            self.step_index = 0
+            return {"observation": np.array([2.0, 3.0]), "goal": np.array([4.0])}, {}
+
+        def step(self, action: object) -> tuple[object, float, bool, bool, dict[str, object]]:
+            del action
+            self.step_index += 1
+            return (
+                {
+                    "observation": np.array([5.0]),
+                    "goal": np.array([6.0]),
+                },
+                0.0,
+                self.step_index == 2,
+                False,
+                {},
+            )
+
+    seen: list[Any] = []
+    events = (
+        PerturbationSpec(id="drop", kind="harness-observation-zero", at_step=0),
+        PerturbationSpec(
+            id="noise",
+            kind="harness-observation-gaussian-noise",
+            at_step=1,
+            parameters={"std": 0.1},
+        ),
+    )
+
+    def act(_env: object, observation: object, _step: int) -> np.ndarray:
+        seen.append(observation)
+        return np.zeros(1)
+
+    run_gym_episode(
+        DictObservationEnv(),
+        seed=7,
+        action_fn=act,
+        harness_perturbations=events,
+    )
+    np.testing.assert_array_equal(seen[0]["observation"], np.zeros(2))
+    np.testing.assert_array_equal(seen[0]["goal"], np.zeros(1))
+    assert not np.array_equal(seen[1]["observation"], np.array([5.0]))
+    assert not np.array_equal(seen[1]["goal"], np.array([6.0]))
+
+
 def _pinned_lumen(tmp_path: Path) -> Path:
     dest = tmp_path / "lumen-task"
     shutil.copytree(LUMEN_TASK, dest)

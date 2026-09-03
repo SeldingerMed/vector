@@ -215,7 +215,12 @@ BUILTIN_WORLD_CAPABILITIES: dict[WorldKind, WorldCapabilities] = {
     WorldKind.SOFA: WorldCapabilities(physics=True, closed_loop=True, requires_world_pin=True),
     WorldKind.WARP: WorldCapabilities(physics=True, closed_loop=True, requires_world_pin=True),
     WorldKind.ISAAC_LAB: WorldCapabilities(physics=True, closed_loop=True, requires_world_pin=True),
-    WorldKind.PYBULLET: WorldCapabilities(physics=True, closed_loop=True, requires_world_pin=True),
+    WorldKind.PYBULLET: WorldCapabilities(
+        physics=True,
+        closed_loop=True,
+        requires_gym_id=True,
+        requires_world_pin=True,
+    ),
     WorldKind.ANGIOSTRESS_CONTRACT: WorldCapabilities(requires_contract=True),
     WorldKind.FRAME_SOURCE: WorldCapabilities(),
     WorldKind.COUNTERFACTUAL: WorldCapabilities(counterfactual=True),

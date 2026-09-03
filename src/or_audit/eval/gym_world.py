@@ -51,7 +51,7 @@ def make_gym(task: TaskSpec) -> GymEnv:
             world_pin=task.environment.world_pin,
             parameters=task.environment.parameters,
         )
-    if kind is WorldKind.GYM:
+    if kind in {WorldKind.GYM, WorldKind.PYBULLET}:
         return _make_gymnasium(task.environment.gym_id, parameters=task.environment.parameters)
     msg = f"task {task.id} world kind {world_kind_key(kind)} is not a gym-policy world"
     raise TaskContractError(msg)
@@ -195,9 +195,34 @@ def _numeric_array(value: Any, *, label: str) -> np.ndarray[Any, Any]:
     return array
 
 
+def _map_numeric_observation(
+    value: Any, *, label: str, transform: Callable[[np.ndarray[Any, Any]], Any]
+) -> tuple[Any, int]:
+    """Transform every numeric leaf in a Gym Dict observation."""
+    if isinstance(value, dict):
+        mapped = {
+            key: _map_numeric_observation(item, label=label, transform=transform)
+            for key, item in value.items()
+        }
+        return (
+            {key: item[0] for key, item in mapped.items()},
+            sum(item[1] for item in mapped.values()),
+        )
+    array = np.asarray(value)
+    if not np.issubdtype(array.dtype, np.number):
+        return value, 0
+    array = _numeric_array(value, label=label)
+    result = np.asarray(transform(array))
+    return (result.item() if result.ndim == 0 else result), 1
+
+
 def _numeric_zero(value: Any, *, label: str) -> Any:
-    zero = np.zeros_like(_numeric_array(value, label=label))
-    return zero.item() if zero.ndim == 0 else zero
+    zero, transformed = _map_numeric_observation(
+        value, label=label, transform=lambda array: np.zeros_like(array)
+    )
+    if not transformed:
+        raise TaskContractError(f"{label} requires at least one finite numeric observation")
+    return zero
 
 
 def _apply_harness_observation(
@@ -220,9 +245,25 @@ def _apply_harness_observation(
                 or std <= 0
             ):
                 raise TaskContractError(f"{perturbation.kind} requires parameters.std > 0")
-            array = _numeric_array(result, label=perturbation.kind)
-            noise = np.random.default_rng([seed, step, index]).normal(0.0, float(std), array.shape)
-            result = array + noise
+            rng = np.random.default_rng([seed, step, index])
+            noise_std = float(std)
+
+            def add_noise(
+                array: np.ndarray[Any, Any],
+                rng: np.random.Generator = rng,
+                noise_std: float = noise_std,
+            ) -> np.ndarray[Any, Any]:
+                return np.asarray(array + rng.normal(0.0, noise_std, array.shape))
+
+            result, transformed = _map_numeric_observation(
+                result,
+                label=perturbation.kind,
+                transform=add_noise,
+            )
+            if not transformed:
+                raise TaskContractError(
+                    f"{perturbation.kind} requires at least one finite numeric observation"
+                )
     return result
 
 

@@ -667,6 +667,24 @@ def test_gym_factory_carries_the_task_world_pin(monkeypatch: pytest.MonkeyPatch)
     }
 
 
+def test_pybullet_kind_uses_the_generic_gym_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = _sim_task(
+        tmp_path,
+        kind="pybullet",
+        synthetic_stub=False,
+        gym_id="NeedleReach-v0",
+    )
+    monkeypatch.setattr(
+        "or_audit.eval.gym_world._make_gymnasium",
+        lambda gym_id, *, parameters: FakePhysicsEnv(),
+    )
+    bridge = make_gym_bridge(task)
+    assert bridge.engine_provenance()["engine"] == "pybullet"
+    assert bridge.engine_provenance()["world_pin"] == "pybullet-pin-v1"
+
+
 def test_base_bridge_default_provenance() -> None:
     class BareBridge(BaseSimulationBridge):
         world_kind = "custom-sim"
