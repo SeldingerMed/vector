@@ -177,10 +177,7 @@ def sample_action(env: GymEnv, *, seed: int, step: int) -> Any:
     # without unwrapping, every space looked unbounded and every action became a
     # 2-vector of floats - silently wrong for Box envs and a hard TypeError for
     # Discrete ones.
-    space = getattr(env, "action_space", None)
-    if space is None:
-        inner = getattr(env, "unwrapped", None)
-        space = getattr(inner, "action_space", None)
+    space = _action_space(env)
     n = getattr(space, "n", None)
     if n is not None:
         return int(rng.integers(0, int(n)))
@@ -189,6 +186,33 @@ def sample_action(env: GymEnv, *, seed: int, step: int) -> Any:
     if low is not None and high is not None:
         return rng.uniform(np.asarray(low, dtype=np.float64), np.asarray(high, dtype=np.float64))
     return rng.uniform(-1.0, 1.0, size=2)
+
+
+def _action_space(env: GymEnv) -> Any:
+    space = getattr(env, "action_space", None)
+    if space is not None:
+        return space
+    return getattr(getattr(env, "unwrapped", None), "action_space", None)
+
+
+def _decode_action(env: GymEnv, action: Any) -> Any:
+    """Restore a JSON subprocess action through the environment's own space."""
+    space = _action_space(env)
+    contains = getattr(space, "contains", None)
+    if space is None or not callable(contains) or contains(action):
+        return action
+    from_jsonable = getattr(space, "from_jsonable", None)
+    if not callable(from_jsonable):
+        raise TaskContractError("policy action is outside the environment action space")
+    try:
+        decoded = from_jsonable([action])[0]
+    except Exception as exc:
+        raise TaskContractError(
+            "policy action cannot be decoded by the environment action space"
+        ) from exc
+    if not contains(decoded):
+        raise TaskContractError("decoded policy action is outside the environment action space")
+    return decoded
 
 
 def split_perturbations(
@@ -420,8 +444,9 @@ def run_gym_episode(
         applied_action = previous_action if hold_action and previous_action is not None else action
         if hold_action and previous_action is None:
             applied_action = _numeric_zero(action, label="harness-action-hold")
-        obs, reward, terminated, truncated, info = env.step(applied_action)
-        previous_action = applied_action
+        decoded_action = _decode_action(env, applied_action)
+        obs, reward, terminated, truncated, info = env.step(decoded_action)
+        previous_action = decoded_action
         recorded_info = jsonable(info) if isinstance(info, dict) else {}
         if active:
             raw_audit = recorded_info.get("or_audit", {})

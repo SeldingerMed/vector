@@ -164,6 +164,37 @@ def test_harness_applies_and_records_portable_interface_faults() -> None:
         split_perturbations((PerturbationSpec(id="bad", kind="harness-invented"),))
 
 
+def test_gym_action_space_restores_array_actions_from_json_plugins() -> None:
+    class JsonBox:
+        def contains(self, action: object) -> bool:
+            return isinstance(action, np.ndarray) and action.shape == (2,)
+
+        def from_jsonable(self, samples: list[object]) -> np.ndarray:
+            return np.asarray(samples, dtype=np.float32)
+
+    class ArrayActionEnv:
+        action_space = JsonBox()
+
+        def reset(
+            self, *, seed: int | None = None, options: object = None
+        ) -> tuple[int, dict[str, object]]:
+            del seed, options
+            return 0, {}
+
+        def step(self, action: object) -> tuple[int, float, bool, bool, dict[str, object]]:
+            assert isinstance(action, np.ndarray)
+            np.testing.assert_array_equal(action, np.array([0.25, -0.5], dtype=np.float32))
+            return 0, 0.0, True, False, {}
+
+    _, steps = run_gym_episode(
+        ArrayActionEnv(),
+        seed=0,
+        action_fn=lambda _env, _obs, _step: [0.25, -0.5],
+        max_steps=1,
+    )
+    assert steps[0]["action"] == [0.25, -0.5]
+
+
 def test_harness_observation_faults_transform_gym_dict_numeric_leaves() -> None:
     class DictObservationEnv:
         def __init__(self) -> None:
