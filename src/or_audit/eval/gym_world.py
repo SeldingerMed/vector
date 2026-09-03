@@ -169,6 +169,11 @@ def _numeric_array(value: Any, *, label: str) -> np.ndarray[Any, Any]:
     return array
 
 
+def _numeric_zero(value: Any, *, label: str) -> Any:
+    zero = np.zeros_like(_numeric_array(value, label=label))
+    return zero.item() if zero.ndim == 0 else zero
+
+
 def _apply_harness_observation(
     observation: Any,
     perturbations: tuple[PerturbationSpec, ...],
@@ -179,7 +184,7 @@ def _apply_harness_observation(
     result = observation
     for index, perturbation in enumerate(perturbations):
         if perturbation.kind == "harness-observation-zero":
-            result = np.zeros_like(_numeric_array(result, label=perturbation.kind))
+            result = _numeric_zero(result, label=perturbation.kind)
         elif perturbation.kind == "harness-observation-gaussian-noise":
             std = perturbation.parameters.get("std")
             if (
@@ -303,7 +308,7 @@ def run_gym_episode(
         hold_action = any(item.kind == "harness-action-hold" for item in active)
         applied_action = previous_action if hold_action and previous_action is not None else action
         if hold_action and previous_action is None:
-            applied_action = np.zeros_like(_numeric_array(action, label="harness-action-hold"))
+            applied_action = _numeric_zero(action, label="harness-action-hold")
         obs, reward, terminated, truncated, info = env.step(applied_action)
         previous_action = applied_action
         recorded_info = jsonable(info) if isinstance(info, dict) else {}
