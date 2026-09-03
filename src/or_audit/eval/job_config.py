@@ -48,6 +48,7 @@ class EvaluationStageSpec(BaseModel):
     independent_case_unit: NonEmptyPath
     independent_case_key: NonEmptyPath
     independent_cases: Annotated[int, Field(ge=1)]
+    independent_case_groups: dict[NonEmptyPath, NonEmptyPath] = Field(default_factory=dict)
     scenarios: tuple[NonEmptyPath, ...]
     event_injections: tuple[NonEmptyPath, ...] = ()
     operator_contexts: tuple[NonEmptyPath, ...]

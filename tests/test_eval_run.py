@@ -13,7 +13,11 @@ import pytest
 from or_audit.cli import main
 from or_audit.errors import TaskContractError
 from or_audit.eval.contracts import PerturbationSpec
-from or_audit.eval.gym_world import run_gym_episode, split_perturbations
+from or_audit.eval.gym_world import (
+    assert_perturbations_applied,
+    run_gym_episode,
+    split_perturbations,
+)
 from or_audit.eval.job import TrialRecord, assemble_job_result, read_job_result
 from or_audit.eval.loader import load_agent, load_task
 from or_audit.eval.runner import builtin_random_agent, replay_job, run_job
@@ -151,6 +155,11 @@ def test_harness_applies_and_records_portable_interface_faults() -> None:
     np.testing.assert_array_equal(env.actions[2], np.array([2.0, 2.0]))
     assert steps[0]["info"]["or_audit"]["applied_perturbations"][0]["id"] == "drop"
     assert steps[2]["applied_action"] == [2.0, 2.0]
+    with pytest.raises(TaskContractError, match="episode ended before"):
+        assert_perturbations_applied(
+            steps,
+            (PerturbationSpec(id="too-late", kind="harness-action-hold", at_step=3),),
+        )
     with pytest.raises(TaskContractError, match="unsupported harness perturbation"):
         split_perturbations((PerturbationSpec(id="bad", kind="harness-invented"),))
 

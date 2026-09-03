@@ -135,7 +135,13 @@ def _independent_case_count(
             raise TaskContractError(
                 f"closed-loop stage {stage.name} independent_case_key must be '$seed'"
             )
-        return len({(task.id, seed) for _, task, trials in tasks for seed in range(trials or 0)})
+        return len(
+            {
+                (stage.independent_case_groups.get(task.id, task.id), seed)
+                for _, task, trials in tasks
+                for seed in range(trials or 0)
+            }
+        )
     if stage.independent_case_key == "$seed":
         raise TaskContractError(
             f"dataset-backed stage {stage.name} must name an input field as independent_case_key"
@@ -244,6 +250,11 @@ def run_cartesian_job(
         if unsupported_events:
             raise TaskContractError(
                 f"stage {stage.name} names unsupported injected events {sorted(unsupported_events)}"
+            )
+        task_ids = {task.id for _, task, _, _, _, _ in planned}
+        if stage.independent_case_groups and set(stage.independent_case_groups) != task_ids:
+            raise TaskContractError(
+                f"stage {stage.name} independent_case_groups keys must exactly match task ids"
             )
         for task_dir, task, _, _, _, trials in planned:
             assert_trial_capacity(task, task_dir, trials or 0)

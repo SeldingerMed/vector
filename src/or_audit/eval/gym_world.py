@@ -162,6 +162,32 @@ def split_perturbations(
     return harness, world
 
 
+def assert_perturbations_applied(
+    steps: tuple[dict[str, Any], ...], perturbations: tuple[PerturbationSpec, ...]
+) -> None:
+    """Require every scheduled event to appear at its declared transition."""
+    scheduled: dict[int, set[str]] = {}
+    for item in perturbations:
+        scheduled.setdefault(item.at_step or 0, set()).add(item.id)
+    for index, expected_ids in scheduled.items():
+        if index >= len(steps):
+            raise TaskContractError(
+                f"episode ended before declared perturbations {sorted(expected_ids)} "
+                f"at step {index}"
+            )
+        info = steps[index].get("info", {})
+        audit = info.get("or_audit", {}) if isinstance(info, dict) else {}
+        reported = audit.get("applied_perturbations", []) if isinstance(audit, dict) else []
+        reported_ids = {
+            str(item.get("id", "")) if isinstance(item, dict) else str(item) for item in reported
+        }
+        if reported_ids != expected_ids:
+            raise TaskContractError(
+                "gym did not report the declared perturbation at its scheduled "
+                f"step {index}: expected {sorted(expected_ids)}, got {sorted(reported_ids)}"
+            )
+
+
 def _numeric_array(value: Any, *, label: str) -> np.ndarray[Any, Any]:
     array = np.asarray(value)
     if not np.issubdtype(array.dtype, np.number) or not np.isfinite(array).all():

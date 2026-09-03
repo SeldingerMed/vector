@@ -263,11 +263,15 @@ evaluation_unit = "seeded simulator episode"
 target_units = 3
 independent_case_unit = "scenario seed"
 independent_case_key = "$seed"
-independent_cases = 3
+independent_cases = 2
 scenarios = ["lumen-nav-safe", "lumen-nav-safe-2"]
 operator_contexts = ["autonomous"]
 stop_conditions = ["stop on any hard gate failure"]
 prerequisites = ["integration-smoke", "pilot"]
+
+[stage.independent_case_groups]
+"lumen-nav-safe" = "shared-geometry"
+"lumen-nav-safe-2" = "shared-geometry"
 """,
         encoding="utf-8",
     )
@@ -280,6 +284,8 @@ prerequisites = ["integration-smoke", "pilot"]
         ("lumen-nav-safe-2", 2),
     ]
     assert manifest.observed_units == 3
+    assert manifest.stage is not None
+    assert manifest.stage.independent_cases == 2
 
 
 def test_stage_counts_task_reported_scored_targets(

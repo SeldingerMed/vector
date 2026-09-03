@@ -15,6 +15,7 @@ from or_audit.eval.contracts import CapabilitySpec, InteractionMode
 from or_audit.eval.enums import AgentKind, PortId, WorldKind
 from or_audit.eval.gym_world import (
     GymFactory,
+    assert_perturbations_applied,
     make_gym,
     run_gym_episode,
     sample_action,
@@ -367,6 +368,7 @@ def _run_closed_loop(
                 reset_options=reset_options,
                 harness_perturbations=harness_perturbations,
             )
+            assert_perturbations_applied(steps, perturbations)
             trace_steps = []
             for index, raw_step in enumerate(steps):
                 trace_step = dict(raw_step)
@@ -381,22 +383,6 @@ def _run_closed_loop(
                     )
                 )
                 if active_perturbations:
-                    reported = (
-                        raw_step.get("info", {})
-                        .get("or_audit", {})
-                        .get("applied_perturbations", [])
-                    )
-                    expected_ids = {item.id for item in active_perturbations}
-                    reported_ids = {
-                        str(item.get("id", "")) if isinstance(item, dict) else str(item)
-                        for item in reported
-                    }
-                    if reported_ids != expected_ids:
-                        raise TaskContractError(
-                            "gym did not report the declared perturbation at its scheduled "
-                            f"step {index}: expected {sorted(expected_ids)}, got "
-                            f"{sorted(reported_ids)}"
-                        )
                     trace_step["perturbations"] = active_perturbations
                 trace_steps.append(trace_step)
             trace = ProceduralTrace.from_steps(
