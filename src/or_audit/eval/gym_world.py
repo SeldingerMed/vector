@@ -210,6 +210,14 @@ def _decode_action(env: GymEnv, action: Any) -> Any:
         raise TaskContractError(
             "policy action cannot be decoded by the environment action space"
         ) from exc
+    if (
+        not contains(decoded)
+        and getattr(space, "low", None) is not None
+        and getattr(space, "high", None) is not None
+    ):
+        # Gym 0.21 Box inherits Space.from_jsonable(), which returns the input
+        # list unchanged. Restore the native ndarray at this legacy boundary.
+        decoded = np.asarray(action, dtype=getattr(space, "dtype", None))
     if not contains(decoded):
         raise TaskContractError("decoded policy action is outside the environment action space")
     return decoded

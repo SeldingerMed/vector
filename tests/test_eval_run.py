@@ -164,13 +164,17 @@ def test_harness_applies_and_records_portable_interface_faults() -> None:
         split_perturbations((PerturbationSpec(id="bad", kind="harness-invented"),))
 
 
-def test_gym_action_space_restores_array_actions_from_json_plugins() -> None:
+def test_legacy_gym_box_restores_array_actions_from_json_plugins() -> None:
     class JsonBox:
+        low = np.array([-1.0, -1.0], dtype=np.float32)
+        high = np.array([1.0, 1.0], dtype=np.float32)
+        dtype = np.dtype(np.float32)
+
         def contains(self, action: object) -> bool:
             return isinstance(action, np.ndarray) and action.shape == (2,)
 
-        def from_jsonable(self, samples: list[object]) -> np.ndarray:
-            return np.asarray(samples, dtype=np.float32)
+        def from_jsonable(self, samples: list[object]) -> list[object]:
+            return samples
 
     class ArrayActionEnv:
         action_space = JsonBox()
