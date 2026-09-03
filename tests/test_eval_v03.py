@@ -140,7 +140,12 @@ def test_lumen_scenario_perturbation_and_recovery_are_typed(tmp_path: Path) -> N
 
 def test_declared_gym_controls_must_be_acknowledged(tmp_path: Path) -> None:
     class IgnoringEnv(RecoveryLumenEnv):
-        def reset(self, *, seed=None, options=None):
+        def reset(
+            self,
+            *,
+            seed: int | None = None,
+            options: dict[str, Any] | None = None,
+        ) -> tuple[list[float], dict[str, Any]]:
             observation, _ = super().reset(seed=seed, options=options)
             return observation, {}
 
@@ -156,7 +161,7 @@ def test_declared_gym_controls_must_be_acknowledged(tmp_path: Path) -> None:
         )
 
     class NotApplyingEnv(RecoveryLumenEnv):
-        def step(self, action):
+        def step(self, action: Any) -> tuple[list[float], float, bool, bool, dict[str, Any]]:
             observation, reward, terminated, truncated, info = super().step(action)
             info.pop("or_audit", None)
             return observation, reward, terminated, truncated, info
