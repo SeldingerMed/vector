@@ -11,13 +11,13 @@
       "environments": [],
       "id": "lumen",
       "install": {
-        "installable": false,
-        "pin_state": "install-unpinned",
+        "installable": true,
+        "pin_state": "pinned",
         "strategy": "first-party"
       },
-      "license": "unverified",
+      "license": "Apache-2.0",
       "metrics_only": false,
-      "risks": "License stays `unverified` on purpose: the harness LICENSE (Apache-2.0) covers the adapter in this repository, not the seldinger-lumen content distribution. Recording our own content as audited without reading its LICENSE would be exactly the fabrication this file forbids - and `license_permitted` is false while it stands, so this row is not installable either.",
+      "risks": "The pinned sibling repository contains the Apache License 2.0 text and declares `Apache-2.0` in `pyproject.toml`. Determinism remains unmeasured, so a successful local import and rollout cannot establish replay equivalence.",
       "safety_evidence": "docs/examples/tasks/lumen-nav-safe/task.toml binds hard gates to `lumen.info.unsafe` and `lumen.info.max_pen`, and the in-tree conformance run resolves both to pass/fail per trial rather than to an abstention.",
       "sources": [
         "https://github.com/SeldingerMed/seldinger-lumen"
