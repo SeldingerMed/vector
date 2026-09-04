@@ -371,7 +371,7 @@ git tag v0.3.0 && git push origin v0.3.0
 gh workflow run publish.yml -f version=0.3.0
 ```
 
-To publish from CI, create a pending trusted publisher for the `surgeval` project on PyPI with owner `SeldingerMed`, repository `seldinger-vector`, workflow file `publish.yml`, and environment `release`. Until that mapping exists, install from source with `uv pip install -e ".[dev]"` or point pip at the wheel produced by `uv build`.
+PyPI trusted publishing is configured for the `surgeval` project with owner `SeldingerMed`, repository `vector`, workflow file `publish.yml`, and environment `release`; no repository API token is required.
 
 ## License
 
