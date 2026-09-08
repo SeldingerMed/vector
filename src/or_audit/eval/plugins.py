@@ -134,6 +134,12 @@ def _private_plugin_home() -> Path:
     return Path(tempfile.mkdtemp(prefix="surgeval-plugin-"))
 
 
+#: Largest single plugin response accepted (8 MiB). Evidence transfer is one
+#: bounded JSON value per request, not a stream: an unbounded read lets a
+#: compromised or buggy child exhaust host memory before the timeout fires.
+_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
 class JsonSubprocessRuntime:
     """Persistent JSON-lines child with bounded request latency."""
 
@@ -182,9 +188,17 @@ class JsonSubprocessRuntime:
             process.wait()
             self._close_pipes()
             raise TaskContractError(f"plugin request {op!r} exceeded {self._timeout_sec}s")
-        line = process.stdout.readline()
+        line = process.stdout.readline(_MAX_RESPONSE_BYTES + 2)
         if not line:
             raise TaskContractError(self._failure("plugin process returned no response"))
+        if not line.endswith("\n") or len(line) - 1 > _MAX_RESPONSE_BYTES:
+            process.kill()
+            process.wait()
+            self._close_pipes()
+            raise TaskContractError(
+                f"plugin {op!r} response exceeded {_MAX_RESPONSE_BYTES} bytes; "
+                "evidence transfer is one bounded value per request"
+            )
         try:
             response = json.loads(line)
         except json.JSONDecodeError as exc:

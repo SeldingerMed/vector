@@ -417,3 +417,33 @@ def test_container_backend_runs_predictor_end_to_end(tmp_path: Path) -> None:
     finally:
         runtime.close()
     assert isinstance(result.get("env_keys"), list)
+
+
+_BIG_SPY = """
+import os
+from pathlib import Path
+from typing import Any
+
+class Predictor:
+    def predict(self, item: dict[str, Any]) -> dict[str, Any]:
+        del item
+        return {"blob": "x" * (9 * 1024 * 1024)}
+
+def load_predictor(*, root: Path, weights_path: Path) -> Predictor:
+    del root, weights_path
+    return Predictor()
+"""
+
+
+def test_plugin_oversized_response_is_refused(tmp_path: Path) -> None:
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "big.py").write_text(_BIG_SPY, encoding="utf-8")
+    (plugin / "weights.json").write_text("{}", encoding="utf-8")
+    runtime = load_predictor_runtime(plugin, "big.py:load_predictor", "weights.json")
+    assert isinstance(runtime, SubprocessPredictorRuntime)
+    try:
+        with pytest.raises(TaskContractError, match="exceeded"):
+            runtime.predict({})
+    finally:
+        runtime.close()
