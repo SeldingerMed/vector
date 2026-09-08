@@ -9,11 +9,14 @@ marked enforced; everything else is an explicit gap with an owner.
   agent/verifier locally. Local subprocess separation applies: protocol-only
   label routing, per-package cwd, timeouts, scrubbed process environment.
   T0 protects against accidents and honest-agent label leakage, not malice.
-- **T1 — untrusted submission** (not implemented): third-party code/weights
-  scored for publication. Requires a container/sandbox backend, separate
-  agent and verifier filesystems with declared artifact transfer, enforced
-  egress and resource policy, and hosted attestation. No local-subprocess
-  configuration may claim T1.
+- **T1 — untrusted submission**: containerized plugin execution exists
+  (`RuntimeDescriptor` kind `container` → digest-pinned image, `--network
+  none`, read-only package mount, tmpfs, memory/CPU/pids caps, separate
+  containers per runtime). Verified locally against a digest-pinned
+  registry image; image publication for CI/hosted fleets is still pending,
+  so CI exercises command construction only. Filesystem/network/resource
+  boundaries hold where the backend runs; hosted attestation (B5) still
+  pending for cross-lab trust.
 
 1. **Oracle routing**: labels travel only to the verifier context, never in
    agent payloads (`runner.py`, `plugins.py`). A protocol-conformant agent

@@ -324,3 +324,78 @@ def test_scrubbed_env_matches_windows_casing(
     monkeypatch.setattr(os_module, "name", "nt")
     env = _scrubbed_plugin_env({"Path": "C:\\bin", "HF_TOKEN": "x"})
     assert env == {"Path": "C:\\bin"}
+
+
+def _container_descriptor(image: str, digest: str) -> Any:
+    from or_audit.eval.contracts import RuntimeDescriptor, RuntimeKind
+
+    return RuntimeDescriptor(kind=RuntimeKind.CONTAINER, image=image, image_digest=digest)
+
+
+def test_container_command_pins_isolates_and_caps(tmp_path: Path) -> None:
+    from or_audit.eval.plugins import _runtime_command
+
+    command, _ = _runtime_command(
+        _container_descriptor("registry.example/surgeval-plugin", "a" * 64),
+        role="predictor",
+        root=tmp_path,
+        entrypoint="spy.py:load_predictor",
+    )
+    assert command[:6] == ("docker", "run", "--rm", "-i", "--network", "none")
+    assert "--read-only" in command
+    assert "--tmpfs" in command
+    joined = " ".join(command)
+    assert f"{tmp_path.resolve()}:/pkg:ro" in joined
+    assert f"registry.example/surgeval-plugin@sha256:{'a' * 64}" in joined
+    assert "or_audit.eval.plugin_host" in joined
+    for flag in ("--memory", "--cpus", "--pids-limit"):
+        assert flag in command
+    assert "--workdir" in command
+
+
+def test_container_command_normalizes_and_refuses_refs(tmp_path: Path) -> None:
+    from or_audit.errors import TaskContractError
+    from or_audit.eval.plugins import _runtime_command
+
+    command, _ = _runtime_command(
+        _container_descriptor("registry.example/p", "sha256:" + "b" * 64),
+        role="predictor",
+        root=tmp_path,
+        entrypoint="spy.py:load_predictor",
+    )
+    assert f"registry.example/p@sha256:{'b' * 64}" in " ".join(command)
+    with pytest.raises(TaskContractError, match="bare repository"):
+        _runtime_command(
+            _container_descriptor("registry.example/p@sha256:" + "c" * 64, "d" * 64),
+            role="predictor",
+            root=tmp_path,
+            entrypoint="spy.py:load_predictor",
+        )
+
+
+def test_container_backend_runs_predictor_end_to_end(tmp_path: Path) -> None:
+    import shutil
+
+    image = os.environ.get("SURGEVAL_TEST_PLUGIN_IMAGE", "")
+    if not image or shutil.which("docker") is None:
+        pytest.skip("needs docker and SURGEVAL_TEST_PLUGIN_IMAGE=image@digest")
+    from or_audit.eval.contracts import RuntimeDescriptor, RuntimeKind
+
+    ref, _, digest = image.partition("@")
+    assert digest, "SURGEVAL_TEST_PLUGIN_IMAGE must be digest-pinned"
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "spy.py").write_text(_ENV_SPY, encoding="utf-8")
+    (plugin / "weights.json").write_text("{}", encoding="utf-8")
+    runtime = load_predictor_runtime(
+        plugin,
+        "spy.py:load_predictor",
+        "weights.json",
+        runtime=RuntimeDescriptor(kind=RuntimeKind.CONTAINER, image=ref, image_digest=digest),
+    )
+    assert isinstance(runtime, SubprocessPredictorRuntime)
+    try:
+        result = runtime.predict({})
+    finally:
+        runtime.close()
+    assert isinstance(result.get("env_keys"), list)

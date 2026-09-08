@@ -102,8 +102,16 @@ _PLUGIN_ENV_ALLOW = frozenset(
         "CUDA_CACHE_PATH",
         "NVIDIA_VISIBLE_DEVICES",
         "NVIDIA_DRIVER_CAPABILITIES",
+        "DOCKER_HOST",
     }
 )
+
+#: In-container mount point for the evaluated package (read-only).
+_CONTAINER_PKG_DIR = "/pkg"
+#: Default resource envelope for containerized plugin children (B4).
+_CONTAINER_MEMORY = "2g"
+_CONTAINER_CPUS = "2.0"
+_CONTAINER_PIDS_LIMIT = "256"
 
 #: Uppercase twin for Windows, where environment keys are case-insensitive
 #: but stored mixed-case (`Path`, `SystemRoot`).
@@ -243,6 +251,72 @@ class SubprocessVerifierRuntime(JsonSubprocessRuntime):
         return result
 
 
+def _container_command(
+    descriptor: RuntimeDescriptor,
+    *,
+    role: str,
+    root: Path,
+    entrypoint: str,
+    weights_path: str = "",
+) -> tuple[str, ...]:
+    """Docker execution with no network, a read-only package, and caps.
+
+    Separate containers per runtime object preserve the agent/verifier
+    process boundary as filesystem/network boundaries (B2). The image
+    reference is always digest-pinned: an undigested image is refused by
+    the ``RuntimeDescriptor`` validator before this runs. A digest with or
+    without the ``sha256:`` prefix normalizes to one reference; an image
+    that already contains ``@`` is refused rather than guessed at.
+    """
+    if shutil.which("docker") is None:
+        raise TaskContractError(
+            "container runtime needs the docker CLI on PATH; "
+            "install Docker (or Colima) and ensure the daemon runs"
+        )
+    if "@" in descriptor.image:
+        raise TaskContractError(
+            f"container image {descriptor.image!r} must be a bare repository; "
+            "pass the digest in image_digest, not in image"
+        )
+    digest = descriptor.image_digest.removeprefix("sha256:")
+    inner = [
+        "python",
+        "-m",
+        "or_audit.eval.plugin_host",
+        "--role",
+        role,
+        "--root",
+        _CONTAINER_PKG_DIR,
+        "--entrypoint",
+        entrypoint,
+    ]
+    if weights_path:
+        inner.extend(["--weights-path", weights_path])
+    return (
+        "docker",
+        "run",
+        "--rm",
+        "-i",
+        "--network",
+        "none",
+        "--workdir",
+        _CONTAINER_PKG_DIR,
+        "--read-only",
+        "--tmpfs",
+        "/tmp",
+        "--memory",
+        _CONTAINER_MEMORY,
+        "--cpus",
+        _CONTAINER_CPUS,
+        "--pids-limit",
+        _CONTAINER_PIDS_LIMIT,
+        "-v",
+        f"{root.resolve()}:{_CONTAINER_PKG_DIR}:ro",
+        f"{descriptor.image}@sha256:{digest}",
+        *inner,
+    )
+
+
 def _host_command(
     *, role: str, root: Path, entrypoint: str, weights_path: str = ""
 ) -> tuple[str, ...]:
@@ -271,6 +345,10 @@ def _runtime_command(
     weights_path: str = "",
 ) -> tuple[tuple[str, ...], float]:
     runtime = descriptor or RuntimeDescriptor(kind=RuntimeKind.LOCAL, entrypoint=entrypoint)
+    if runtime.kind is RuntimeKind.CONTAINER:
+        return _container_command(
+            runtime, role=role, root=root, entrypoint=entrypoint, weights_path=weights_path
+        ), runtime.timeout_sec
     if runtime.kind is not RuntimeKind.LOCAL:
         raise TaskContractError(
             f"runtime {runtime.kind.value} is represented but is not locally executable"
