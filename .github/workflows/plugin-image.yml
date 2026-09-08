@@ -42,6 +42,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Start job-local registry
+        run: docker run -d -p 5000:5000 --name ci-registry registry:2
+      - name: Build and push sandbox image
+        run: |
+          docker build --load -f docker/plugin.Dockerfile -t localhost:5000/surgeval-plugin:ci .
+          docker push localhost:5000/surgeval-plugin:ci
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
