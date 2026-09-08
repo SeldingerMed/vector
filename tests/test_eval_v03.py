@@ -10,7 +10,7 @@ import pytest
 
 from or_audit.errors import TaskContractError
 from or_audit.eval.bind import assert_bind
-from or_audit.eval.contracts import RuntimeDescriptor, RuntimeKind
+from or_audit.eval.contracts import PerturbationSpec, RuntimeDescriptor, RuntimeKind, ScenarioSpec
 from or_audit.eval.leaderboard import leaderboard_data
 from or_audit.eval.loader import load_agent, load_task, load_taskset
 from or_audit.eval.plugins import load_predictor_runtime, load_verifier_runtime
@@ -111,10 +111,44 @@ def test_v03_taskset_interface_and_capability_bind() -> None:
     assert_bind(custom_task, custom_agent)
 
 
+def _task_with_wall_scenario() -> Any:
+    """Packaged task plus the wall-contact declarations the pinned world cannot
+    honor. Mechanism coverage (reset-echo, typed recovery) lives on this copy;
+    the packaged task ships without them (see its task.toml note)."""
+    packaged = load_task(LUMEN_TASK)
+    assert packaged.scenarios == ()
+    assert packaged.perturbations == ()
+    return packaged.model_copy(
+        update={
+            "scenarios": (
+                ScenarioSpec(
+                    id="wall-contact-recovery",
+                    version="1",
+                    description="Declared transient wall-contact condition.",
+                    seed=0,
+                    inputs={"target": "branch", "condition": "transient-wall-contact"},
+                ),
+            ),
+            "perturbations": (
+                PerturbationSpec(
+                    id="transient-wall-force",
+                    version="1",
+                    description="Bounded wall-force perturbation at step zero.",
+                    scenario_id="wall-contact-recovery",
+                    kind="wall-force-spike",
+                    at_step=0,
+                    parameters={"delta": 0.1, "duration_steps": 1},
+                ),
+            ),
+        }
+    )
+
+
 def test_lumen_scenario_perturbation_and_recovery_are_typed(tmp_path: Path) -> None:
+    task = _task_with_wall_scenario()
     env = RecoveryLumenEnv()
     result = run_job(
-        task=load_task(LUMEN_TASK),
+        task=task,
         task_dir=LUMEN_TASK,
         agent=builtin_random_agent(),
         agent_dir=None,
@@ -139,6 +173,8 @@ def test_lumen_scenario_perturbation_and_recovery_are_typed(tmp_path: Path) -> N
 
 
 def test_declared_gym_controls_must_be_acknowledged(tmp_path: Path) -> None:
+    task = _task_with_wall_scenario()
+
     class IgnoringEnv(RecoveryLumenEnv):
         def reset(
             self,
@@ -151,7 +187,7 @@ def test_declared_gym_controls_must_be_acknowledged(tmp_path: Path) -> None:
 
     with pytest.raises(TaskContractError, match="ignored or changed"):
         run_job(
-            task=load_task(LUMEN_TASK),
+            task=task,
             task_dir=LUMEN_TASK,
             agent=builtin_random_agent(),
             agent_dir=None,
@@ -168,7 +204,7 @@ def test_declared_gym_controls_must_be_acknowledged(tmp_path: Path) -> None:
 
     with pytest.raises(TaskContractError, match="did not report"):
         run_job(
-            task=load_task(LUMEN_TASK),
+            task=task,
             task_dir=LUMEN_TASK,
             agent=builtin_random_agent(),
             agent_dir=None,

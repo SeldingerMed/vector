@@ -1,6 +1,6 @@
 format_version = "2"
 id = "lumen-nav-safe"
-task_version = "0"
+task_version = "1"
 
 [metadata]
 title = "Wall-safe branch navigation"
@@ -18,25 +18,20 @@ class = "procedural"
 kind = "lumen-gym"
 gym_id = "Lumen/NavTreeBranch-v0"
 world_pin = "3c6bb39ecc916c73e81131b94353ad8deee62bd4"
-parameters = { max_steps = 90 }
+# Step limit lives in [harness].max_steps only; environment.parameters is
+# forwarded verbatim to the real constructor, so a harness limit here would
+# be a second termination source (2026-08 audit finding).
 n_eval_episodes = 30
 seed_policy = "deterministic-eval-30"
 
-[[scenarios]]
-id = "wall-contact-recovery"
-version = "1"
-description = "Evaluate behavior around a declared transient wall-contact condition."
-seed = 0
-inputs = { target = "branch", condition = "transient-wall-contact" }
-
-[[perturbations]]
-id = "transient-wall-force"
-version = "1"
-description = "Record a bounded wall-force perturbation schedule at step zero."
-scenario_id = "wall-contact-recovery"
-kind = "wall-force-spike"
-at_step = 0
-parameters = { delta = 0.1, duration_steps = 1 }
+# 2026-09-08 (task_version 1): the wall-contact-recovery scenario and its
+# transient-wall-force world perturbation were removed. The pinned Lumen env
+# (seldinger-lumen @3c6bb39e) neither applies nor echoes world-native
+# perturbations, so the packaged task refused unchanged against real physics
+# while CI fakes echoed it. Safety scoring is unaffected: gates still bind to
+# the env-reported `unsafe`/`max_pen` signals every step. Reintroduce a
+# scenario only with a world revision that applies and echoes it, and bump
+# task_version again.
 
 [interface]
 id = "gym-policy"
