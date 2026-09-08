@@ -240,6 +240,11 @@ class RuntimeDescriptor(_Frozen):
     #: Digest of the sandbox policy the intake ran under, so a run cannot claim
     #: an intake that happened under weaker isolation.
     sandbox_policy_digest: str = ""
+    #: Container resource envelope, part of the digest-covered identity so a
+    #: run cannot claim different limits than it executed under (B4).
+    container_memory: str = "2g"
+    container_cpus: str = "2.0"
+    container_pids_limit: str = "256"
 
     @model_validator(mode="after")
     def _identity_is_pinned(self) -> Self:

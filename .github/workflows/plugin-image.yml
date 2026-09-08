@@ -1,0 +1,69 @@
+name: Plugin image
+
+# Builds the Phase B2 plugin sandbox image and runs the live container
+# backend test against the digest-pinned reference — so the container path
+# is exercised in CI, not only on maintainer machines.
+#
+# No registry publication here: the image is pushed to a job-local registry
+# and its digest is consumed in the same job. Publishing a pinned image for
+# hosted fleets (GHCR) is a separate commercial decision; see
+# docs/ISOLATION_MODEL.md.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/plugin.Dockerfile"
+      - "src/or_audit/eval/plugins.py"
+      - "src/or_audit/eval/plugin_host.py"
+      - "src/or_audit/eval/contracts.py"
+      - "tests/test_eval_plugin_host.py"
+      - ".github/workflows/plugin-image.yml"
+  pull_request:
+    paths:
+      - "docker/plugin.Dockerfile"
+      - "src/or_audit/eval/plugins.py"
+      - "src/or_audit/eval/plugin_host.py"
+      - "src/or_audit/eval/contracts.py"
+      - "tests/test_eval_plugin_host.py"
+      - ".github/workflows/plugin-image.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: plugin-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build sandbox image, test live backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Start job-local registry
+        run: docker run -d -p 5000:5000 --name ci-registry registry:2
+      - name: Build and push sandbox image
+        run: |
+          docker build --load -f docker/plugin.Dockerfile -t localhost:5000/surgeval-plugin:ci .
+          docker push localhost:5000/surgeval-plugin:ci
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --all-extras
+      - name: Resolve digest-pinned reference
+        id: ref
+        run: |
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5000/surgeval-plugin:ci)
+          case "$DIGEST" in
+            localhost:5000/surgeval-plugin@sha256:*) ;;
+            *) echo "Unexpected RepoDigest: $DIGEST" >&2; exit 1 ;;
+          esac
+          echo "value=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Sandbox image: $DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - name: Live container backend test
+        env:
+          SURGEVAL_TEST_PLUGIN_IMAGE: ${{ steps.ref.outputs.value }}
+        run: uv run pytest tests/test_eval_plugin_host.py -q

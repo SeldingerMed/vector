@@ -88,6 +88,8 @@ def load_entrypoint(root: Path, entrypoint: str, *, label: str) -> Callable[...,
 #: the device-selection variables needed for GPU discovery are named.
 #: HOME is never inherited (it points at ~/.aws, ~/.huggingface, shell
 #: history): each runtime gets a fresh empty directory instead (B1 tier T0).
+#: DOCKER_HOST is not inherited either: it selects a Docker daemon, which is
+#: a host-tool concern handled per-command, never plugin input.
 _PLUGIN_ENV_ALLOW = frozenset(
     {
         "PATH",
@@ -103,16 +105,11 @@ _PLUGIN_ENV_ALLOW = frozenset(
         "CUDA_CACHE_PATH",
         "NVIDIA_VISIBLE_DEVICES",
         "NVIDIA_DRIVER_CAPABILITIES",
-        "DOCKER_HOST",
     }
 )
 
 #: In-container mount point for the evaluated package (read-only).
 _CONTAINER_PKG_DIR = "/pkg"
-#: Default resource envelope for containerized plugin children (B4).
-_CONTAINER_MEMORY = "2g"
-_CONTAINER_CPUS = "2.0"
-_CONTAINER_PIDS_LIMIT = "256"
 
 #: Uppercase twin for Windows, where environment keys are case-insensitive
 #: but stored mixed-case (`Path`, `SystemRoot`).
@@ -133,6 +130,19 @@ def _scrubbed_plugin_env(source: dict[str, str] | None = None) -> dict[str, str]
 def _private_plugin_home() -> Path:
     """Fresh empty HOME/TMP for one plugin child."""
     return Path(tempfile.mkdtemp(prefix="surgeval-plugin-"))
+
+
+def _host_tool_env(command: tuple[str, ...]) -> dict[str, str]:
+    """Host-tool variables for commands that are host tools, not plugins.
+
+    The ``docker`` CLI driving a container spawn runs on the host and needs
+    daemon selection; evaluated plugin code inside the container never sees
+    it. Nothing else is passed through.
+    """
+    if command[:1] == ("docker",):
+        host = os.environ.get("DOCKER_HOST")
+        return {"DOCKER_HOST": host} if host else {}
+    return {}
 
 
 #: Largest single plugin response accepted (8 MiB). Evidence transfer is one
@@ -172,6 +182,51 @@ def _readline_bounded(stream: Any, *, limit: int, timeout_sec: float) -> str | N
     return bytes(buf).decode("utf-8", errors="replace")
 
 
+def _clamp_container_limits(descriptor: RuntimeDescriptor) -> tuple[str, str, str]:
+    """Executor-side bounds on task-declared container limits (B4).
+
+    The descriptor carries the limits in its digest-covered identity, but the
+    executor refuses absurd ones: an untrusted package must not disable caps
+    (``--pids-limit -1``) or demand host-scale resources.
+    """
+    memory = _parse_memory_mb(descriptor.container_memory)
+    if not 64 <= memory <= 16 * 1024:
+        raise TaskContractError(
+            f"container_memory {descriptor.container_memory!r} outside 64m..16g"
+        )
+    try:
+        cpus = float(descriptor.container_cpus)
+    except ValueError as exc:
+        raise TaskContractError(
+            f"container_cpus {descriptor.container_cpus!r} is not a number"
+        ) from exc
+    if not 0.1 <= cpus <= 16.0:
+        raise TaskContractError(f"container_cpus {descriptor.container_cpus!r} outside 0.1..16")
+    try:
+        pids = int(descriptor.container_pids_limit)
+    except ValueError as exc:
+        raise TaskContractError(
+            f"container_pids_limit {descriptor.container_pids_limit!r} is not an integer"
+        ) from exc
+    if not 16 <= pids <= 4096:
+        raise TaskContractError(
+            f"container_pids_limit {descriptor.container_pids_limit!r} outside 16..4096"
+        )
+    return descriptor.container_memory, descriptor.container_cpus, descriptor.container_pids_limit
+
+
+def _parse_memory_mb(value: str) -> float:
+    """Parse a docker-style memory size to MiB."""
+    text = value.strip().lower()
+    factors = {"g": 1024.0, "m": 1.0, "k": 1.0 / 1024}
+    factor = factors.get(text[-1:], 1.0 / (1024 * 1024)) if text else 0.0
+    number = text[:-1] if text and text[-1:] in factors else text
+    try:
+        return float(number) * factor
+    except ValueError as exc:
+        raise TaskContractError(f"container_memory {value!r} is not a size") from exc
+
+
 class JsonSubprocessRuntime:
     """Persistent JSON-lines child with bounded request latency."""
 
@@ -184,6 +239,7 @@ class JsonSubprocessRuntime:
         env["TMPDIR"] = str(self._plugin_home)
         env["TEMP"] = str(self._plugin_home)
         env["TMP"] = str(self._plugin_home)
+        env.update(_host_tool_env(command))
         self._process = subprocess.Popen(
             command,
             cwd=cwd,
@@ -210,7 +266,6 @@ class JsonSubprocessRuntime:
             process.stdin.flush()
         except BrokenPipeError as exc:
             raise TaskContractError(self._failure("plugin process exited before request")) from exc
-
         line = _readline_bounded(
             process.stdout, limit=_MAX_RESPONSE_BYTES, timeout_sec=self._timeout_sec
         )
@@ -323,6 +378,7 @@ def _container_command(
             "pass the digest in image_digest, not in image"
         )
     digest = descriptor.image_digest.removeprefix("sha256:")
+    memory, cpus, pids = _clamp_container_limits(descriptor)
     inner = [
         "python",
         "-m",
@@ -359,11 +415,11 @@ def _container_command(
         "--security-opt",
         "no-new-privileges",
         "--memory",
-        _CONTAINER_MEMORY,
+        memory,
         "--cpus",
-        _CONTAINER_CPUS,
+        cpus,
         "--pids-limit",
-        _CONTAINER_PIDS_LIMIT,
+        pids,
         "-v",
         f"{root.resolve()}:{_CONTAINER_PKG_DIR}:ro",
         f"{descriptor.image}@sha256:{digest}",

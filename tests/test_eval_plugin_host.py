@@ -461,3 +461,85 @@ def test_readline_bounded_expires_while_dribbling() -> None:
             assert _readline_bounded(stream, limit=1024, timeout_sec=0.05) is None
     finally:
         os_module.close(writer)
+
+
+def test_docker_host_reaches_only_container_spawns(monkeypatch: pytest.MonkeyPatch) -> None:
+    from or_audit.eval.plugins import _host_tool_env, _scrubbed_plugin_env
+
+    monkeypatch.setenv("DOCKER_HOST", "unix:///tmp/daemon.sock")
+    assert "DOCKER_HOST" not in _scrubbed_plugin_env()
+    assert _host_tool_env(("docker", "run")) == {"DOCKER_HOST": "unix:///tmp/daemon.sock"}
+    assert _host_tool_env(("python", "-m", "x")) == {}
+
+
+def test_container_limits_come_from_descriptor_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    from or_audit.eval.contracts import RuntimeDescriptor, RuntimeKind
+    from or_audit.eval.plugins import _runtime_command
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+    descriptor = RuntimeDescriptor(
+        kind=RuntimeKind.CONTAINER,
+        image="registry.example/p",
+        image_digest="a" * 64,
+        container_memory="512m",
+        container_cpus="0.5",
+        container_pids_limit="64",
+    )
+    command, _ = _runtime_command(
+        descriptor, role="predictor", root=tmp_path, entrypoint="spy.py:load_predictor"
+    )
+    joined = " ".join(command)
+    assert "--memory 512m" in joined
+    assert "--cpus 0.5" in joined
+    assert "--pids-limit 64" in joined
+    assert "2g" not in joined
+
+
+def test_entrypoint_and_weights_confined_to_package(tmp_path: Path) -> None:
+    from or_audit.eval.integrity import package_file
+
+    outside = tmp_path / "outside.py"
+    outside.write_text("VALUE = 1\n", encoding="utf-8")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "ok.py").write_text("def f() -> int:\n    return 1\n", encoding="utf-8")
+    (pkg / "escape.py").symlink_to(outside)
+    with pytest.raises(TaskContractError, match="escapes package root"):
+        load_entrypoint(pkg, "../outside.py:f", label="policy")
+    with pytest.raises(TaskContractError, match="escapes package root"):
+        load_entrypoint(pkg, "escape.py:f", label="policy")
+    with pytest.raises(TaskContractError, match="escapes package root"):
+        load_entrypoint(pkg, "/etc/hosts:f", label="policy")
+    with pytest.raises(TaskContractError, match="missing"):
+        package_file(pkg, "absent.json", label="weights")
+    assert package_file(pkg, "ok.py", label="policy module").name == "ok.py"
+
+
+def test_container_absurd_limits_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    from or_audit.errors import TaskContractError
+    from or_audit.eval.contracts import RuntimeDescriptor, RuntimeKind
+    from or_audit.eval.plugins import _runtime_command
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+    base: dict[str, object] = {"kind": RuntimeKind.CONTAINER, "image": "registry.example/p"}
+
+    def refuses(extra: dict[str, object], pattern: str) -> None:
+        with pytest.raises(TaskContractError, match=pattern):
+            _runtime_command(
+                RuntimeDescriptor(**{**base, "image_digest": "a" * 64, **extra}),
+                role="predictor",
+                root=tmp_path,
+                entrypoint="spy.py:load_predictor",
+            )
+
+    refuses({"container_pids_limit": "-1"}, r"outside 16\.\.4096")
+    refuses({"container_memory": "999g"}, r"outside 64m\.\.16g")
+    refuses({"container_cpus": "0"}, r"outside 0\.1\.\.16")
