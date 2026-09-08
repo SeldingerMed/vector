@@ -427,7 +427,7 @@ from typing import Any
 class Predictor:
     def predict(self, item: dict[str, Any]) -> dict[str, Any]:
         del item
-        return {"blob": "x" * (9 * 1024 * 1024)}
+        return {"blob": "x" * ((8 * 1024 * 1024) + 1)}
 
 def load_predictor(*, root: Path, weights_path: Path) -> Predictor:
     del root, weights_path
@@ -443,7 +443,21 @@ def test_plugin_oversized_response_is_refused(tmp_path: Path) -> None:
     runtime = load_predictor_runtime(plugin, "big.py:load_predictor", "weights.json")
     assert isinstance(runtime, SubprocessPredictorRuntime)
     try:
-        with pytest.raises(TaskContractError, match="exceeded"):
+        with pytest.raises(TaskContractError, match="response exceeded"):
             runtime.predict({})
     finally:
         runtime.close()
+
+
+def test_readline_bounded_expires_while_dribbling() -> None:
+    import os as os_module
+
+    from or_audit.eval.plugins import _readline_bounded
+
+    reader, writer = os_module.pipe()
+    try:
+        os_module.write(writer, b"partial-bytes-no-newline")
+        with os_module.fdopen(reader, "r", encoding="utf-8") as stream:
+            assert _readline_bounded(stream, limit=1024, timeout_sec=0.05) is None
+    finally:
+        os_module.close(writer)
