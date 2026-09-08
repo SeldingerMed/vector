@@ -48,7 +48,12 @@ class TestExampleTaskLoads:
         assert task.projection is None
         # No training reward: divergence is unobservable in the pinned env
         # (see verifier.toml); export must refuse this task.
-        assert "safe success" in task.instruction.lower()
+        gate = task.verifier.gates[0]
+        assert gate.threshold == 0.3
+        assert gate.unit == "mm"
+        assert gate.threshold_basis is not None
+        assert gate.threshold_basis.value == 0.3
+        assert gate.threshold_basis.unit == "mm"
 
     @pytest.mark.parametrize(
         ("path", "interface"),
@@ -171,10 +176,24 @@ class TestContractRefusals:
             dest / "task.toml",
             '[[verifier.gates]]\nid = "wall_penetration"\n'
             'inputs = { unsafe = "info.unsafe", max_pen = "info.max_pen", '
-            'safety_max_pen = "safety_max_pen", diverged = "info.diverged" }\n'
+            'diverged = "info.diverged" }\n'
             "input_defaults = { diverged = false }\n"
-            'fail_when = "unsafe or max_pen > safety_max_pen or diverged"\n'
-            'maps_to = "unsafe"\nrealization = "scalar-dsl"\n',
+            'fail_when = "unsafe or max_pen > 0.3 or diverged"\n'
+            'maps_to = "unsafe"\nrealization = "scalar-dsl"\n'
+            "threshold = 0.3\n"
+            'unit = "mm"\n'
+            "# 0.3mm is an engineering limit, not a clinical injury threshold: the pinned\n"
+            "# env defaults safety_max_pen=0.3 (tree_nav.py TreeNavEnv) and computes\n"
+            "# max_pen as deepest penetration vs local radius in mm. See\n"
+            "# docs/MEASUREMENT_LUMEN.md. safety_max_pen stays in context for the\n"
+            "# verifier's derivation fallback; the enforced literal is 0.3 above.\n"
+            "[verifier.gates.threshold_basis]\n"
+            "value = 0.3\n"
+            'unit = "mm"\n'
+            'citation = "seldinger-lumen tree_nav.py TreeNavEnv default safety_max_pen=0.3mm'
+            ' vs local vessel radius at world pin 3c6bb39e; engineering limit"\n'
+            'owner = "SurgEval benchmark brief A1"\n'
+            'version = "1"\n',
             "",
         )
         with pytest.raises(TaskContractError, match="safety_critical"):
