@@ -11,12 +11,13 @@ marked enforced; everything else is an explicit gap with an owner.
   T0 protects against accidents and honest-agent label leakage, not malice.
 - **T1 — untrusted submission**: containerized plugin execution exists
   (`RuntimeDescriptor` kind `container` → digest-pinned image, `--network
-  none`, read-only package mount, tmpfs, memory/CPU/pids caps, separate
-  containers per runtime). Verified locally against a digest-pinned
-  registry image; image publication for CI/hosted fleets is still pending,
-  so CI exercises command construction only. Filesystem/network/resource
-  boundaries hold where the backend runs; hosted attestation (B5) still
-  pending for cross-lab trust.
+  none`, read-only package mount, non-root, dropped capabilities,
+  memory/CPU/pids caps from the digest-covered identity). CI builds the
+  sandbox image and runs the live backend test digest-pinned
+  (`.github/workflows/plugin-image.yml`); registry publication for hosted
+  fleets is still pending. Hosted attestation (B5) still pending for
+  cross-lab trust; the OSS verification contract is
+  `or_audit.eval.attestation`.
 
 1. **Oracle routing**: labels travel only to the verifier context, never in
    agent payloads (`runner.py`, `plugins.py`). A protocol-conformant agent

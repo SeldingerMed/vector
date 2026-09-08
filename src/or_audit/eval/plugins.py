@@ -88,6 +88,8 @@ def load_entrypoint(root: Path, entrypoint: str, *, label: str) -> Callable[...,
 #: the device-selection variables needed for GPU discovery are named.
 #: HOME is never inherited (it points at ~/.aws, ~/.huggingface, shell
 #: history): each runtime gets a fresh empty directory instead (B1 tier T0).
+#: DOCKER_HOST is not inherited either: it selects a Docker daemon, which is
+#: a host-tool concern handled per-command, never plugin input.
 _PLUGIN_ENV_ALLOW = frozenset(
     {
         "PATH",
@@ -103,16 +105,11 @@ _PLUGIN_ENV_ALLOW = frozenset(
         "CUDA_CACHE_PATH",
         "NVIDIA_VISIBLE_DEVICES",
         "NVIDIA_DRIVER_CAPABILITIES",
-        "DOCKER_HOST",
     }
 )
 
 #: In-container mount point for the evaluated package (read-only).
 _CONTAINER_PKG_DIR = "/pkg"
-#: Default resource envelope for containerized plugin children (B4).
-_CONTAINER_MEMORY = "2g"
-_CONTAINER_CPUS = "2.0"
-_CONTAINER_PIDS_LIMIT = "256"
 
 #: Uppercase twin for Windows, where environment keys are case-insensitive
 #: but stored mixed-case (`Path`, `SystemRoot`).
@@ -133,6 +130,19 @@ def _scrubbed_plugin_env(source: dict[str, str] | None = None) -> dict[str, str]
 def _private_plugin_home() -> Path:
     """Fresh empty HOME/TMP for one plugin child."""
     return Path(tempfile.mkdtemp(prefix="surgeval-plugin-"))
+
+
+def _host_tool_env(command: tuple[str, ...]) -> dict[str, str]:
+    """Host-tool variables for commands that are host tools, not plugins.
+
+    The ``docker`` CLI driving a container spawn runs on the host and needs
+    daemon selection; evaluated plugin code inside the container never sees
+    it. Nothing else is passed through.
+    """
+    if command[:1] == ("docker",):
+        host = os.environ.get("DOCKER_HOST")
+        return {"DOCKER_HOST": host} if host else {}
+    return {}
 
 
 #: Largest single plugin response accepted (8 MiB). Evidence transfer is one
@@ -184,6 +194,7 @@ class JsonSubprocessRuntime:
         env["TMPDIR"] = str(self._plugin_home)
         env["TEMP"] = str(self._plugin_home)
         env["TMP"] = str(self._plugin_home)
+        env.update(_host_tool_env(command))
         self._process = subprocess.Popen(
             command,
             cwd=cwd,
@@ -359,11 +370,11 @@ def _container_command(
         "--security-opt",
         "no-new-privileges",
         "--memory",
-        _CONTAINER_MEMORY,
+        descriptor.container_memory,
         "--cpus",
-        _CONTAINER_CPUS,
+        descriptor.container_cpus,
         "--pids-limit",
-        _CONTAINER_PIDS_LIMIT,
+        descriptor.container_pids_limit,
         "-v",
         f"{root.resolve()}:{_CONTAINER_PKG_DIR}:ro",
         f"{descriptor.image}@sha256:{digest}",
