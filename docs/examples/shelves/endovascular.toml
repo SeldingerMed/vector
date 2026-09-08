@@ -20,6 +20,15 @@
 # catalog row is `skip` and `ShelfSpec` refuses to name it. Closing the gap
 # means a differently-licensed MuJoCo endovascular world, not more engineering.
 #
+# Update 2026-09-08: the refusal below no longer reproduces and is superseded.
+# `surgeval worlds install lumen` plans a first-party verify-import (dry run
+# verified 2026-09-08); the catalog records license Apache-2.0, the
+# seldinger-lumen pin resolves to a real commit, and `worlds info lumen`
+# reports installable yes. Remaining first-party gaps are unmeasured
+# determinism and the not-yet-authored `steve-arch-variety-nav` task — not
+# install refusal. `import lumen` itself was not exercised here
+# (seldinger-lumen is not installed on this macOS host).
+# Historical (superseded 2026-09-08, retained so the correction is auditable):
 # One honest wrinkle: `surgeval worlds install lumen` refuses today, because the
 # catalog does not yet record an SPDX expression for `seldinger-lumen` and the
 # installer will not direct a fetch under terms nobody read. That is an unfilled
