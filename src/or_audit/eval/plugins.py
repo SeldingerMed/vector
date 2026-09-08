@@ -105,11 +105,20 @@ _PLUGIN_ENV_ALLOW = frozenset(
     }
 )
 
+#: Uppercase twin for Windows, where environment keys are case-insensitive
+#: but stored mixed-case (`Path`, `SystemRoot`).
+_PLUGIN_ENV_ALLOW_UPPER = frozenset(key.upper() for key in _PLUGIN_ENV_ALLOW)
+
 
 def _scrubbed_plugin_env(source: dict[str, str] | None = None) -> dict[str, str]:
     """Allowlisted environment for plugin children (B1 §enforced-2)."""
     inherited = os.environ if source is None else source
-    return {key: value for key, value in inherited.items() if key in _PLUGIN_ENV_ALLOW}
+    windows = os.name == "nt"
+    return {
+        key: value
+        for key, value in inherited.items()
+        if key in _PLUGIN_ENV_ALLOW or (windows and key.upper() in _PLUGIN_ENV_ALLOW_UPPER)
+    }
 
 
 def _private_plugin_home() -> Path:

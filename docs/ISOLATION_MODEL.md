@@ -18,12 +18,16 @@ marked enforced; everything else is an explicit gap with an owner.
 1. **Oracle routing**: labels travel only to the verifier context, never in
    agent payloads (`runner.py`, `plugins.py`). A protocol-conformant agent
    cannot receive labels through the harness API.
-2. **Process environment scrubbing** (`plugins._scrubbed_plugin_env`): plugin
-   children receive an enumerated allowlist (PATH, temp dirs except HOME,
-   locale, named GPU device-selection variables), never ambient secrets or
-   prefix-matched vendor families. HOME points at a fresh empty directory
-   removed on close, so `~/.aws` and `~/.huggingface` are unreachable.
-3. **Timeouts and cleanup**: bounded requests, kill on expiry, pipe cleanup.
+2. **Per-package working directory**: every plugin child starts in its own
+   package root (`load_*_runtime(..., cwd=root.resolve())`). This scopes
+   relative file access by convention, not by enforcement (see gaps).
+3. **Process environment scrubbing** (`plugins._scrubbed_plugin_env`): plugin
+   children receive an enumerated allowlist, never ambient secrets. This
+   stops accidental inheritance only: same-UID code can still read parent
+   state through OS channels (e.g. `/proc/$PPID/environ` on Linux), so it
+   is not a credential boundary against hostile code. HOME points at a
+   fresh empty directory removed on close.
+4. **Timeouts and cleanup**: bounded requests, kill on expiry, pipe cleanup.
 
 ## Explicitly not enforced locally (gaps, not bugs)
 

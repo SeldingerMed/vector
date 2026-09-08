@@ -314,3 +314,13 @@ def test_scrubbed_plugin_env_allowlists_runtime_vars() -> None:
         }
     )
     assert env == {"PATH": "/bin", "CUDA_VISIBLE_DEVICES": "0"}
+
+
+def test_scrubbed_env_matches_windows_casing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os as os_module
+
+    monkeypatch.setattr(os_module, "name", "nt")
+    env = _scrubbed_plugin_env({"Path": "C:\\bin", "HF_TOKEN": "x"})
+    assert env == {"Path": "C:\\bin"}
