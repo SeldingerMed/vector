@@ -15,15 +15,14 @@ marked enforced; everything else is an explicit gap with an owner.
   egress and resource policy, and hosted attestation. No local-subprocess
   configuration may claim T1.
 
-## What is enforced (T0)
-
 1. **Oracle routing**: labels travel only to the verifier context, never in
    agent payloads (`runner.py`, `plugins.py`). A protocol-conformant agent
    cannot receive labels through the harness API.
 2. **Process environment scrubbing** (`plugins._scrubbed_plugin_env`): plugin
-   children receive an allowlist (PATH, temp dirs, locale, GPU runtime
-   discovery), never ambient secrets. Endpoint credentials in the parent
-   process do not reach evaluated code.
+   children receive an enumerated allowlist (PATH, temp dirs except HOME,
+   locale, named GPU device-selection variables), never ambient secrets or
+   prefix-matched vendor families. HOME points at a fresh empty directory
+   removed on close, so `~/.aws` and `~/.huggingface` are unreachable.
 3. **Timeouts and cleanup**: bounded requests, kill on expiry, pipe cleanup.
 
 ## Explicitly not enforced locally (gaps, not bugs)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
@@ -267,7 +268,7 @@ from typing import Any
 class Predictor:
     def predict(self, item: dict[str, Any]) -> dict[str, Any]:
         del item
-        return {"env_keys": sorted(os.environ.keys())}
+        return {"env_keys": sorted(os.environ.keys()), "home": os.environ.get("HOME", "")}
 
 def load_predictor(*, root: Path, weights_path: Path) -> Predictor:
     del root, weights_path
@@ -286,14 +287,17 @@ def test_plugin_subprocess_sees_scrubbed_environment(
     (plugin / "weights.json").write_text("{}", encoding="utf-8")
     runtime = load_predictor_runtime(plugin, "spy.py:load_predictor", "weights.json")
     assert isinstance(runtime, SubprocessPredictorRuntime)
-    try:
-        result = runtime.predict({})
-    finally:
-        runtime.close()
+    result = runtime.predict({})
     keys = result.get("env_keys", [])
     assert "SURG_EVAL_TEST_SECRET" not in keys
     assert "HF_TOKEN" not in keys
     assert "PATH" in keys
+    home = result.get("home", "")
+    assert home not in (None, "", os.environ.get("HOME"))
+    assert os.path.isdir(home)
+    assert os.listdir(home) == []
+    runtime.close()
+    assert not os.path.exists(home)
 
 
 def test_scrubbed_plugin_env_allowlists_runtime_vars() -> None:
@@ -303,8 +307,10 @@ def test_scrubbed_plugin_env_allowlists_runtime_vars() -> None:
             "HF_TOKEN": "x",
             "AWS_SECRET_ACCESS_KEY": "y",
             "CUDA_VISIBLE_DEVICES": "0",
+            "CUDA_FOO": "secret-or-config",
+            "NVIDIA_FOO": "secret-or-config",
             "PYTHONPATH": "/tmp/evil",
             "HOME": "/root",
         }
     )
-    assert env == {"PATH": "/bin", "CUDA_VISIBLE_DEVICES": "0", "HOME": "/root"}
+    assert env == {"PATH": "/bin", "CUDA_VISIBLE_DEVICES": "0"}

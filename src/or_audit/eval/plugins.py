@@ -7,8 +7,10 @@ import importlib.util
 import json
 import os
 import selectors
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -80,19 +82,17 @@ def load_entrypoint(root: Path, entrypoint: str, *, label: str) -> Callable[...,
 
 #: Environment variables a plugin child is allowed to inherit. Everything
 #: else — ambient secrets, cloud credentials, model API keys, repo tokens —
-#: stays in the parent. GPU/runtime discovery needs PATH, temp dirs, locale,
-#: and the vendor device variables; nothing else a model needs to run is
-#: read from ambient environment (B1 tier T0).
+#: stays in the parent. The set is enumerated, never prefix-matched: vendor
+#: families like CUDA_/NVIDIA_ can carry secrets and config paths, so only
+#: the device-selection variables needed for GPU discovery are named.
+#: HOME is never inherited (it points at ~/.aws, ~/.huggingface, shell
+#: history): each runtime gets a fresh empty directory instead (B1 tier T0).
 _PLUGIN_ENV_ALLOW = frozenset(
     {
         "PATH",
         "PATHEXT",
         "SYSTEMROOT",
         "WINDIR",
-        "HOME",
-        "TMPDIR",
-        "TEMP",
-        "TMP",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
@@ -100,21 +100,21 @@ _PLUGIN_ENV_ALLOW = frozenset(
         "DYLD_LIBRARY_PATH",
         "CUDA_VISIBLE_DEVICES",
         "CUDA_CACHE_PATH",
+        "NVIDIA_VISIBLE_DEVICES",
+        "NVIDIA_DRIVER_CAPABILITIES",
     }
 )
-
-#: Prefixes inherited wholesale (device/toolchain discovery families).
-_PLUGIN_ENV_ALLOW_PREFIXES = ("CUDA_", "NVIDIA_", "NV_", "MPLCONFIG", "NUMBA_CACHE")
 
 
 def _scrubbed_plugin_env(source: dict[str, str] | None = None) -> dict[str, str]:
     """Allowlisted environment for plugin children (B1 §enforced-2)."""
     inherited = os.environ if source is None else source
-    return {
-        key: value
-        for key, value in inherited.items()
-        if key in _PLUGIN_ENV_ALLOW or key.startswith(_PLUGIN_ENV_ALLOW_PREFIXES)
-    }
+    return {key: value for key, value in inherited.items() if key in _PLUGIN_ENV_ALLOW}
+
+
+def _private_plugin_home() -> Path:
+    """Fresh empty HOME/TMP for one plugin child."""
+    return Path(tempfile.mkdtemp(prefix="surgeval-plugin-"))
 
 
 class JsonSubprocessRuntime:
@@ -123,6 +123,12 @@ class JsonSubprocessRuntime:
     def __init__(self, command: tuple[str, ...], *, cwd: Path, timeout_sec: float) -> None:
         self._timeout_sec = timeout_sec
         self._next_request = 0
+        self._plugin_home = _private_plugin_home()
+        env = _scrubbed_plugin_env()
+        env["HOME"] = str(self._plugin_home)
+        env["TMPDIR"] = str(self._plugin_home)
+        env["TEMP"] = str(self._plugin_home)
+        env["TMP"] = str(self._plugin_home)
         self._process = subprocess.Popen(
             command,
             cwd=cwd,
@@ -131,7 +137,7 @@ class JsonSubprocessRuntime:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
-            env=_scrubbed_plugin_env(),
+            env=env,
         )
 
     def request(self, op: str, payload: dict[str, Any]) -> Any:
@@ -185,20 +191,23 @@ class JsonSubprocessRuntime:
                 stream.close()
 
     def close(self) -> None:
-        if self._process.poll() is not None:
-            self._close_pipes()
-            return
         try:
-            self.request("close", {})
-        except TaskContractError:
-            self._process.kill()
-        finally:
+            if self._process.poll() is not None:
+                self._close_pipes()
+                return
             try:
-                self._process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
+                self.request("close", {})
+            except TaskContractError:
                 self._process.kill()
-                self._process.wait()
-            self._close_pipes()
+            finally:
+                try:
+                    self._process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
+                    self._process.wait()
+                self._close_pipes()
+        finally:
+            shutil.rmtree(self._plugin_home, ignore_errors=True)
 
 
 class SubprocessPolicyRuntime(JsonSubprocessRuntime):
