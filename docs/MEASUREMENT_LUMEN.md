@@ -25,10 +25,10 @@ Status: frozen 2026-09-08 against `seldinger-lumen` world pin
   no injury model, animal/human data, or clinician adjudication stands behind
   0.3mm. Any clinical reading of a pass is out of scope (see brief limits).
 - Coupling note: the harness enforces the literal 0.3 while the env compares
-  against its own `safety_max_pen` attribute (default 0.3, same pin). Both
-  numbers are pinned (task v1 + world pin); if either moves, the gate's
-  agreement checks refuse the drift.
-
+  against its own `safety_max_pen` attribute (default 0.3, same pin). The
+  loader enforces agreement between `threshold`, `threshold_basis.value`,
+  and the numeric literal(s) in `fail_when`; it does not assert the env's
+  runtime `safety_max_pen` equals 0.3 beyond what the world pin specifies.
 ## Episode mechanics affecting validity
 
 - Env default `max_steps=60` (L54) truncates before the harness limit of 90:
