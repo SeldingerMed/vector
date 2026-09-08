@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -134,6 +135,43 @@ def _private_plugin_home() -> Path:
     return Path(tempfile.mkdtemp(prefix="surgeval-plugin-"))
 
 
+#: Largest single plugin response accepted (8 MiB). Evidence transfer is one
+#: bounded JSON value per request, not a stream: an unbounded read lets a
+#: compromised or buggy child exhaust host memory before the timeout fires.
+_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def _readline_bounded(stream: Any, *, limit: int, timeout_sec: float) -> str | None:
+    """Read one line with both a byte cap and a deadline (B3).
+
+    A bare ``readline`` can block past the request timeout when a child
+    dribbles bytes without ever sending ``\\n``. This loop waits only until
+    the deadline, accumulates what is actually available, and stops at a
+    newline or past the cap. Returns ``None`` on deadline expiry; ``""`` on
+    EOF with nothing read.
+    """
+    deadline = time.monotonic() + timeout_sec
+    buf = bytearray()
+    raw = stream.buffer
+    while b"\n" not in buf and len(buf) <= limit + 1:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        selector = selectors.DefaultSelector()
+        selector.register(stream, selectors.EVENT_READ)
+        try:
+            ready = selector.select(remaining)
+        finally:
+            selector.close()
+        if not ready:
+            return None
+        chunk = raw.read1(limit + 2 - len(buf))
+        if not chunk:
+            break
+        buf.extend(chunk)
+    return bytes(buf).decode("utf-8", errors="replace")
+
+
 class JsonSubprocessRuntime:
     """Persistent JSON-lines child with bounded request latency."""
 
@@ -173,18 +211,24 @@ class JsonSubprocessRuntime:
         except BrokenPipeError as exc:
             raise TaskContractError(self._failure("plugin process exited before request")) from exc
 
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
-        ready = selector.select(self._timeout_sec)
-        selector.close()
-        if not ready:
+        line = _readline_bounded(
+            process.stdout, limit=_MAX_RESPONSE_BYTES, timeout_sec=self._timeout_sec
+        )
+        if line is None:
             process.kill()
             process.wait()
             self._close_pipes()
             raise TaskContractError(f"plugin request {op!r} exceeded {self._timeout_sec}s")
-        line = process.stdout.readline()
         if not line:
             raise TaskContractError(self._failure("plugin process returned no response"))
+        if not line.endswith("\n") or len(line) - 1 > _MAX_RESPONSE_BYTES:
+            process.kill()
+            process.wait()
+            self._close_pipes()
+            raise TaskContractError(
+                f"plugin {op!r} response exceeded {_MAX_RESPONSE_BYTES} bytes; "
+                "evidence transfer is one bounded value per request"
+            )
         try:
             response = json.loads(line)
         except json.JSONDecodeError as exc:
