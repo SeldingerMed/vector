@@ -37,6 +37,22 @@ EXAMPLE_JOB = ROOT / "docs" / "examples" / "jobs" / "lumen-nav-random"
 RANDOM_AGENT = ROOT / "docs" / "examples" / "agents" / "seldingermed-random"
 
 
+def _projectable_lumen(tmp_path: Path) -> Path:
+    """_pinned_lumen copy with a projection declared: run/export fixture.
+
+    The packaged task declares no projection (divergence unobservable), which
+    is correct for eval. Every `_write_job` job declares gated_reach_v0, so
+    run/export tests need the declaration on the copy to reach what they
+    actually exercise. The heterogeneous-stage test keeps plain copies: its
+    job declares no projection.
+    """
+    task_dir = _pinned_lumen(tmp_path)
+    (task_dir / "verifier.toml").write_text(
+        '[projection]\nid = "gated_reach_v0"\nversion = "0"\n', encoding="utf-8"
+    )
+    return task_dir
+
+
 def _write_job(
     tmp_path: Path,
     task_dir: Path,
@@ -115,7 +131,7 @@ def test_job_refuses_extra_keys(tmp_path: Path) -> None:
 
 
 def test_stage_contract_validates_sequence_and_independence(tmp_path: Path) -> None:
-    task_dir = _pinned_lumen(tmp_path)
+    task_dir = _projectable_lumen(tmp_path)
     stage = """
 [stage]
 name = "qualification"
@@ -151,7 +167,7 @@ prerequisites = ["integration-smoke", "pilot"]
 def test_stage_run_enforces_units_supported_axes_and_head_covers_outcome(
     tmp_path: Path,
 ) -> None:
-    task_dir = _pinned_lumen(tmp_path)
+    task_dir = _projectable_lumen(tmp_path)
     stage = """
 [stage]
 name = "qualification"
@@ -346,7 +362,7 @@ def test_job_missing_agent_path(tmp_path: Path) -> None:
 
 
 def test_job_projection_must_match_task_declaration(tmp_path: Path) -> None:
-    task_dir = _pinned_lumen(tmp_path)
+    task_dir = _projectable_lumen(tmp_path)
     verifier = task_dir / "verifier.toml"
     verifier.write_text(
         verifier.read_text(encoding="utf-8").replace('version = "0"', 'version = "2"'),
@@ -363,7 +379,7 @@ def test_job_projection_must_match_task_declaration(tmp_path: Path) -> None:
 
 
 def test_cartesian_random_gym_export_unsafe_is_zero(tmp_path: Path) -> None:
-    task_dir = _pinned_lumen(tmp_path)
+    task_dir = _projectable_lumen(tmp_path)
     job_dir = _write_job(tmp_path, task_dir, n=2)
     out = tmp_path / "jobs" / "lumen-nav-random"
     manifest = run_cartesian_job(resolve_job(job_dir), out=out, gym_factory=_fake)
@@ -378,6 +394,7 @@ def test_cartesian_random_gym_export_unsafe_is_zero(tmp_path: Path) -> None:
     assert safe1 is not None
     assert safe1.value is False
 
+    _attest_real_backend(pair / "result.json")
     rollouts = tmp_path / "rollouts.jsonl"
     n = export_rl(out, projection_id=ProjectionId.GATED_REACH_V0, out=rollouts)
     assert n == 2
@@ -405,7 +422,7 @@ def test_cartesian_random_gym_export_unsafe_is_zero(tmp_path: Path) -> None:
 
 
 def test_cartesian_replay_matches_manifest(tmp_path: Path) -> None:
-    task_dir = _pinned_lumen(tmp_path)
+    task_dir = _projectable_lumen(tmp_path)
     out = tmp_path / "jobs" / "lumen-nav-random"
     first = run_cartesian_job(
         resolve_job(_write_job(tmp_path, task_dir, n=2)),
@@ -422,7 +439,7 @@ def test_cartesian_replay_matches_manifest(tmp_path: Path) -> None:
 
 
 def test_pair_dir_collision_is_refused(tmp_path: Path) -> None:
-    task_dir = _pinned_lumen(tmp_path)
+    task_dir = _projectable_lumen(tmp_path)
     job_dir = _write_job(
         tmp_path,
         task_dir,
@@ -433,7 +450,7 @@ def test_pair_dir_collision_is_refused(tmp_path: Path) -> None:
 
 
 def test_cartesian_n_zero_is_refused(tmp_path: Path) -> None:
-    task_dir = _pinned_lumen(tmp_path)
+    task_dir = _projectable_lumen(tmp_path)
     job_dir = _write_job(tmp_path, task_dir, n=2)
     with pytest.raises(TaskContractError, match="n must be >= 1"):
         run_cartesian_job(
@@ -442,6 +459,29 @@ def test_cartesian_n_zero_is_refused(tmp_path: Path) -> None:
             n=0,
             gym_factory=_fake,
         )
+
+
+def _attest_real_backend(result_path: Path) -> None:
+    """Stamp backend=real onto a job result: an explicit test double.
+
+    Fakes never attest real backends themselves; this helper constructs the
+    attested fixture openly so export-path machinery tests exercise their
+    logic rather than the provenance refusal. Note the boundary this exposes:
+    job heads are unkeyed digests, so local result files are tamper-evident
+    against corruption but re-stampable by anyone holding them. Cross-lab
+    trust therefore cannot rest on local heads; it requires hosted
+    attestation (roadmap workstream B), not more local hashing.
+    """
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    we = payload["world_engine"]
+    payload["world_engine"] = {
+        "engine": we.get("engine", ""),
+        "backend": "real",
+        "backend_version": "",
+        "world_pin": we.get("world_pin", ""),
+    }
+    payload["head"] = compute_head(JobResult.model_validate(payload))
+    result_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
 
 def test_export_rl_refuses_video_gated_reach(tmp_path: Path) -> None:
@@ -456,17 +496,7 @@ def test_export_rl_refuses_video_gated_reach(tmp_path: Path) -> None:
     # A fresh video run has no runtime reporter, so its provenance is "unknown"
     # and export refuses it as unattested. Attest a real (physical) backend and
     # re-stamp the head so the projection-level refusal is what we exercise.
-    result_path = out / "result.json"
-    payload = json.loads(result_path.read_text(encoding="utf-8"))
-    we = payload["world_engine"]
-    payload["world_engine"] = {
-        "engine": we.get("engine", ""),
-        "backend": "real",
-        "backend_version": "",
-        "world_pin": we.get("world_pin", ""),
-    }
-    payload["head"] = compute_head(JobResult.model_validate(payload))
-    result_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    _attest_real_backend(out / "result.json")
     with pytest.raises(TaskContractError, match="diverged"):
         export_rl(
             out,
@@ -476,7 +506,7 @@ def test_export_rl_refuses_video_gated_reach(tmp_path: Path) -> None:
 
 
 def test_export_rl_refuses_stored_projection_disagreement(tmp_path: Path) -> None:
-    task_dir = _pinned_lumen(tmp_path)
+    task_dir = _projectable_lumen(tmp_path)
     out = tmp_path / "job"
     run_cartesian_job(
         resolve_job(_write_job(tmp_path, task_dir, n=2)),
@@ -484,6 +514,7 @@ def test_export_rl_refuses_stored_projection_disagreement(tmp_path: Path) -> Non
         gym_factory=_fake,
     )
     pair = out / read_manifest(out).pairs[0].dir
+    _attest_real_backend(pair / "result.json")
     result_path = pair / "result.json"
     payload = json.loads(result_path.read_text(encoding="utf-8"))
     payload["trials"][1]["projection"] = 1.0
@@ -502,7 +533,7 @@ def test_export_rl_missing_job(tmp_path: Path) -> None:
 
 
 def test_trajectory_mismatch_fails_replay(tmp_path: Path) -> None:
-    task_dir = _pinned_lumen(tmp_path)
+    task_dir = _projectable_lumen(tmp_path)
     out = tmp_path / "jobs" / "lumen-nav-random"
     run_cartesian_job(
         resolve_job(_write_job(tmp_path, task_dir, n=2)),
@@ -543,7 +574,7 @@ def test_cli_run_job_and_export(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr("or_audit.eval.sim.gym_bridge.make_gym", _fake)
-    task_dir = _pinned_lumen(tmp_path)
+    task_dir = _projectable_lumen(tmp_path)
     job_dir = _write_job(tmp_path, task_dir, n=2)
     out = tmp_path / "cli-job"
     assert main(["run", "-c", str(job_dir), "--out", str(out)]) == 0
@@ -655,7 +686,7 @@ def test_cli_export_rl_refuses_undeclared_projection(tmp_path: Path) -> None:
 
 def test_cli_n_overrides_job_n(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("or_audit.eval.sim.gym_bridge.make_gym", _fake)
-    task_dir = _pinned_lumen(tmp_path)
+    task_dir = _projectable_lumen(tmp_path)
     job_dir = _write_job(tmp_path, task_dir, n=30)
     out = tmp_path / "cli-n"
     assert main(["run", "-c", str(job_dir), "-n", "2", "--out", str(out)]) == 0

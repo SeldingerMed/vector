@@ -45,8 +45,9 @@ class TestExampleTaskLoads:
         assert task.port is None
         assert task.interface.id == "gym-policy"
         assert task.verifier.headline == "safe_success"
-        assert task.projection is not None
-        assert str(task.projection.id) == "gated_reach_v0"
+        assert task.projection is None
+        # No training reward: divergence is unobservable in the pinned env
+        # (see verifier.toml); export must refuse this task.
         assert "safe success" in task.instruction.lower()
 
     @pytest.mark.parametrize(
@@ -410,6 +411,15 @@ class TestTrialVector:
         with pytest.raises(ScoreContractError, match="no truth value"):
             bool(vector)
 
+    def test_missing_safety_signals_abstain_instead_of_defaulting(self):
+        vector = self._vector({})
+        gate = next(g for g in vector.gates if g.id == "wall_penetration")
+        assert gate.status is GateStatus.NOT_ASSESSABLE
+        for metric_id in ("raw_success", "safe_success", "diverged", "max_pen"):
+            metric = vector.metric(metric_id)
+            assert metric is not None
+            assert metric.value is None
+
     def test_gated_reach_is_zero_when_the_wall_is_injured(self):
         vector = self._vector(
             {"success": True, "safe_success": False, "unsafe": True, "max_pen": 0.9}
@@ -419,7 +429,13 @@ class TestTrialVector:
 
     def test_gated_reach_is_one_only_on_clean_raw_success(self):
         vector = self._vector(
-            {"success": True, "safe_success": True, "unsafe": False, "max_pen": 0.01}
+            {
+                "success": True,
+                "safe_success": True,
+                "unsafe": False,
+                "max_pen": 0.01,
+                "diverged": False,
+            }
         )
         spec = ProjectionSpec(id="gated_reach_v0", version="0")
         assert project(vector, spec) == 1.0
@@ -448,13 +464,13 @@ class TestCli:
     def test_tasks_validate_example(self, capsys):
         assert main(["tasks", "validate", str(EXAMPLE_TASK)]) == 0
         out = capsys.readouterr().out
-        assert "valid: lumen-nav-safe@0" in out
+        assert "valid: lumen-nav-safe@1" in out
         assert " runnable" in out
 
     def test_tasks_describe_example(self, capsys):
         assert main(["tasks", "describe", str(EXAMPLE_TASK)]) == 0
         out = capsys.readouterr().out
-        assert "Task lumen-nav-safe@0" in out
+        assert "Task lumen-nav-safe@1" in out
         assert "Remain inside the lumen" in out
 
     def test_datasets_validate_example(self, capsys):

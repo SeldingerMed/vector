@@ -1,6 +1,10 @@
-# RL projection only. The leaderboard reads the vector, not this file.
+# No RL projection declared (withdrawn 2026-09-08, task_version 1).
+#
+# gated_reach_v0 requires an assessed `diverged` guard, but the pinned Lumen
+# env never reports a divergence channel: deriving `diverged=False` from
+# finite readings elsewhere would fabricate it, and honest None makes the
+# projection refuse every run. The gate DSL keeps its declared absent-default
+# for evaluation posture, but no training reward is offered from this task
+# until divergence is observable (world revision reporting it, or a
+# harness-level divergence detector). Reintroduce with a task_version bump.
 # See docs/BUILD.md §4 and §6 P3.
-
-[projection]
-id = "gated_reach_v0"
-version = "0"
