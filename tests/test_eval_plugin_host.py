@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,13 @@ from or_audit.eval.plugin_host import (
     _jsonable,
     main,
 )
+from or_audit.eval.plugins import (
+    SubprocessPredictorRuntime,
+    _scrubbed_plugin_env,
+    load_entrypoint,
+    load_predictor_runtime,
+)
 from or_audit.eval.plugins import _jsonable as plugin_jsonable
-from or_audit.eval.plugins import load_entrypoint
 
 _POLICY = """
 from pathlib import Path
@@ -252,3 +258,69 @@ def test_plugin_loader_rejects_bad_entrypoints(tmp_path: Path) -> None:
         load_entrypoint(tmp_path, "mod.py", label="policy")
     with pytest.raises(TaskContractError, match="not callable"):
         load_entrypoint(tmp_path, "mod.py:value", label="policy")
+
+
+_ENV_SPY = """
+import os
+from pathlib import Path
+from typing import Any
+
+class Predictor:
+    def predict(self, item: dict[str, Any]) -> dict[str, Any]:
+        del item
+        return {"env_keys": sorted(os.environ.keys()), "home": os.environ.get("HOME", "")}
+
+def load_predictor(*, root: Path, weights_path: Path) -> Predictor:
+    del root, weights_path
+    return Predictor()
+"""
+
+
+def test_plugin_subprocess_sees_scrubbed_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SURG_EVAL_TEST_SECRET", "must-not-leak")
+    monkeypatch.setenv("HF_TOKEN", "must-not-leak")
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "spy.py").write_text(_ENV_SPY, encoding="utf-8")
+    (plugin / "weights.json").write_text("{}", encoding="utf-8")
+    runtime = load_predictor_runtime(plugin, "spy.py:load_predictor", "weights.json")
+    assert isinstance(runtime, SubprocessPredictorRuntime)
+    result = runtime.predict({})
+    keys = result.get("env_keys", [])
+    assert "SURG_EVAL_TEST_SECRET" not in keys
+    assert "HF_TOKEN" not in keys
+    assert "PATH" in keys
+    home = result.get("home", "")
+    assert home not in (None, "", os.environ.get("HOME"))
+    assert os.path.isdir(home)
+    assert os.listdir(home) == []
+    runtime.close()
+    assert not os.path.exists(home)
+
+
+def test_scrubbed_plugin_env_allowlists_runtime_vars() -> None:
+    env = _scrubbed_plugin_env(
+        {
+            "PATH": "/bin",
+            "HF_TOKEN": "x",
+            "AWS_SECRET_ACCESS_KEY": "y",
+            "CUDA_VISIBLE_DEVICES": "0",
+            "CUDA_FOO": "secret-or-config",
+            "NVIDIA_FOO": "secret-or-config",
+            "PYTHONPATH": "/tmp/evil",
+            "HOME": "/root",
+        }
+    )
+    assert env == {"PATH": "/bin", "CUDA_VISIBLE_DEVICES": "0"}
+
+
+def test_scrubbed_env_matches_windows_casing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os as os_module
+
+    monkeypatch.setattr(os_module, "name", "nt")
+    env = _scrubbed_plugin_env({"Path": "C:\\bin", "HF_TOKEN": "x"})
+    assert env == {"Path": "C:\\bin"}
