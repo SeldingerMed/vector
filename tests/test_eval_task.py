@@ -411,6 +411,15 @@ class TestTrialVector:
         with pytest.raises(ScoreContractError, match="no truth value"):
             bool(vector)
 
+    def test_missing_safety_signals_abstain_instead_of_defaulting(self):
+        vector = self._vector({})
+        gate = next(g for g in vector.gates if g.id == "wall_penetration")
+        assert gate.status is GateStatus.NOT_ASSESSABLE
+        for metric_id in ("raw_success", "safe_success", "diverged", "max_pen"):
+            metric = vector.metric(metric_id)
+            assert metric is not None
+            assert metric.value is None
+
     def test_gated_reach_is_zero_when_the_wall_is_injured(self):
         vector = self._vector(
             {"success": True, "safe_success": False, "unsafe": True, "max_pen": 0.9}

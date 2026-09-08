@@ -104,6 +104,21 @@ def _copy_task(tmp_path: Path, name: str, source: Path = LUMEN_TASK) -> Path:
     return target
 
 
+def _projectable_copy(tmp_path: Path, name: str) -> Path:
+    """LUMEN_TASK copy with a projection declared: an export fixture.
+
+    The packaged task declares no projection (divergence is unobservable in
+    the pinned env), which is correct for eval. Declaring one on the copy
+    exercises the export machinery without pretending the shipped package
+    offers a training reward.
+    """
+    target = _copy_task(tmp_path, name)
+    (target / "verifier.toml").write_text(
+        '[projection]\nid = "gated_reach_v0"\nversion = "0"\n', encoding="utf-8"
+    )
+    return target
+
+
 def _prediction_task(tmp_path: Path) -> Path:
     """video-nextstep with a projection declared: a single-turn export fixture.
 
@@ -130,9 +145,10 @@ def _strip_gates(text: str) -> str:
 
 
 def test_export_writes_the_environment_with_its_projection_identity(tmp_path: Path):
+    task_dir = _projectable_copy(tmp_path, "projectable")
     out = tmp_path / "env"
-    export = export_verifiers_environment(LUMEN_TASK, out=out, projection_id=PROJECTION)
-    task = load_task(LUMEN_TASK)
+    export = export_verifiers_environment(task_dir, out=out, projection_id=PROJECTION)
+    task = load_task(task_dir)
     assert task.projection is not None
 
     assert export.projection_identity == task.projection.identity
@@ -162,17 +178,19 @@ def test_export_writes_the_environment_with_its_projection_identity(tmp_path: Pa
 
 
 def test_two_exports_are_byte_identical(tmp_path: Path):
+    task_dir = _projectable_copy(tmp_path, "projectable")
     first = tmp_path / "a"
     second = tmp_path / "b"
-    export = export_verifiers_environment(LUMEN_TASK, out=first, projection_id=PROJECTION)
-    export_verifiers_environment(LUMEN_TASK, out=second, projection_id=PROJECTION)
+    export = export_verifiers_environment(task_dir, out=first, projection_id=PROJECTION)
+    export_verifiers_environment(task_dir, out=second, projection_id=PROJECTION)
     for relative in export.paths:
         assert (first / relative).read_bytes() == (second / relative).read_bytes(), relative
 
 
 def test_generated_environment_rewards_the_gated_projection(tmp_path: Path):
+    task_dir = _projectable_copy(tmp_path, "projectable")
     out = tmp_path / "env"
-    export = export_verifiers_environment(LUMEN_TASK, out=out, projection_id=PROJECTION)
+    export = export_verifiers_environment(task_dir, out=out, projection_id=PROJECTION)
     module = _load_generated(out, "generated_lumen_safe")
     world = StubLumenWorld(max_pen=0.1)
     env = module.load_environment(gym_factory=lambda task: world, n=2)
@@ -181,7 +199,7 @@ def test_generated_environment_rewards_the_gated_projection(tmp_path: Path):
     finally:
         env.close()
 
-    task = load_task(LUMEN_TASK)
+    task = load_task(task_dir)
     assert task.projection is not None
     assert len(rollouts) == 2
     for rollout in rollouts:
@@ -204,8 +222,9 @@ def test_generated_environment_rewards_the_gated_projection(tmp_path: Path):
 
 
 def test_generated_environment_zeroes_a_failed_hard_gate(tmp_path: Path):
+    task_dir = _projectable_copy(tmp_path, "projectable")
     out = tmp_path / "env"
-    export_verifiers_environment(LUMEN_TASK, out=out, projection_id=PROJECTION)
+    export_verifiers_environment(task_dir, out=out, projection_id=PROJECTION)
     module = _load_generated(out, "generated_lumen_unsafe")
     env = module.load_environment(gym_factory=lambda task: StubLumenWorld(max_pen=0.9))
     try:
@@ -213,7 +232,7 @@ def test_generated_environment_zeroes_a_failed_hard_gate(tmp_path: Path):
     finally:
         env.close()
 
-    task = load_task(LUMEN_TASK)
+    task = load_task(task_dir)
     assert task.projection is not None
     assert [gate.status for gate in rollout.vector.gates] == ["fail"]
     # raw_success is True in the stub's info; the gate is what zeroes the reward.
@@ -271,8 +290,9 @@ def test_prediction_mode_task_exports_and_scores_its_own_oracle(tmp_path: Path):
 
 
 def test_generated_environment_rewards_carry_provenance_into_rubric_state(tmp_path: Path):
+    task_dir = _projectable_copy(tmp_path, "projectable")
     out = tmp_path / "env"
-    export_verifiers_environment(LUMEN_TASK, out=out, projection_id=PROJECTION)
+    export_verifiers_environment(task_dir, out=out, projection_id=PROJECTION)
     module = _load_generated(out, "generated_lumen_state")
     env = module.load_environment(gym_factory=lambda task: StubLumenWorld(max_pen=0.1))
     try:
@@ -297,8 +317,9 @@ def test_generated_rubric_refuses_a_forged_reward_record(tmp_path: Path):
     The probe this defends against: a dict with an arbitrary float and two
     non-empty strings used to be returned verbatim as the training reward.
     """
+    task_dir = _projectable_copy(tmp_path, "projectable")
     out = tmp_path / "env"
-    export_verifiers_environment(LUMEN_TASK, out=out, projection_id=PROJECTION)
+    export_verifiers_environment(task_dir, out=out, projection_id=PROJECTION)
     module = _load_generated(out, "generated_lumen_forged")
     env = module.load_environment(gym_factory=lambda task: StubLumenWorld(max_pen=0.1))
     try:
@@ -343,8 +364,9 @@ def test_generated_rubric_refuses_a_forged_reward_record(tmp_path: Path):
 
 
 def test_generated_environment_refuses_an_edited_task_package(tmp_path: Path):
+    task_dir = _projectable_copy(tmp_path, "projectable")
     out = tmp_path / "env"
-    export_verifiers_environment(LUMEN_TASK, out=out, projection_id=PROJECTION)
+    export_verifiers_environment(task_dir, out=out, projection_id=PROJECTION)
     verifier = out / TASK_PACKAGE_DIR / "verifier.py"
     verifier.write_text(
         verifier.read_text(encoding="utf-8") + "\n# locally sweetened\n", encoding="utf-8"
@@ -394,13 +416,14 @@ def test_export_refuses_a_task_with_no_projection(tmp_path: Path):
 
 
 def test_export_refuses_a_mismatched_projection_id(tmp_path: Path):
+    task_dir = _projectable_copy(tmp_path, "projectable")
     with pytest.raises(TaskContractError) as excinfo:
-        build_export(LUMEN_TASK, projection_id="ungated_reach_v9")
+        build_export(task_dir, projection_id="ungated_reach_v9")
     assert "declares 'gated_reach_v0', not 'ungated_reach_v9'" in str(excinfo.value)
 
 
 def test_export_refuses_a_synthetic_stub_task(tmp_path: Path):
-    task_dir = _copy_task(tmp_path, "stubbed")
+    task_dir = _projectable_copy(tmp_path, "stubbed")
     toml_path = task_dir / "task.toml"
     toml_path.write_text(
         toml_path.read_text(encoding="utf-8").replace(
@@ -418,7 +441,7 @@ def test_export_refuses_a_synthetic_stub_task(tmp_path: Path):
 
 
 def test_export_refuses_a_metrics_only_task(tmp_path: Path):
-    task_dir = _copy_task(tmp_path, "metrics-only")
+    task_dir = _projectable_copy(tmp_path, "metrics-only")
     toml_path = task_dir / "task.toml"
     text = _strip_gates(toml_path.read_text(encoding="utf-8"))
     text = text.replace("safety_critical = true", "safety_critical = false")
@@ -450,7 +473,7 @@ def test_export_refuses_safety_critical_without_hard_gates():
 
 def test_export_refuses_a_projection_that_does_not_zero_a_gate_failure(tmp_path: Path):
     """A training reward must be 0 on an unsafe episode, not an exception."""
-    task_dir = _copy_task(tmp_path, "refuse-policy")
+    task_dir = _projectable_copy(tmp_path, "refuse-policy")
     verifier_toml = task_dir / "verifier.toml"
     text = verifier_toml.read_text(encoding="utf-8")
     # The example relies on the ZERO default; declare the refusing policy explicitly.
@@ -476,15 +499,16 @@ def _parse(argv: list[str]) -> argparse.Namespace:
 
 
 def test_cli_exports_and_warns_that_the_scalar_is_a_projection(tmp_path, capsys):
+    task_dir = _projectable_copy(tmp_path, "projectable")
     out = tmp_path / "env"
     args = _parse(
-        ["export-verifiers", str(LUMEN_TASK), "--projection", PROJECTION, "--out", str(out)]
+        ["export-verifiers", str(task_dir), "--projection", PROJECTION, "--out", str(out)]
     )
     assert args.func(args) == 0
     printed = capsys.readouterr().out
     assert "surgeval-env-lumen-nav-safe" in printed
     assert str(out / "load_environment.py") in printed
-    projection = load_task(LUMEN_TASK).projection
+    projection = load_task(task_dir).projection
     assert projection is not None
     assert f"projection {projection.identity}" in printed
     assert "WARNING: the exported scalar is a projection of a safety vector, not a score." in (
@@ -494,10 +518,11 @@ def test_cli_exports_and_warns_that_the_scalar_is_a_projection(tmp_path, capsys)
 
 
 def test_cli_refuses_on_stderr(tmp_path, capsys):
+    task_dir = _projectable_copy(tmp_path, "projectable")
     args = _parse(
         [
             "export-verifiers",
-            str(LUMEN_TASK),
+            str(task_dir),
             "--projection",
             "ungated_reach_v9",
             "--out",
