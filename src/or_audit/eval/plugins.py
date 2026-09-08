@@ -263,10 +263,10 @@ def _container_command(
 
     Separate containers per runtime object preserve the agent/verifier
     process boundary as filesystem/network boundaries (B2). The image
-    reference is always digest-pinned: an undigested image is refused by
-    the ``RuntimeDescriptor`` validator before this runs. A digest with or
-    without the ``sha256:`` prefix normalizes to one reference; an image
-    that already contains ``@`` is refused rather than guessed at.
+    reference is always digest-pinned and never pulled at run time: the
+    image must be pre-provisioned, so a task package cannot turn
+    evaluation into host-driven registry egress. Containers run as
+    nobody with all capabilities dropped and no new privileges.
     """
     if shutil.which("docker") is None:
         raise TaskContractError(
@@ -297,6 +297,10 @@ def _container_command(
         "run",
         "--rm",
         "-i",
+        # Never pull: the image must be pre-provisioned, so a task package
+        # cannot turn evaluation into host-driven registry egress.
+        "--pull",
+        "never",
         "--network",
         "none",
         "--workdir",
@@ -304,6 +308,12 @@ def _container_command(
         "--read-only",
         "--tmpfs",
         "/tmp",
+        "--user",
+        "65534",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
         "--memory",
         _CONTAINER_MEMORY,
         "--cpus",

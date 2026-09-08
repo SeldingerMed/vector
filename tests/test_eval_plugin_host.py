@@ -332,7 +332,12 @@ def _container_descriptor(image: str, digest: str) -> Any:
     return RuntimeDescriptor(kind=RuntimeKind.CONTAINER, image=image, image_digest=digest)
 
 
-def test_container_command_pins_isolates_and_caps(tmp_path: Path) -> None:
+def test_container_command_pins_isolates_and_caps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
     from or_audit.eval.plugins import _runtime_command
 
     command, _ = _runtime_command(
@@ -341,7 +346,9 @@ def test_container_command_pins_isolates_and_caps(tmp_path: Path) -> None:
         root=tmp_path,
         entrypoint="spy.py:load_predictor",
     )
-    assert command[:6] == ("docker", "run", "--rm", "-i", "--network", "none")
+    assert command[:6] == ("docker", "run", "--rm", "-i", "--pull", "never")
+    assert "--network" in command
+    assert "none" in command
     assert "--read-only" in command
     assert "--tmpfs" in command
     joined = " ".join(command)
@@ -351,9 +358,20 @@ def test_container_command_pins_isolates_and_caps(tmp_path: Path) -> None:
     for flag in ("--memory", "--cpus", "--pids-limit"):
         assert flag in command
     assert "--workdir" in command
+    assert "--user" in command
+    assert "65534" in command
+    assert "--cap-drop" in command
+    assert "ALL" in command
+    assert "--security-opt" in command
+    assert "no-new-privileges" in command
 
 
-def test_container_command_normalizes_and_refuses_refs(tmp_path: Path) -> None:
+def test_container_command_normalizes_and_refuses_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
     from or_audit.errors import TaskContractError
     from or_audit.eval.plugins import _runtime_command
 

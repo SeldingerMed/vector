@@ -29,21 +29,24 @@ marked enforced; everything else is an explicit gap with an owner.
    stops accidental inheritance only: same-UID code can still read parent
    state through OS channels (e.g. `/proc/$PPID/environ` on Linux), so it
    is not a credential boundary against hostile code. HOME points at a
-   fresh empty directory removed on close.
-4. **Timeouts and cleanup**: bounded requests, kill on expiry, pipe cleanup.
+## Explicitly not enforced on the local path (gaps, not bugs)
 
-## Explicitly not enforced locally (gaps, not bugs)
+These hold for `local` subprocess execution (T0). The `container` backend
+resolves the filesystem, network, and resource rows where it runs; the
+forgery and task-author rows hold everywhere until B5/governance land.
 
-- **Filesystem**: agent and verifier share a UID; a malicious agent can read
-  sibling task files including labels. Mitigation today: T0 only; T1 needs
-  separate mounts (B2).
-- **Network**: no egress policy on local subprocesses. Do not evaluate
-  untrusted code that must not reach the network (B4).
-- **Resources**: no CPU/RAM/GPU limits on plugin children (B4/H).
+- **Filesystem**: a local agent shares a UID with the verifier and can read
+  sibling task files including labels. Mitigation today: T0 only, or the
+  container backend (separate mount namespace, read-only package).
+- **Network**: local subprocesses have no egress policy. The container
+  backend runs `--network none` and never pulls at run time. Do not
+  evaluate untrusted code that must not reach the network outside it.
+- **Resources**: no CPU/RAM/GPU limits on local plugin children. The
+  container backend applies memory/CPU/pids caps.
 - **Result forgery**: job heads are unkeyed digests; local files are
-  re-stampable. Cross-lab trust needs hosted attestation (B5), not hashing.
+  re-stampable by anyone holding them. Holds on every backend until B5
+  hosted attestation lands.
 - **Task-author trust**: sandboxing an agent never validates a dishonest task
-  verifier. Benchmark tasks need review/governance, not just isolation.
 
 ## Acceptance for B (reminder)
 
