@@ -517,3 +517,29 @@ def test_entrypoint_and_weights_confined_to_package(tmp_path: Path) -> None:
     with pytest.raises(TaskContractError, match="missing"):
         package_file(pkg, "absent.json", label="weights")
     assert package_file(pkg, "ok.py", label="policy module").name == "ok.py"
+
+
+def test_container_absurd_limits_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    from or_audit.errors import TaskContractError
+    from or_audit.eval.contracts import RuntimeDescriptor, RuntimeKind
+    from or_audit.eval.plugins import _runtime_command
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+    base: dict[str, object] = {"kind": RuntimeKind.CONTAINER, "image": "registry.example/p"}
+
+    def refuses(extra: dict[str, object], pattern: str) -> None:
+        with pytest.raises(TaskContractError, match=pattern):
+            _runtime_command(
+                RuntimeDescriptor(**{**base, "image_digest": "a" * 64, **extra}),
+                role="predictor",
+                root=tmp_path,
+                entrypoint="spy.py:load_predictor",
+            )
+
+    refuses({"container_pids_limit": "-1"}, r"outside 16\.\.4096")
+    refuses({"container_memory": "999g"}, r"outside 64m\.\.16g")
+    refuses({"container_cpus": "0"}, r"outside 0\.1\.\.16")

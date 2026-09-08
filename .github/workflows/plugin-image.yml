@@ -47,17 +47,14 @@ jobs:
           enable-cache: true
       - name: Install
         run: uv sync --all-extras
-      - name: Start job-local registry
-        run: docker run -d -p 5000:5000 --name ci-registry registry:2
-      - name: Build and push sandbox image
-        run: |
-          docker build -f docker/plugin.Dockerfile -t localhost:5000/surgeval-plugin:ci .
-          docker push localhost:5000/surgeval-plugin:ci
       - name: Resolve digest-pinned reference
         id: ref
         run: |
-          DIGEST=$(docker images --digests --format '{{.Repository}}@{{.Digest}}' | grep '^localhost:5000/surgeval-plugin@' | head -n 1)
-          test -n "$DIGEST"
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' localhost:5000/surgeval-plugin:ci)
+          case "$DIGEST" in
+            localhost:5000/surgeval-plugin@sha256:*) ;;
+            *) echo "Unexpected RepoDigest: $DIGEST" >&2; exit 1 ;;
+          esac
           echo "value=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Sandbox image: $DIGEST" >> "$GITHUB_STEP_SUMMARY"
       - name: Live container backend test
