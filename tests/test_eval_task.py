@@ -45,8 +45,9 @@ class TestExampleTaskLoads:
         assert task.port is None
         assert task.interface.id == "gym-policy"
         assert task.verifier.headline == "safe_success"
-        assert task.projection is not None
-        assert str(task.projection.id) == "gated_reach_v0"
+        assert task.projection is None
+        # No training reward: divergence is unobservable in the pinned env
+        # (see verifier.toml); export must refuse this task.
         assert "safe success" in task.instruction.lower()
 
     @pytest.mark.parametrize(
@@ -419,7 +420,13 @@ class TestTrialVector:
 
     def test_gated_reach_is_one_only_on_clean_raw_success(self):
         vector = self._vector(
-            {"success": True, "safe_success": True, "unsafe": False, "max_pen": 0.01}
+            {
+                "success": True,
+                "safe_success": True,
+                "unsafe": False,
+                "max_pen": 0.01,
+                "diverged": False,
+            }
         )
         spec = ProjectionSpec(id="gated_reach_v0", version="0")
         assert project(vector, spec) == 1.0

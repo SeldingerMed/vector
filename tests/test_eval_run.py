@@ -21,7 +21,7 @@ from or_audit.eval.gym_world import (
 from or_audit.eval.job import TrialRecord, assemble_job_result, read_job_result
 from or_audit.eval.loader import load_agent, load_task
 from or_audit.eval.runner import builtin_random_agent, replay_job, run_job
-from or_audit.eval.sim.base import BACKEND_REAL
+from or_audit.eval.sim.base import BACKEND_SYNTHETIC_STUB
 from or_audit.eval.vector import TrialVector
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,11 +45,12 @@ class FakeLumenEnv:
     action_space = _Box()
 
     def engine_provenance(self) -> dict[str, str]:
-        # This fixture stands in for a real Lumen gym backend, so it attests
-        # BACKEND_REAL with the full reporter contract.
+        # A deterministic stand-in must never attest a real backend: it
+        # reports synthetic-stub with the full reporter contract, so
+        # conformance Tier-1 and export gates treat it as unattested.
         return {
             "engine": "lumen-nav-safe",
-            "backend": BACKEND_REAL,
+            "backend": BACKEND_SYNTHETIC_STUB,
             "backend_version": "",
             "world_pin": "test-lumen-pin",
         }
@@ -298,7 +299,10 @@ def test_random_gym_job_emits_raw_and_safe(tmp_path: Path) -> None:
     assert written.head == result.head
     assert (out / "result.json").is_file()
     assert (out / "trial-lumen-nav-safe-0" / "trajectory.json").is_file()
-    assert (out / "trial-lumen-nav-safe-0" / "projection.json").is_file()
+    # No projection declared (divergence unobservable): no training reward is
+    # offered, so no projection artifact is written.
+    assert result.trials[0].projection is None
+    assert not (out / "trial-lumen-nav-safe-0" / "projection.json").is_file()
 
 
 def test_gym_replay_matches_head(tmp_path: Path) -> None:
@@ -340,8 +344,8 @@ def test_world_engine_provenance_typed_and_head_covered(tmp_path: Path) -> None:
     written = read_job_result(out)
     # provenance is stored as the typed model, not a bare dict
     assert isinstance(written.world_engine, WorldEngineProvenance)
-    # the FakeLumenEnv attests BACKEND_REAL (not synthetic, not unknown)
-    assert written.world_engine.backend == BACKEND_REAL
+    # the FakeLumenEnv attests BACKEND_SYNTHETIC_STUB (never real, never unknown)
+    assert written.world_engine.backend == BACKEND_SYNTHETIC_STUB
     assert written.world_engine.engine == "lumen-nav-safe"
     # provenance is bound into the head, so it survives replay verification
     assert verify_head(written)

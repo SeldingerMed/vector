@@ -62,8 +62,17 @@ cross-world ranking without a validated `EquivalenceArtifact` — the existing
   production path (registered `LUMEN_GYM` engine → `make_gym_bridge`):
   `python -m pytest tests/test_lumen_real_env.py` — 1-episode random run
   reports observed `backend=real` + world pin, an assessed `wall_penetration`
-  gate, and a replay-matched head. stEVE/SOFA remains unbuildable on this
-  host (x86_64 Linux required).
+  gate, and a replay-matched head. Reference artifact head
+  `0283e57de4f6e28b9e5be9f3073f45f5409facff0a1a5be877c58978ac18c197`
+  (`vector run -t docs/examples/tasks/lumen-nav-safe
+  -a docs/examples/agents/seldingermed-random -n 1`): gate passed,
+  `diverged` metric unassessable (env reports no divergence channel),
+  projection identity none. stEVE/SOFA remains unbuildable on this host
+  (x86_64 Linux required).
+  Training-reward consequence: the `gated_reach_v0` projection is withdrawn
+  from this task until divergence is observable — offering it would require
+  inventing `diverged=False`. Export must refuse; G for Lumen stays blocked
+  on that signal, not on plumbing.
 
 ## Acceptance for A (reminder, not claimed here)
 
