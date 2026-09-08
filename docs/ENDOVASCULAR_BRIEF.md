@@ -47,18 +47,23 @@ cross-world ranking without a validated `EquivalenceArtifact` — the existing
 
 ## Compute envelope
 
-- Lumen rollouts: `seldinger-lumen` at the pin plus the pinned solver stack
-  (warp-lang 1.16.0, newton @6dfe730). Core import path is numpy-only.
+- Lumen rollouts: `seldinger-lumen` at the pin plus its pinned solver stack
+  (warp-lang 1.15.0, newton @6dfe730 — read from the pinned commit's own
+  pyproject, not live HEAD). Core import path is numpy-only.
 - Reference/dev host (this Mac, arm64, CPU, no SOFA) — tested 2026-09-08 in a
   throwaway venv, layer by layer:
   - core `import lumen` at the pin: OK;
   - `register_gym_envs()` then `gym.make("Lumen/NavTreeBranch-v0")`: constructs,
     `reset(seed=0)` + 5 random steps OK on CPU Warp (reset `info` keys: none —
-    harness signal mapping still to verify);
+    harness signal mapping verified separately, below);
   - without the solver stack, construction fails on `import warp`: the solver
     stack is required, GPU is not (on this host).
-  Harness end-to-end (`lumen-nav-safe` via `surgeval run`) is pending, not
-  claimed. stEVE/SOFA remains unbuildable on this host (x86_64 Linux required).
+  Harness end-to-end passed 2026-09-08 on the exact pinned stack via the
+  production path (registered `LUMEN_GYM` engine → `make_gym_bridge`):
+  `python -m pytest tests/test_lumen_real_env.py` — 1-episode random run
+  reports observed `backend=real` + world pin, an assessed `wall_penetration`
+  gate, and a replay-matched head. stEVE/SOFA remains unbuildable on this
+  host (x86_64 Linux required).
 
 ## Acceptance for A (reminder, not claimed here)
 

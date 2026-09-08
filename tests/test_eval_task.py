@@ -448,13 +448,13 @@ class TestCli:
     def test_tasks_validate_example(self, capsys):
         assert main(["tasks", "validate", str(EXAMPLE_TASK)]) == 0
         out = capsys.readouterr().out
-        assert "valid: lumen-nav-safe@0" in out
+        assert "valid: lumen-nav-safe@1" in out
         assert " runnable" in out
 
     def test_tasks_describe_example(self, capsys):
         assert main(["tasks", "describe", str(EXAMPLE_TASK)]) == 0
         out = capsys.readouterr().out
-        assert "Task lumen-nav-safe@0" in out
+        assert "Task lumen-nav-safe@1" in out
         assert "Remain inside the lumen" in out
 
     def test_datasets_validate_example(self, capsys):
