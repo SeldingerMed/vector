@@ -28,12 +28,10 @@ cross-world ranking without a validated `EquivalenceArtifact` — the existing
   preserved safety vectors and explicit unassessable states.
 - Not supported: clinical safety certification, tissue-injury thresholds
   (Lumen penetration is an engineering limit until C2 provenance exists),
-  cross-engine ranking, or transfer to phantom/patients (needs C5 evidence).
-
-## Exclusions
-
-- CathSim: technically the best safety instrumentation surveyed, excluded on
-  license (CC-BY-NC-SA-4.0 + field-of-use TERMS.md), not engineering.
+  cross-engine ranking, transfer to phantom/patients (needs C5 evidence),
+  or forgery-proof local artifacts: job heads are unkeyed digests
+  (tamper-evident, re-stampable), so cross-lab acceptance requires hosted
+  attestation (workstream B), not local files.
 - Human surgeon credentialing (refused at task load by design).
 - Composite scores; hard gates stay separate from metrics.
 

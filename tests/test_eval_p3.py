@@ -466,7 +466,11 @@ def _attest_real_backend(result_path: Path) -> None:
 
     Fakes never attest real backends themselves; this helper constructs the
     attested fixture openly so export-path machinery tests exercise their
-    logic rather than the provenance refusal.
+    logic rather than the provenance refusal. Note the boundary this exposes:
+    job heads are unkeyed digests, so local result files are tamper-evident
+    against corruption but re-stampable by anyone holding them. Cross-lab
+    trust therefore cannot rest on local heads; it requires hosted
+    attestation (roadmap workstream B), not more local hashing.
     """
     payload = json.loads(result_path.read_text(encoding="utf-8"))
     we = payload["world_engine"]
