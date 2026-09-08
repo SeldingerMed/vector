@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import selectors
 import subprocess
 import sys
@@ -77,6 +78,45 @@ def load_entrypoint(root: Path, entrypoint: str, *, label: str) -> Callable[...,
     return cast(Callable[..., Any], target)
 
 
+#: Environment variables a plugin child is allowed to inherit. Everything
+#: else — ambient secrets, cloud credentials, model API keys, repo tokens —
+#: stays in the parent. GPU/runtime discovery needs PATH, temp dirs, locale,
+#: and the vendor device variables; nothing else a model needs to run is
+#: read from ambient environment (B1 tier T0).
+_PLUGIN_ENV_ALLOW = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "WINDIR",
+        "HOME",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        "CUDA_VISIBLE_DEVICES",
+        "CUDA_CACHE_PATH",
+    }
+)
+
+#: Prefixes inherited wholesale (device/toolchain discovery families).
+_PLUGIN_ENV_ALLOW_PREFIXES = ("CUDA_", "NVIDIA_", "NV_", "MPLCONFIG", "NUMBA_CACHE")
+
+
+def _scrubbed_plugin_env(source: dict[str, str] | None = None) -> dict[str, str]:
+    """Allowlisted environment for plugin children (B1 §enforced-2)."""
+    inherited = os.environ if source is None else source
+    return {
+        key: value
+        for key, value in inherited.items()
+        if key in _PLUGIN_ENV_ALLOW or key.startswith(_PLUGIN_ENV_ALLOW_PREFIXES)
+    }
+
+
 class JsonSubprocessRuntime:
     """Persistent JSON-lines child with bounded request latency."""
 
@@ -91,6 +131,7 @@ class JsonSubprocessRuntime:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=_scrubbed_plugin_env(),
         )
 
     def request(self, op: str, payload: dict[str, Any]) -> Any:
