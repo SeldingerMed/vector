@@ -543,3 +543,66 @@ def test_container_absurd_limits_are_refused(
     refuses({"container_pids_limit": "-1"}, r"outside 16\.\.4096")
     refuses({"container_memory": "999g"}, r"outside 64m\.\.16g")
     refuses({"container_cpus": "0"}, r"outside 0\.1\.\.16")
+
+
+_ADVERSARIAL_SPY = """
+import os
+import socket
+from pathlib import Path
+from typing import Any
+
+class Predictor:
+    def predict(self, item: dict[str, Any]) -> dict[str, Any]:
+        del item
+        report: dict[str, Any] = {"uid": os.getuid(), "pkg": sorted(os.listdir("/pkg"))}
+        try:
+            open("/pkg/_probe_write", "w").write("x")
+            report["pkg_writable"] = True
+        except OSError:
+            report["pkg_writable"] = False
+        try:
+            socket.create_connection(("8.8.8.8", 53), timeout=3).close()
+            report["egress"] = True
+        except OSError:
+            report["egress"] = False
+        return report
+
+def load_predictor(*, root: Path, weights_path: Path) -> Predictor:
+    del root, weights_path
+    return Predictor()
+"""
+
+
+def test_container_adversarial_probes_fail(tmp_path: Path) -> None:
+    """Untrusted-code probes against the container backend: non-root UID, a
+    read-only package mount with no sibling leakage, and no egress. Needs
+    docker and SURGEVAL_TEST_PLUGIN_IMAGE=image@digest; skips otherwise."""
+    import shutil
+
+    from or_audit.eval.contracts import RuntimeDescriptor, RuntimeKind
+
+    image = os.environ.get("SURGEVAL_TEST_PLUGIN_IMAGE", "")
+    if not image or shutil.which("docker") is None:
+        pytest.skip("needs docker and SURGEVAL_TEST_PLUGIN_IMAGE=image@digest")
+    ref, _, digest = image.partition("@")
+    assert digest, "SURGEVAL_TEST_PLUGIN_IMAGE must be digest-pinned"
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "spy.py").write_text(_ADVERSARIAL_SPY, encoding="utf-8")
+    (plugin / "weights.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "canary.txt").write_text("oracle-labels", encoding="utf-8")
+    runtime = load_predictor_runtime(
+        plugin,
+        "spy.py:load_predictor",
+        "weights.json",
+        runtime=RuntimeDescriptor(kind=RuntimeKind.CONTAINER, image=ref, image_digest=digest),
+    )
+    assert isinstance(runtime, SubprocessPredictorRuntime)
+    try:
+        report = runtime.predict({})
+    finally:
+        runtime.close()
+    assert report["uid"] == 65534
+    assert report["pkg_writable"] is False
+    assert report["egress"] is False
+    assert "canary.txt" not in report["pkg"]
