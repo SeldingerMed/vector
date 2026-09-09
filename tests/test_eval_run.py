@@ -87,8 +87,6 @@ class FakeLumenEnv:
             "max_pen": max_pen,
             "diverged": False,
         }
-        if self._seed == 0 and self._step == 1:
-            info["or_audit"] = {"applied_perturbations": ["transient-wall-force"]}
         return np.zeros(5, dtype=np.float32), 0.0, done, False, info
 
 

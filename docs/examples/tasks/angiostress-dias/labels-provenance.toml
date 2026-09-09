@@ -1,0 +1,14 @@
+# C3 label provenance for angiostress-dias (real-data bench).
+#
+# The labels are not annotated in this repo: they are a single release-audit
+# flag per item from the pinned external benchmark package. Anything this
+# file does not state (rater expertise, adjudication, population sampling)
+# is unknown, not implicitly clinician-grade.
+
+benchmark = "angiostress-v0.1-real-data"
+source_pin = "d386bcc2f5bc534d18e9a866340adfc4f51e6463"
+label_kind = "release-audit boolean per item"
+annotator = "external benchmark release (AngioStress v0.1 package)"
+adjudication = "none — single flag from the pinned package; no panel, no tie-break protocol"
+version = "1"
+coverage = "every inputs.json id has exactly one labels.json entry; orphan labels are refused at run"
