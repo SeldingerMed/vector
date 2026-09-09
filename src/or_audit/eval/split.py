@@ -169,6 +169,32 @@ class SplitManifest(BaseModel):
             return len({entry.site_id for entry in matching if entry.site_id})
         return len({entry.case_id for entry in matching})
 
+    def independent_case_count_for_items(
+        self, item_ids: Iterable[str], unit: DisjointUnit = "case"
+    ) -> int:
+        """Count distinct independent units among the specified item IDs."""
+        item_set = set(item_ids)
+        matching = [
+            entry for entry in self.entries if any(item in item_set for item in entry.item_ids)
+        ]
+        if not matching:
+            return 0
+        if unit == "patient":
+            if not self.supports_patient_disjoint:
+                raise TaskContractError(
+                    f"dataset {self.dataset_id} cannot count independent patients: "
+                    "one or more entries lack patient_id"
+                )
+            return len({entry.patient_id for entry in matching if entry.patient_id})
+        if unit == "site":
+            if not self.supports_site_disjoint:
+                raise TaskContractError(
+                    f"dataset {self.dataset_id} cannot count independent sites: "
+                    "one or more entries lack site_id"
+                )
+            return len({entry.site_id for entry in matching if entry.site_id})
+        return len({entry.case_id for entry in matching})
+
     def items_for_split(self, split: SplitName) -> tuple[str, ...]:
         """Return all item IDs belonging to the given split."""
         items: list[str] = []

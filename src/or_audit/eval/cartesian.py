@@ -184,13 +184,17 @@ def _independent_case_count(
                     f"manifest for {task.id} does not support site-disjoint claims"
                 )
 
+            task_group = stage.independent_case_groups.get(task.id, task.id)
+            split_items = manifest.items_for_split(target_split)
+            evaluated_items = set(split_items[:trials] if trials is not None else split_items)
             for entry in matching:
-                if unit == "patient" and entry.patient_id:
-                    cases.add(f"{task.id}:patient:{entry.patient_id}")
-                elif unit == "site" and entry.site_id:
-                    cases.add(f"{task.id}:site:{entry.site_id}")
-                else:
-                    cases.add(f"{task.id}:case:{entry.case_id}")
+                if any(item in evaluated_items for item in entry.item_ids):
+                    if unit == "patient" and entry.patient_id:
+                        cases.add(f"{task_group}:patient:{entry.patient_id}")
+                    elif unit == "site" and entry.site_id:
+                        cases.add(f"{task_group}:site:{entry.site_id}")
+                    else:
+                        cases.add(f"{task_group}:case:{entry.case_id}")
         else:
             for item in load_items(root / task.environment.inputs_path)[:trials]:
                 if stage.independent_case_key not in item:
