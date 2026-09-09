@@ -588,6 +588,7 @@ def _run_interactive(
     )
     verifier = load_verifier_runtime(task_dir, task.verifier.entrypoint)
     identity = agent_identity(agent)
+    adapters = stream_adapters(task)
     trials = []
     try:
         for seed, item in enumerate(inputs[:n]):
@@ -607,14 +608,19 @@ def _run_interactive(
             history: list[dict[str, Any]] = []
             trace_payloads: list[dict[str, Any]] = []
             for turn_index, observation in enumerate(turns):
+                # Same pinned preprocessing as every other mode. The agent
+                # sees only composed turns — including via history, which
+                # carries what the agent saw, never raw fields. Trace and
+                # verifier context keep the raw observation as evidence.
+                composed = preprocess_observation(task, adapters, observation)
                 request = {
                     "id": item_id,
-                    "turn": observation,
+                    "turn": composed,
                     "turn_index": turn_index,
                     "history": history,
                 }
                 prediction = predictor.predict(request)
-                history.append({"observation": observation, "output": prediction})
+                history.append({"observation": composed, "output": prediction})
                 trace_payload: dict[str, Any] = {
                     "kind": "interactive",
                     "obs": observation,

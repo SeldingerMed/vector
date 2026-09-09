@@ -1,6 +1,7 @@
 """Tests for multi-modality contracts, GateKind extensions, and ModalityAdapter."""
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -156,25 +157,25 @@ def test_interface_stream_schema_must_be_declared() -> None:
         )
 
 
-def test_interface_interactive_streams_rejected() -> None:
-    # The interactive agent route does not apply the stream preprocessing
-    # pipeline, so an interactive interface that declares a pinned stream would
-    # bind while handing the agent a schema it did not declare. Reject the
-    # combination at bind time rather than silently diverging.
+def test_interface_interactive_streams_allowed(tmp_path: Path) -> None:
+    # E5: the interactive agent route applies the same pinned stream
+    # preprocessing as every other mode, so declaring streams is legal.
+    # End-to-end behavior (agent sees composed turns, trace keeps raw
+    # observations) is covered by test_interactive_turns_use_stream_pipeline.
     stream = StreamSpec(
         id="s",
         schema_id="obs",
         adapter="video-laparoscopic",
         adapter_digest="a" * 64,
     )
-    with pytest.raises(TaskContractError, match="cannot declare streams"):
-        InterfaceSpec(
-            id="i",
-            interaction_mode=InteractionMode.INTERACTIVE,
-            observations=("obs",),
-            outputs=("out",),
-            streams=(stream,),
-        )
+    interface = InterfaceSpec(
+        id="i",
+        interaction_mode=InteractionMode.INTERACTIVE,
+        observations=("obs",),
+        outputs=("out",),
+        streams=(stream,),
+    )
+    assert interface.streams[0].adapter == "video-laparoscopic"
 
 
 def test_task_metadata_modality() -> None:
@@ -406,3 +407,185 @@ def test_eval_init_exports() -> None:
     assert hasattr(eval_module, "ModalityAdapter")
     assert hasattr(eval_module, "register_adapter")
     assert hasattr(eval_module, "get_adapter")
+
+
+_ECHO_PREDICTOR = """
+from pathlib import Path
+from typing import Any
+
+class Predictor:
+    def predict(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {"echo_turn": item.get("turn")}
+
+def load_predictor(*, root: Path, weights_path: Path) -> Predictor:
+    del root, weights_path
+    return Predictor()
+"""
+
+_VIDEO_ADAPTER_DIGEST = "ada92b5e4c9cbe363980f8e657ba08ebc7e63b32fda61006b588b74e52c14205"
+
+
+def test_interactive_turns_use_stream_pipeline(tmp_path: Path) -> None:
+    """E5: the agent sees the composed turn; history and trace keep raw."""
+    import json
+    import shutil
+    from pathlib import Path as _Path
+
+    from or_audit.eval.loader import load_agent, load_task
+    from or_audit.eval.runner import run_job
+
+    root = _Path(__file__).resolve().parents[1]
+    task_dir = tmp_path / "stream-task"
+    shutil.copytree(root / "docs/examples/tasks/video-nextstep", task_dir)
+    text = (task_dir / "task.toml").read_text(encoding="utf-8")
+    text = text.replace('interaction_mode = "single-turn"', 'interaction_mode = "interactive"')
+    text = text.replace('observations = ["video-clip"]', 'observations = ["frame"]')
+    text = text.replace('kinds = ["frozen-model", "vlm"]', 'kinds = ["policy"]')
+    text += (
+        '\n[[interface.streams]]\nid = "cam"\nschema_id = "frame"\n'
+        'adapter = "video-laparoscopic"\nadapter_digest = "'
+        + _VIDEO_ADAPTER_DIGEST
+        + '"\nsource = "$"\n'
+    )
+    (task_dir / "task.toml").write_text(text, encoding="utf-8")
+    (task_dir / "inputs.json").write_text(
+        json.dumps({"items": [{"id": "clip-001", "turns": [{"frame_index": 7}]}]}),
+        encoding="utf-8",
+    )
+    (task_dir / "labels.json").write_text(
+        json.dumps(
+            {"items": [{"id": "clip-001", "next_step": "x", "outcome": "y", "unsafe": False}]}
+        ),
+        encoding="utf-8",
+    )
+    agent_dir = tmp_path / "echo-agent"
+    agent_dir.mkdir()
+    (agent_dir / "agent.toml").write_text(
+        'format_version = "2"\nid = "test/echo"\nagent_version = "0"\nkind = "policy"\n'
+        'weights_pin = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"\n'
+        'weights_path = "weights.json"\n'
+        '[[capabilities]]\ninterface = "video-predict"\ninteraction_modes = ["interactive"]\n'
+        'protocol_versions = ["1"]\nobservations = ["frame"]\noutputs = ["next-step"]\n'
+        'modalities = ["video-laparoscopic"]\n'
+        'features = ["reasoning", "abstention"]\n'
+        '[runtime]\nkind = "local"\nprotocol_version = "1"\n'
+        'entrypoint = "predictor.py:load_predictor"\ntimeout_sec = 60.0\n',
+        encoding="utf-8",
+    )
+    (agent_dir / "predictor.py").write_text(_ECHO_PREDICTOR, encoding="utf-8")
+    (agent_dir / "weights.json").write_text("{}", encoding="utf-8")
+    result = run_job(
+        task=load_task(task_dir),
+        task_dir=task_dir,
+        agent=load_agent(agent_dir),
+        agent_dir=agent_dir,
+        out=tmp_path / "job",
+        n=1,
+    )
+    [trial] = result.trials
+    [step] = trial.trajectory.root
+    seen = step.output["echo_turn"]
+    assert seen["cam"]["frame_index"] == 7
+    assert step.observation == {"frame_index": 7}
+
+
+class _DropSecretAdapter(BaseModalityAdapter):
+    modality = "test-drop"
+
+    def preprocess_observation(self, observation: object) -> object:
+        assert isinstance(observation, dict)
+        return {k: v for k, v in observation.items() if k != "secret"}
+
+
+_HISTORY_ECHO = """
+from pathlib import Path
+from typing import Any
+
+class Predictor:
+    def predict(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {"turn": item.get("turn"), "history": list(item.get("history", []))}
+
+def load_predictor(*, root: Path, weights_path: Path) -> Predictor:
+    del root, weights_path
+    return Predictor()
+"""
+
+
+def test_interactive_history_never_carries_raw_fields(tmp_path: Path) -> None:
+    """Two-turn secret drop: raw `secret` reaches neither the current turn
+    nor history, while trace evidence keeps it."""
+    import json
+    import shutil
+    from pathlib import Path as _Path
+
+    from or_audit.eval.adapters.base import register_adapter
+    from or_audit.eval.loader import load_agent, load_task
+    from or_audit.eval.runner import run_job
+
+    register_adapter("test-drop", _DropSecretAdapter, digest="12" * 32, override=True)
+    root = _Path(__file__).resolve().parents[1]
+    task_dir = tmp_path / "drop-task"
+    shutil.copytree(root / "docs/examples/tasks/video-nextstep", task_dir)
+    text = (task_dir / "task.toml").read_text(encoding="utf-8")
+    text = text.replace('interaction_mode = "single-turn"', 'interaction_mode = "interactive"')
+    text = text.replace('observations = ["video-clip"]', 'observations = ["frame"]')
+    text = text.replace("max_steps = 1", "max_steps = 3")
+    text = text.replace('kinds = ["frozen-model", "vlm"]', 'kinds = ["policy"]')
+    text += (
+        '\n[[interface.streams]]\nid = "cam"\nschema_id = "frame"\n'
+        'adapter = "test-drop"\nadapter_digest = "' + "12" * 32 + '"\nsource = "$"\n'
+    )
+    (task_dir / "task.toml").write_text(text, encoding="utf-8")
+    (task_dir / "inputs.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "clip-001",
+                        "turns": [
+                            {"frame_index": 7, "secret": "s1"},
+                            {"frame_index": 8, "secret": "s2"},
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (task_dir / "labels.json").write_text(
+        json.dumps(
+            {"items": [{"id": "clip-001", "next_step": "x", "outcome": "y", "unsafe": False}]}
+        ),
+        encoding="utf-8",
+    )
+    agent_dir = tmp_path / "hist-agent"
+    agent_dir.mkdir()
+    (agent_dir / "agent.toml").write_text(
+        'format_version = "2"\nid = "test/hist"\nagent_version = "0"\nkind = "policy"\n'
+        'weights_pin = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"\n'
+        'weights_path = "weights.json"\n'
+        '[[capabilities]]\ninterface = "video-predict"\ninteraction_modes = ["interactive"]\n'
+        'protocol_versions = ["1"]\nobservations = ["frame"]\noutputs = ["next-step"]\n'
+        'modalities = ["test-drop"]\nfeatures = ["reasoning", "abstention"]\n'
+        '[runtime]\nkind = "local"\nprotocol_version = "1"\n'
+        'entrypoint = "predictor.py:load_predictor"\ntimeout_sec = 60.0\n',
+        encoding="utf-8",
+    )
+    (agent_dir / "predictor.py").write_text(_HISTORY_ECHO, encoding="utf-8")
+    (agent_dir / "weights.json").write_text("{}", encoding="utf-8")
+    result = run_job(
+        task=load_task(task_dir),
+        task_dir=task_dir,
+        agent=load_agent(agent_dir),
+        agent_dir=agent_dir,
+        out=tmp_path / "job",
+        n=1,
+    )
+    [trial] = result.trials
+    first, second = trial.trajectory.root
+    for step in (first, second):
+        assert "secret" not in json.dumps(step.output["turn"])
+        assert "secret" in json.dumps(step.observation)
+    hist_seen = second.output["history"][0]["observation"]
+    assert "secret" not in json.dumps(hist_seen)
+    assert hist_seen["cam"]["frame_index"] == 7
