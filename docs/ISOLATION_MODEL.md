@@ -19,6 +19,8 @@ marked enforced; everything else is an explicit gap with an owner.
   cross-lab trust; the OSS verification contract is
   `or_audit.eval.attestation`.
 
+## What is enforced
+
 1. **Oracle routing**: labels travel only to the verifier context, never in
    agent payloads (`runner.py`, `plugins.py`). A protocol-conformant agent
    cannot receive labels through the harness API.
@@ -30,6 +32,11 @@ marked enforced; everything else is an explicit gap with an owner.
    stops accidental inheritance only: same-UID code can still read parent
    state through OS channels (e.g. `/proc/$PPID/environ` on Linux), so it
    is not a credential boundary against hostile code. HOME points at a
+   fresh empty directory removed on close.
+4. **Timeouts and cleanup**: bounded requests, kill on expiry, pipe cleanup.
+   Evidence transfer is one bounded value per request with a deadline
+   covering the whole read, so dribbled output cannot bypass the timeout.
+
 ## Explicitly not enforced on the local path (gaps, not bugs)
 
 These hold for `local` subprocess execution (T0). The `container` backend
@@ -44,10 +51,18 @@ forgery and task-author rows hold everywhere until B5/governance land.
   evaluate untrusted code that must not reach the network outside it.
 - **Resources**: no CPU/RAM/GPU limits on local plugin children. The
   container backend applies memory/CPU/pids caps.
-- **Result forgery**: job heads are unkeyed digests; local files are
-  re-stampable by anyone holding them. Holds on every backend until B5
-  hosted attestation lands.
 - **Task-author trust**: sandboxing an agent never validates a dishonest task
+  verifier. Benchmark tasks need review/governance, not just isolation.
+- **Semantic output policing**: transfer is bounded by size, deadline, and
+  protocol shape, but prediction payload keys are not validated against
+  interface output slugs (slug spelling differs from payload keys today).
+  Semantic output contracts belong to workstream E; enforcing them here
+  would be arbitrary.
+- **B5 execution**: the OSS attestation contract (`or_audit.eval.attestation`)
+  is implemented and tested, but no executor mints or stores stamps yet —
+  minting lives in the private cloud tree, which has no attestation
+  endpoint. The operator secret must never be distributed: verification
+  happens at hosted ingestion, not in labs. Blocked on the cloud owner.
 
 ## Acceptance for B (reminder)
 

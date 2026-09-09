@@ -4,8 +4,11 @@ Local job heads are unkeyed digests: tamper-evident, re-stampable. Cross-lab
 trust needs the executor to stamp what it observed with a key the submitter
 does not hold. This module defines the stamp and its verification; minting
 happens in the hosted executor (private cloud tree), which holds the
-operator secret. Nothing here mints without a secret, and nothing verifies
-without the same one.
+operator secret. The secret is never distributed: verification happens at
+hosted ingestion, never in evaluating labs — anyone holding the secret could
+mint, so HMAC here is an operator-held seal, not a public verification key.
+An asymmetric upgrade is the documented path if verification ever needs to
+leave the operator boundary.
 """
 
 from __future__ import annotations
