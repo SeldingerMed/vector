@@ -32,8 +32,10 @@ model.learn(total_timesteps=20480)
 model.save('/tmp/lumen-ppo-g1')
 EOF
 
-# 2. wrap the checkpoint as an agent package. stable-baselines3 is the
-#    agent's runtime (present in the probe venv), never a harness dependency.
+# 2. wrap the checkpoint as an agent package. stable-baselines3 is an agent
+#    dependency: for runtime.kind="local" it is imported by the same Python
+#    interpreter running `vector`, so run `vector` from the probe venv (or
+#    install stable-baselines3 into your `vector` env). Never a harness dep.
 mkdir -p /tmp/lumen-ppo-agent && cp /tmp/lumen-ppo-g1.zip /tmp/lumen-ppo-agent/ppo.zip
 WEIGHTS_PIN=$(sha256sum /tmp/lumen-ppo-agent/ppo.zip | cut -d' ' -f1)
 cat > /tmp/lumen-ppo-agent/agent.toml <<EOF
