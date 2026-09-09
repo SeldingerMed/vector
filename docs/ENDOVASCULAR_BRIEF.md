@@ -72,6 +72,23 @@ cross-world ranking without a validated `EquivalenceArtifact` — the existing
   inventing `diverged=False`. Export must refuse; G for Lumen stays blocked
   on that signal, not on plumbing.
 
+## A3 model comparison (measured 2026-09-08, CPU Warp, n=10 per arm)
+
+First paired comparison on real physics, same frozen cases (seeds 0-9):
+
+| Arm | Head (prefix) | safe_success | Gates |
+|---|---|---|---|
+| `seldingermed/random@0` | `612e4910…` | 0.0 (0/10) | all pass |
+| `seldingermed/lumen-linear@0` | `0a5bd48c…` | 1.0 (10/10) | all pass |
+
+- `safe_success` diff: 1.0, 95% CI (1.0, 1.0) — decisive on these cases.
+- `max_pen` diff: -0.019, 95% CI (-0.058, 0.0) — inconclusive on
+  penetration depth; the interval covers zero.
+- `diverged` unassessable throughout (env reports no divergence channel).
+- Both policies are transparent (uniform-random sampling; pinned linear
+  weights), so this validates the comparison machinery, not a learned
+  policy. A trained checkpoint comparison is the next A3 step.
+
 ## Acceptance for A (reminder, not claimed here)
 
 Clean-host install, real checkpoints, frozen held-out manifest, per-case

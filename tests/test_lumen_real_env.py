@@ -132,3 +132,25 @@ def test_lumen_harness_faults_complete_on_real_physics(tmp_path: Path) -> None:
     assert gates.get("wall_penetration") in {"pass", "fail"}
     recorded = {p.id for step in result.trials[0].trajectory.root for p in step.perturbations}
     assert {"obs-noise", "act-hold"} <= recorded
+
+
+def test_lumen_observation_action_contract() -> None:
+    """E1 domain profile, machine-checked: 5-dim normalized observations,
+    2-dim insertion/twist actions in [-1, 1]. Policies binding to other
+    shapes are rejected before physics, not debugged after it."""
+    gymnasium = pytest.importorskip("gymnasium")
+    pytest.importorskip("lumen.envs.registration")
+    import numpy as np
+    from lumen.envs.registration import register_gym_envs
+
+    register_gym_envs()
+    env = gymnasium.make("Lumen/NavTreeBranch-v0")
+    try:
+        assert env.observation_space.shape == (5,)
+        assert env.observation_space.dtype == np.float32
+        assert env.action_space.shape == (2,)
+        assert env.action_space.dtype == np.float32
+        assert float(env.action_space.low.min()) == -1.0
+        assert float(env.action_space.high.max()) == 1.0
+    finally:
+        env.close()

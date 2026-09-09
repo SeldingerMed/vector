@@ -38,3 +38,15 @@ Status: frozen 2026-09-08 against `seldinger-lumen` world pin
   limit, so penetration depth past the boundary is observed, not cut off.
 - Physics step `dt=5e-3 * substeps` (L213) with Newtonian guidewire sim;
   CPU Warp execution verified, GPU equivalence unmeasured.
+
+## Controller and observation contract (E1)
+
+- Observation: 5-dim float32 vector (route progress, radial ratio, sin/cos
+  of tip angle, remaining distance — all route-normalized, L180-183).
+- Action: 2-dim float32 `(insertion, twist)` in [-1, 1], scaled by
+  `max_insertion` (default 2.0) and `max_twist` (default 1.0) per step
+  (L53-56, L211-213). Machine-checked in
+  `tests/test_lumen_real_env.py::test_lumen_observation_action_contract`.
+- The reference linear policy (`seldingermed-lumen-linear`) consumes the
+  raw normalized observation with no extra preprocessing and clips to
+  [-1, 1]: weights, bias, and clipping are all pinned in the package.
