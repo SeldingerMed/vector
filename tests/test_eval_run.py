@@ -620,7 +620,10 @@ def test_make_gym_without_lumen_explains_install() -> None:
 
 
 def test_episode_diverged_reads_recorder_tags() -> None:
-    assert episode_diverged([{"info": {"max_pen": 0.1}}]) is False
+    assert episode_diverged([{"info": {"max_pen": 0.1}}]) is None
     assert episode_diverged([{"info": {"max_pen": "__nonfinite__:nan"}}]) is True
     assert episode_diverged([{"nested": [{"v": "__nonfinite__:+inf"}]}]) is True
-    assert episode_diverged([]) is False
+    assert episode_diverged([{"obs": {"position": "__nonfinite__:nan"}}]) is True
+    assert episode_diverged([{"reward": "__nonfinite__:-inf"}]) is True
+    assert episode_diverged([{"action": [0.0], "observation": "__nonfinite__:nan"}]) is True
+    assert episode_diverged([]) is None

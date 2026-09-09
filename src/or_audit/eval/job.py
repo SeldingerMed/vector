@@ -334,13 +334,20 @@ def write_job_skeleton(
     _atomic_write_text(out / "config.json", json.dumps(config, indent=2) + "\n")
 
 
-def write_trial(out: Path, task_id: str, trial: TrialRecord, projection_identity: str) -> None:
-    """Persist one completed trial atomically (crash-safe resume unit)."""
+def write_trial(
+    out: Path,
+    task_id: str,
+    trial: TrialRecord,
+    projection_identity: str,
+    world_engine: dict[str, Any] | None = None,
+) -> None:
+    """Persist one completed trial atomically (crash-safe resume unit).
+
+    Writes trajectory, projection, and provenance first, then writes
+    result.json last as the commit marker for the trial.
+    """
     trial_dir = out / f"trial-{task_id}-{trial.seed}"
     trial_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(
-        trial_dir / "result.json", json.dumps(_vector_dict(trial.vector), indent=2) + "\n"
-    )
     _atomic_write_text(
         trial_dir / "trajectory.json", json.dumps(list(trial.trajectory), indent=2) + "\n"
     )
@@ -356,20 +363,43 @@ def write_trial(out: Path, task_id: str, trial: TrialRecord, projection_identity
             )
             + "\n",
         )
+    if world_engine is not None:
+        _atomic_write_text(
+            trial_dir / "provenance.json",
+            json.dumps(world_engine, indent=2) + "\n",
+        )
+    _atomic_write_text(
+        trial_dir / "result.json", json.dumps(_vector_dict(trial.vector), indent=2) + "\n"
+    )
 
 
-def read_partial_trials(out: Path, task_id: str) -> list[TrialRecord]:
-    """Trials completed before a kill: valid trial dirs without result.json."""
+def read_partial_trials(out: Path, task_id: str) -> tuple[list[TrialRecord], dict[str, Any] | None]:
+    """Read committed trials from an interrupted job directory.
+
+    Reads trial directories created by :func:`write_trial` when the job-level
+    ``result.json`` is missing. Corrupt committed trials raise
+    :class:`TaskContractError`; incomplete uncommitted directories (missing
+    ``result.json``) are ignored as interrupted writes.
+    """
     records: list[TrialRecord] = []
+    observed_provenance: dict[str, Any] | None = None
+    trials_with_prov = 0
+    trials_without_prov = 0
     for trial_dir in sorted(out.glob(f"trial-{task_id}-*")):
         vector_path = trial_dir / "result.json"
         trajectory_path = trial_dir / "trajectory.json"
-        if not vector_path.is_file() or not trajectory_path.is_file():
+        # Incomplete uncommitted trial directory: result.json is the commit marker.
+        if not vector_path.is_file():
             continue
         try:
             seed = int(trial_dir.name.rsplit("-", 1)[-1])
         except ValueError:
             continue
+        # A trial with result.json was committed; a missing trajectory is corruption.
+        if not trajectory_path.is_file():
+            raise TaskContractError(
+                f"trial dir {trial_dir.name} is corrupt: committed trial is missing trajectory.json"
+            )
         try:
             vector = TrialVector.model_validate(json.loads(vector_path.read_text(encoding="utf-8")))
             trajectory = ProceduralTrace.model_validate(
@@ -377,6 +407,25 @@ def read_partial_trials(out: Path, task_id: str) -> list[TrialRecord]:
             )
         except ValueError as exc:
             raise TaskContractError(f"trial dir {trial_dir.name} is corrupt: {exc}") from exc
+        prov_path = trial_dir / "provenance.json"
+        if prov_path.is_file():
+            trials_with_prov += 1
+            try:
+                prov_data = json.loads(prov_path.read_text(encoding="utf-8"))
+                prov_model = WorldEngineProvenance.model_validate(prov_data)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise TaskContractError(
+                    f"trial dir {trial_dir.name} is corrupt: invalid provenance.json ({exc})"
+                ) from exc
+            prov_dict = prov_model.model_dump(mode="json")
+            if observed_provenance is not None and observed_provenance != prov_dict:
+                raise TaskContractError(
+                    f"trial dir {trial_dir.name} has conflicting provenance "
+                    f"against prior trials in {out.name}"
+                )
+            observed_provenance = prov_dict
+        else:
+            trials_without_prov += 1
         projection_path = trial_dir / "projection.json"
         projection = None
         projection_spec_digest = ""
@@ -393,7 +442,12 @@ def read_partial_trials(out: Path, task_id: str) -> list[TrialRecord]:
                 projection_spec_digest=projection_spec_digest,
             )
         )
-    return sorted(records, key=lambda record: record.seed)
+    if trials_with_prov > 0 and trials_without_prov > 0:
+        raise TaskContractError(
+            f"job dir {out.name} has mixed provenance: {trials_with_prov} trial(s) have "
+            f"provenance.json while {trials_without_prov} trial(s) are missing it"
+        )
+    return sorted(records, key=lambda record: record.seed), observed_provenance
 
 
 def write_job(
@@ -414,7 +468,15 @@ def write_job(
         agent_digest=result.agent_digest,
     )
     for trial in result.trials:
-        write_trial(out, result.task_id, trial, result.projection_identity)
+        write_trial(
+            out,
+            result.task_id,
+            trial,
+            result.projection_identity,
+            world_engine=(
+                result.world_engine.model_dump(mode="json") if result.world_engine else None
+            ),
+        )
     from or_audit.eval.scorecard import write_scorecards
 
     world_engine = config.get("world_engine")

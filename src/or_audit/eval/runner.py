@@ -26,6 +26,7 @@ from or_audit.eval.integrity import tree_digest
 from or_audit.eval.job import (
     JobResult,
     TrialRecord,
+    WorldEngineProvenance,
     agent_identity,
     assemble_job_result,
     compute_head,
@@ -197,7 +198,7 @@ def _resume_trials(
     agent_digest: str,
     n: int,
     enabled: bool,
-) -> tuple[dict[int, TrialRecord], JobResult | None]:
+) -> tuple[dict[int, TrialRecord], dict[str, Any] | None]:
     """Completed trials to keep when resuming an interrupted job.
 
     From a finished result when present, else from bundle/config plus
@@ -205,35 +206,33 @@ def _resume_trials(
     """
     if not enabled:
         return {}, None
-    try:
+    if (out / "result.json").is_file():
         previous = read_job_result(out)
-    except TaskContractError:
-        return _resume_partial(out, task_id, task_digest, agent_digest, n)
-    if previous.task_id != task_id:
-        raise TaskContractError(
-            f"cannot resume {out}: previous result is task {previous.task_id!r}"
-        )
-    if previous.task_digest != task_digest:
-        raise TaskContractError(f"cannot resume {out}: task package changed since")
-    if previous.agent_digest != agent_digest:
-        raise TaskContractError(f"cannot resume {out}: agent package changed since")
-    if previous.n > n:
-        raise TaskContractError(
-            f"cannot resume {out}: previous n={previous.n} exceeds requested n={n}; "
-            "shrinking a schedule would drop evidence"
-        )
-    return {trial.seed: trial for trial in previous.trials}, previous
+        if previous.task_id != task_id:
+            raise TaskContractError(
+                f"cannot resume {out}: previous result is task {previous.task_id!r}"
+            )
+        if previous.task_digest != task_digest:
+            raise TaskContractError(f"cannot resume {out}: task package changed since")
+        if previous.agent_digest != agent_digest:
+            raise TaskContractError(f"cannot resume {out}: agent package changed since")
+        if previous.n > n:
+            raise TaskContractError(
+                f"cannot resume {out}: previous n={previous.n} exceeds requested n={n}; "
+                "shrinking a schedule would drop evidence"
+            )
+        prev_prov = previous.world_engine.model_dump(mode="json") if previous.world_engine else None
+        return {trial.seed: trial for trial in previous.trials}, prev_prov
+    return _resume_partial(out, task_id, task_digest, agent_digest, n)
 
 
 def _resume_partial(
     out: Path, task_id: str, task_digest: str, agent_digest: str, n: int
-) -> tuple[dict[int, TrialRecord], None]:
+) -> tuple[dict[int, TrialRecord], dict[str, Any] | None]:
     """Resume a killed run: bundle/config plus completed trial dirs, no result.
 
-    Provenance caveat: trial dirs do not record the backend that produced
-    them, so crash-resume assumes the same host and runner. Cross-backend
-    crash recovery is unverified and therefore refused by omission here —
-    only same-run continuation is supported, not forensic reassembly.
+    Per-trial provenance is recovered from completed trial dirs to detect
+    backend drift on resume even without the final result.json.
     """
     config = read_job_config(out)
     if config.get("task_id") != task_id:
@@ -247,14 +246,14 @@ def _resume_partial(
             f"cannot resume {out}: configured n exceeds requested n={n}; "
             "shrinking a schedule would drop evidence"
         )
-    records = read_partial_trials(out, task_id)
+    records, observed_provenance = read_partial_trials(out, task_id)
     foreign = sorted(record.seed for record in records if not 0 <= record.seed < n)
     if foreign:
         raise TaskContractError(
             f"cannot resume {out}: trial seeds {foreign} outside schedule n={n}; "
             "refusing to merge foreign trials"
         )
-    return {trial.seed: trial for trial in records}, None
+    return {trial.seed: trial for trial in records}, observed_provenance
 
 
 def run_job(
@@ -337,6 +336,7 @@ def run_job(
             out=out,
             gym_factory=gym_factory,
             resume_trials=resume_trials,
+            resume_provenance=previous_result,
         )
         extra["safety_max_pen"] = safety
         extra["world_engine"] = provenance
@@ -351,6 +351,7 @@ def run_job(
             n=episodes,
             out=out,
             resume_trials=resume_trials,
+            resume_provenance=previous_result,
         )
     elif task.harness.interaction_mode is InteractionMode.INTERACTIVE:
         result = _run_interactive(
@@ -363,6 +364,7 @@ def run_job(
             n=episodes,
             out=out,
             resume_trials=resume_trials,
+            resume_provenance=previous_result,
         )
     elif task.harness.interaction_mode is InteractionMode.COUNTERFACTUAL:
         result = _run_counterfactual(
@@ -375,15 +377,14 @@ def run_job(
             n=episodes,
             out=out,
             resume_trials=resume_trials,
+            resume_provenance=previous_result,
         )
-    else:  # pragma: no cover - enum exhaustiveness
-        raise TaskContractError(f"unsupported harness mode {task.harness.interaction_mode}")
     if previous_result is not None and resume_trials:
-        before, after = previous_result.world_engine, result.world_engine
-        if before is not None and after is not None and before != after:
+        current_prov = result.world_engine.model_dump(mode="json") if result.world_engine else None
+        if current_prov is not None and previous_result != current_prov:
             raise TaskContractError(
                 f"cannot resume {out}: world engine changed since "
-                f"({before} -> {after}); resumed trials would be mis-attested"
+                f"({previous_result} -> {current_prov}); resumed trials would be mis-attested"
             )
     config = {
         "format_version": "2",
@@ -427,28 +428,48 @@ def _run_closed_loop(
     agent_digest: str,
     gym_factory: GymFactory | None,
     resume_trials: dict[int, TrialRecord] | None = None,
+    resume_provenance: dict[str, Any] | None = None,
 ) -> tuple[JobResult, float, dict[str, Any]]:
     if agent.kind not in {AgentKind.RANDOM.value, AgentKind.POLICY.value}:
         raise TaskContractError(f"closed-loop runner does not implement kind={agent.kind}")
     policy = None
-    if agent.kind == AgentKind.POLICY.value:
-        if agent_dir is None:
-            raise TaskContractError(f"policy agent {agent.id} has no package directory")
-        policy = load_policy_runtime(agent_dir, agent.entrypoint, agent.weights_path, agent.runtime)
-    verifier = load_verifier_runtime(task_dir, task.verifier.entrypoint)
-    if gym_factory is not None:
-        env = gym_factory(task)
-    else:
-        sim_engine = get_simulation_engine(task)
-        env = sim_engine if sim_engine is not None else make_gym(task)
-    provenance = _engine_provenance(task, env)
-    identity = agent_identity(agent)
-    adapters = stream_adapters(task)
-    unwrapped = getattr(env, "unwrapped", env)
-    nested = getattr(unwrapped, "_env", unwrapped)
-    safety = float(getattr(nested, "safety_max_pen", SAFETY_MAX_PEN))
-    trials = []
+    verifier = None
+    env = None
+    trials: list[TrialRecord] = []
     try:
+        if agent.kind == AgentKind.POLICY.value:
+            if agent_dir is None:
+                raise TaskContractError(f"policy agent {agent.id} has no package directory")
+            policy = load_policy_runtime(
+                agent_dir, agent.entrypoint, agent.weights_path, agent.runtime
+            )
+        verifier = load_verifier_runtime(task_dir, task.verifier.entrypoint)
+        if gym_factory is not None:
+            env = gym_factory(task)
+        else:
+            sim_engine = get_simulation_engine(task)
+            env = sim_engine if sim_engine is not None else make_gym(task)
+        provenance = _engine_provenance(task, env)
+        if resume_trials and resume_provenance is not None:
+            prov_dict = (
+                WorldEngineProvenance.model_validate(provenance).model_dump(mode="json")
+                if isinstance(provenance, dict)
+                else (
+                    provenance.model_dump(mode="json")
+                    if isinstance(provenance, WorldEngineProvenance)
+                    else None
+                )
+            )
+            if prov_dict is not None and prov_dict != resume_provenance:
+                raise TaskContractError(
+                    f"cannot resume {out}: world engine changed since "
+                    f"({resume_provenance} -> {prov_dict}); resumed trials would be mis-attested"
+                )
+        identity = agent_identity(agent)
+        adapters = stream_adapters(task)
+        unwrapped = getattr(env, "unwrapped", env)
+        nested = getattr(unwrapped, "_env", unwrapped)
+        safety = float(getattr(nested, "safety_max_pen", SAFETY_MAX_PEN))
         for seed in range(n):
             if resume_trials is not None and seed in resume_trials:
                 continue
@@ -550,6 +571,7 @@ def _run_closed_loop(
                 task.id,
                 trials[-1],
                 task.projection.identity if task.projection else "",
+                world_engine=provenance,
             )
     finally:
         _close(policy)
@@ -581,6 +603,7 @@ def _run_predictions(
     mode: InteractionMode,
     n: int,
     resume_trials: dict[int, TrialRecord] | None = None,
+    resume_provenance: dict[str, Any] | None = None,
 ) -> JobResult:
     if agent_dir is None:
         raise TaskContractError(f"agent {agent.id} has no package directory")
@@ -595,14 +618,32 @@ def _run_predictions(
             f"task {task.id} labels {orphaned} match no inputs in this run; "
             "a label set that drifts from its inputs is refused, not ignored"
         )
-    predictor = load_predictor_runtime(
-        agent_dir, agent.entrypoint, agent.weights_path, agent.runtime
-    )
-    verifier = load_verifier_runtime(task_dir, task.verifier.entrypoint)
-    identity = agent_identity(agent)
-    adapters = stream_adapters(task)
+    predictor = None
+    verifier = None
     trials = []
     try:
+        predictor = load_predictor_runtime(
+            agent_dir, agent.entrypoint, agent.weights_path, agent.runtime
+        )
+        verifier = load_verifier_runtime(task_dir, task.verifier.entrypoint)
+        identity = agent_identity(agent)
+        adapters = stream_adapters(task)
+        provenance = _engine_provenance(task, None)
+        if resume_trials and resume_provenance is not None:
+            prov_dict = (
+                WorldEngineProvenance.model_validate(provenance).model_dump(mode="json")
+                if isinstance(provenance, dict)
+                else (
+                    provenance.model_dump(mode="json")
+                    if isinstance(provenance, WorldEngineProvenance)
+                    else None
+                )
+            )
+            if prov_dict is not None and prov_dict != resume_provenance:
+                raise TaskContractError(
+                    f"cannot resume {out}: world engine changed since "
+                    f"({resume_provenance} -> {prov_dict}); resumed trials would be mis-attested"
+                )
         for seed, item in enumerate(inputs[:n]):
             if resume_trials is not None and seed in resume_trials:
                 continue
@@ -684,6 +725,7 @@ def _run_predictions(
                 task.id,
                 trials[-1],
                 task.projection.identity if task.projection else "",
+                world_engine=provenance,
             )
     finally:
         _close(predictor)
@@ -717,6 +759,7 @@ def _run_interactive(
     n: int,
     out: Path,
     resume_trials: dict[int, TrialRecord] | None = None,
+    resume_provenance: dict[str, Any] | None = None,
 ) -> JobResult:
     if agent_dir is None:
         raise TaskContractError(f"agent {agent.id} has no package directory")
@@ -731,17 +774,35 @@ def _run_interactive(
             f"task {task.id} labels {orphaned} match no inputs in this run; "
             "a label set that drifts from its inputs is refused, not ignored"
         )
-    predictor = load_predictor_runtime(
-        agent_dir,
-        agent.entrypoint,
-        agent.weights_path,
-        agent.runtime,
-    )
-    verifier = load_verifier_runtime(task_dir, task.verifier.entrypoint)
-    identity = agent_identity(agent)
-    adapters = stream_adapters(task)
+    predictor = None
+    verifier = None
     trials = []
     try:
+        predictor = load_predictor_runtime(
+            agent_dir,
+            agent.entrypoint,
+            agent.weights_path,
+            agent.runtime,
+        )
+        verifier = load_verifier_runtime(task_dir, task.verifier.entrypoint)
+        identity = agent_identity(agent)
+        adapters = stream_adapters(task)
+        provenance = _engine_provenance(task, None)
+        if resume_trials and resume_provenance is not None:
+            prov_dict = (
+                WorldEngineProvenance.model_validate(provenance).model_dump(mode="json")
+                if isinstance(provenance, dict)
+                else (
+                    provenance.model_dump(mode="json")
+                    if isinstance(provenance, WorldEngineProvenance)
+                    else None
+                )
+            )
+            if prov_dict is not None and prov_dict != resume_provenance:
+                raise TaskContractError(
+                    f"cannot resume {out}: world engine changed since "
+                    f"({resume_provenance} -> {prov_dict}); resumed trials would be mis-attested"
+                )
         for seed, item in enumerate(inputs[:n]):
             if resume_trials is not None and seed in resume_trials:
                 continue
@@ -838,6 +899,7 @@ def _run_interactive(
                 task.id,
                 trials[-1],
                 task.projection.identity if task.projection else "",
+                world_engine=provenance,
             )
     finally:
         _close(predictor)
