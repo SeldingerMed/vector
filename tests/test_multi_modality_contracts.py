@@ -503,7 +503,7 @@ from typing import Any
 
 class Predictor:
     def predict(self, item: dict[str, Any]) -> dict[str, Any]:
-        return {"turn": item.get("turn"), "history": item.get("history", [])}
+        return {"turn": item.get("turn"), "history": list(item.get("history", []))}
 
 def load_predictor(*, root: Path, weights_path: Path) -> Predictor:
     del root, weights_path
