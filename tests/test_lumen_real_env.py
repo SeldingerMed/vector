@@ -64,8 +64,10 @@ def test_lumen_pin_mismatch_refuses_before_construction() -> None:
     with pytest.raises(TaskContractError, match="pin mismatch"):
         make_gym_bridge(wrong)
 
+
 def _with_harness_faults(task: TaskSpec) -> TaskSpec:
     from or_audit.eval.contracts import PerturbationSpec
+
     return task.model_copy(
         update={
             "perturbations": (
@@ -85,6 +87,8 @@ def _with_harness_faults(task: TaskSpec) -> TaskSpec:
             )
         }
     )
+
+
 def test_lumen_harness_faults_complete_with_fake(tmp_path: Path) -> None:
     """Harness-applied faults need no world support: the runner applies and
     records them, so nominal-vs-fault robustness is measurable on any
