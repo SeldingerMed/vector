@@ -185,8 +185,14 @@ def _independent_case_count(
                 )
 
             task_group = stage.independent_case_groups.get(task.id, task.id)
-            split_items = manifest.items_for_split(target_split)
-            evaluated_items = set(split_items[:trials] if trials is not None else split_items)
+            all_inputs = load_items(root / task.environment.inputs_path)
+            allowed_items = set(manifest.items_for_split(target_split))
+            filtered_inputs = [item for item in all_inputs if str(item["id"]) in allowed_items]
+            evaluated_items = (
+                {str(item["id"]) for item in filtered_inputs[:trials]}
+                if trials is not None
+                else {str(item["id"]) for item in filtered_inputs}
+            )
             for entry in matching:
                 if any(item in evaluated_items for item in entry.item_ids):
                     if unit == "patient" and entry.patient_id:
@@ -308,8 +314,14 @@ def run_cartesian_job(
             raise TaskContractError(
                 f"stage {stage.name} independent_case_groups keys must exactly match task ids"
             )
+
         for task_dir, task, _, _, _, trials in planned:
-            assert_trial_capacity(task, task_dir, trials or 0)
+            task_split = (
+                stage.split
+                if stage.split
+                else (str(stage.name) if task.environment.splits_path else None)
+            )
+            assert_trial_capacity(task, task_dir, trials or 0, split=task_split)
         observed_cases = _independent_case_count(planned, stage)
         if observed_cases != stage.independent_cases:
             raise TaskContractError(
@@ -321,6 +333,11 @@ def run_cartesian_job(
     outcomes: list[str] = []
     observed_units = 0
     for task_dir, task, agent, agent_dir, dirname, pair_trials in planned:
+        task_split = (
+            stage.split
+            if stage is not None and stage.split
+            else (str(stage.name) if stage is not None and task.environment.splits_path else None)
+        )
         result: JobResult = run_job(
             task=task,
             task_dir=task_dir,
@@ -329,6 +346,7 @@ def run_cartesian_job(
             out=out / dirname,
             n=pair_trials,
             gym_factory=gym_factory,
+            split=task_split,
         )
         pairs.append(
             PairRecord(

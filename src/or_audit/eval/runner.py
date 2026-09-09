@@ -71,7 +71,14 @@ def assert_trial_capacity(task: TaskSpec, task_dir: Path, n: int, split: str | N
         input_ids = {str(item["id"]) for item in all_items}
         manifest.validate_against_input_items(input_ids, strict=False)
         target_split = split or "test"
-        available = len(manifest.items_for_split(target_split))
+        available_items = manifest.items_for_split(target_split)
+        if not available_items:
+            available_splits = sorted({e.split for e in manifest.entries})
+            raise TaskContractError(
+                f"task {task.id} requests split {target_split!r} but "
+                f"manifest only defines splits: {available_splits}"
+            )
+        available = len(available_items)
         if n > available:
             raise TaskContractError(
                 f"task {task.id} split {target_split!r} has {available} input items; "
@@ -306,6 +313,10 @@ def run_job(
     episodes = n if n is not None else task.environment.n_eval_episodes
     if episodes < 1:
         raise TaskContractError(f"n must be >= 1, got {episodes}")
+    if split and not task.environment.splits_path:
+        raise TaskContractError(
+            f"task {task.id} has no declared splits_path; cannot execute explicit split {split!r}"
+        )
     target_split = (
         split
         if split
@@ -692,11 +703,7 @@ def _run_predictions(
                 f"task {task.id} requests split {target_split!r} but "
                 f"manifest only defines splits: {available_splits}"
             )
-        split_order = {
-            item_id: idx for idx, item_id in enumerate(manifest.items_for_split(target_split))
-        }
         filtered = [item for item in inputs if str(item["id"]) in allowed_items]
-        filtered.sort(key=lambda item: split_order.get(str(item["id"]), 0))
         if not filtered:
             raise TaskContractError(
                 f"task {task.id} has no input items matching split {target_split!r}"
@@ -887,11 +894,7 @@ def _run_interactive(
                 f"task {task.id} requests split {target_split!r} but "
                 f"manifest only defines splits: {available_splits}"
             )
-        split_order = {
-            item_id: idx for idx, item_id in enumerate(manifest.items_for_split(target_split))
-        }
         filtered = [item for item in inputs if str(item["id"]) in allowed_items]
-        filtered.sort(key=lambda item: split_order.get(str(item["id"]), 0))
         if not filtered:
             raise TaskContractError(
                 f"task {task.id} has no input items matching split {target_split!r}"
@@ -1096,6 +1099,7 @@ def replay_job(
         out=out,
         n=int(config["n"]),
         gym_factory=gym_factory,
+        split=config.get("split") or previous.split or None,
     )
     if rerun.head != previous.head:
         raise TaskContractError(f"replay head mismatch: stored {previous.head} reran {rerun.head}")
