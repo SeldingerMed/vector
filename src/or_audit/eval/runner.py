@@ -445,6 +445,15 @@ def _run_predictions(
         raise TaskContractError(f"agent {agent.id} has no package directory")
     inputs = load_items(task_dir / task.environment.inputs_path)
     labels = index_items(load_items(task_dir / task.environment.labels_path))
+    # Against the full input set, not inputs[:n]: a subsampled run (n below
+    # the population) is not drift; labels beyond the population are.
+    input_ids = {str(item["id"]) for item in inputs}
+    orphaned = sorted(set(labels) - input_ids)
+    if orphaned:
+        raise TaskContractError(
+            f"task {task.id} labels {orphaned} match no inputs in this run; "
+            "a label set that drifts from its inputs is refused, not ignored"
+        )
     predictor = load_predictor_runtime(
         agent_dir, agent.entrypoint, agent.weights_path, agent.runtime
     )
@@ -562,6 +571,15 @@ def _run_interactive(
         raise TaskContractError(f"agent {agent.id} has no package directory")
     inputs = load_items(task_dir / task.environment.inputs_path)
     labels = index_items(load_items(task_dir / task.environment.labels_path))
+    # Against the full input set, not inputs[:n]: a subsampled run (n below
+    # the population) is not drift; labels beyond the population are.
+    input_ids = {str(item["id"]) for item in inputs}
+    orphaned = sorted(set(labels) - input_ids)
+    if orphaned:
+        raise TaskContractError(
+            f"task {task.id} labels {orphaned} match no inputs in this run; "
+            "a label set that drifts from its inputs is refused, not ignored"
+        )
     predictor = load_predictor_runtime(
         agent_dir,
         agent.entrypoint,

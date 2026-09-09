@@ -374,6 +374,21 @@ def test_interactive_run_replays_multiturn_trace(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    task_dir.joinpath("labels.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "clip-001",
+                        "next_step": "advance",
+                        "outcome": "continue",
+                        "unsafe": False,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
 
     out = tmp_path / "interactive"
     result = run_job(
