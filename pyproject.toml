@@ -107,9 +107,12 @@ module = [
     "sofagym",
     "sofagym.*",
     "warp",
-    "warp.*",
     "isaaclab",
     "isaaclab.*",
+    "monai",
+    "monai.*",
+    "pyarrow",
+    "pyarrow.*",
     "cloudpickle",
     "cloudpickle.*",
 ]
