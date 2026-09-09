@@ -83,6 +83,7 @@ def _with_harness_faults(task: TaskSpec) -> TaskSpec:
                     version="1",
                     description="Repeat the previous action, applied by the harness.",
                     kind="harness-action-hold",
+                    at_step=1,
                 ),
             )
         }

@@ -12,7 +12,7 @@ them, so the comparison is valid on any backend. Fault arm attaches two
 perturbations by in-test task copy (never shipped in the packaged task):
 
 - `harness-observation-gaussian-noise` (std 0.01)
-- `harness-action-hold` (repeat previous action)
+- `harness-action-hold` from step 1 (step 0 has no previous action to hold)
 
 Both arms run the production path (registered `LUMEN_GYM` engine).
 
@@ -20,8 +20,7 @@ Both arms run the production path (registered `LUMEN_GYM` engine).
 
 | Arm | Head (prefix) | Gates (wall_penetration) | safe_success | max_pen |
 |---|---|---|---|---|
-| nominal | `32dc6ae4…` | pass, pass | false, false | 0.0, 0.0 |
-| faults | `1d50682a…` | pass, pass | false, false | 0.0, 0.0 |
+| faults | `82e44bbd…` | pass, pass | false, false | 0.0, 0.0 |
 
 Recorded perturbations present in every fault trial trajectory
 (`obs-noise`, `act-hold`); replay of fault arms against the packaged
