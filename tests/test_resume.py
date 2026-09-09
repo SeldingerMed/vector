@@ -39,7 +39,7 @@ def test_resume_completes_missing_seeds_only(tmp_path: Path) -> None:
 
 
 def test_resume_without_prior_result_refuses(tmp_path: Path) -> None:
-    with pytest.raises(TaskContractError, match=r"missing result\.json"):
+    with pytest.raises(TaskContractError, match=r"missing config\.json"):
         _run(tmp_path / "job", 1, resume=True)
 
 
@@ -82,6 +82,16 @@ def test_cli_resume_flag(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     assert "n=1" in second
     assert len(read_job_result(out).trials) == 1
     assert first.split("head ")[1] == second.split("head ")[1]
+
+
+def test_kill_recovery_reuses_completed_trials(tmp_path: Path) -> None:
+    out = tmp_path / "job"
+    whole = _run(out, 2)
+    # Simulate a kill after trial I/O but before result.json: drop only it.
+    (out / "result.json").unlink()
+    resumed = _run(out, 2, resume=True)
+    assert [trial.seed for trial in resumed.trials] == [0, 1]
+    assert resumed.head == whole.head
 
 
 def test_resume_across_backend_change_refuses(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
@@ -271,6 +272,115 @@ def _copy_package(source: Path, target: Path) -> None:
     )
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write crash-atomically: readers never see a half-written file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def write_job_skeleton(
+    out: Path,
+    *,
+    config: dict[str, Any],
+    task_dir: Path,
+    agent_dir: Path | None,
+    task_digest: str,
+    agent_digest: str,
+) -> None:
+    """Bundle packages and config before the first trial runs.
+
+    A killed run leaves the bundle, the config, and every completed trial
+    behind, which is exactly what resume needs. Result and scorecards are
+    still written only on completion.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    bundle = out / "bundle"
+    task_target = bundle / "task"
+    _copy_package(task_dir, task_target)
+    if tree_digest(task_target) != task_digest:
+        raise TaskContractError("copied task package digest does not match")
+    if agent_dir is not None:
+        agent_target = bundle / "agent"
+        _copy_package(agent_dir, agent_target)
+        if tree_digest(agent_target) != agent_digest:
+            raise TaskContractError("copied agent package digest does not match")
+    runtime_identity = config.get("runtime_identity", "")
+    manifest = {
+        "format_version": "2",
+        "task": {"path": "bundle/task", "digest": task_digest},
+        "agent": (
+            {"path": "bundle/agent", "digest": agent_digest}
+            if agent_dir is not None
+            else {"path": None, "digest": agent_digest}
+        ),
+        "runtime_identity": runtime_identity,
+    }
+    _atomic_write_text(out / "bundle.json", json.dumps(manifest, indent=2) + "\n")
+    _atomic_write_text(out / "config.json", json.dumps(config, indent=2) + "\n")
+
+
+def write_trial(out: Path, task_id: str, trial: TrialRecord, projection_identity: str) -> None:
+    """Persist one completed trial atomically (crash-safe resume unit)."""
+    trial_dir = out / f"trial-{task_id}-{trial.seed}"
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(
+        trial_dir / "result.json", json.dumps(_vector_dict(trial.vector), indent=2) + "\n"
+    )
+    _atomic_write_text(
+        trial_dir / "trajectory.json", json.dumps(list(trial.trajectory), indent=2) + "\n"
+    )
+    if trial.projection is not None:
+        _atomic_write_text(
+            trial_dir / "projection.json",
+            json.dumps(
+                {
+                    "projection": trial.projection,
+                    "projection_identity": projection_identity,
+                    "projection_spec_digest": trial.projection_spec_digest,
+                }
+            )
+            + "\n",
+        )
+
+
+def read_partial_trials(out: Path, task_id: str) -> list[TrialRecord]:
+    """Trials completed before a kill: valid trial dirs without result.json."""
+    records: list[TrialRecord] = []
+    for trial_dir in sorted(out.glob(f"trial-{task_id}-*")):
+        vector_path = trial_dir / "result.json"
+        trajectory_path = trial_dir / "trajectory.json"
+        if not vector_path.is_file() or not trajectory_path.is_file():
+            continue
+        try:
+            seed = int(trial_dir.name.rsplit("-", 1)[-1])
+        except ValueError:
+            continue
+        vector = TrialVector.model_validate(json.loads(vector_path.read_text(encoding="utf-8")))
+
+        trajectory = ProceduralTrace.model_validate(
+            json.loads(trajectory_path.read_text(encoding="utf-8"))
+        )
+        projection_path = trial_dir / "projection.json"
+        projection = None
+        projection_spec_digest = ""
+        if projection_path.is_file():
+            payload = json.loads(projection_path.read_text(encoding="utf-8"))
+            projection = payload.get("projection")
+            projection_spec_digest = str(payload.get("projection_spec_digest", ""))
+        records.append(
+            TrialRecord(
+                seed=seed,
+                vector=vector,
+                trajectory=trajectory,
+                projection=projection,
+                projection_spec_digest=projection_spec_digest,
+            )
+        )
+    return sorted(records, key=lambda record: record.seed)
+
+
 def write_job(
     out: Path,
     *,
@@ -280,53 +390,19 @@ def write_job(
     agent_dir: Path | None,
 ) -> None:
     """Write a Harbor-shaped job directory."""
-    out.mkdir(parents=True, exist_ok=True)
-    bundle = out / "bundle"
-    task_target = bundle / "task"
-    _copy_package(task_dir, task_target)
-    if tree_digest(task_target) != result.task_digest:
-        raise TaskContractError("copied task package digest does not match result")
-    if agent_dir is not None:
-        agent_target = bundle / "agent"
-        _copy_package(agent_dir, agent_target)
-        if tree_digest(agent_target) != result.agent_digest:
-            raise TaskContractError("copied agent package digest does not match result")
-    manifest = {
-        "format_version": "2",
-        "task": {"path": "bundle/task", "digest": result.task_digest},
-        "agent": (
-            {"path": "bundle/agent", "digest": result.agent_digest}
-            if agent_dir is not None
-            else {"path": None, "digest": result.agent_digest}
-        ),
-        "runtime_identity": result.runtime_identity,
-    }
-    (out / "bundle.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    (out / "config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-    (out / "result.json").write_text(
-        json.dumps(result.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8"
+    write_job_skeleton(
+        out,
+        config=config,
+        task_dir=task_dir,
+        agent_dir=agent_dir,
+        task_digest=result.task_digest,
+        agent_digest=result.agent_digest,
+    )
+    _atomic_write_text(
+        out / "result.json", json.dumps(result.model_dump(mode="json"), indent=2) + "\n"
     )
     for trial in result.trials:
-        trial_dir = out / f"trial-{result.task_id}-{trial.seed}"
-        trial_dir.mkdir(parents=True, exist_ok=True)
-        (trial_dir / "result.json").write_text(
-            json.dumps(_vector_dict(trial.vector), indent=2) + "\n", encoding="utf-8"
-        )
-        (trial_dir / "trajectory.json").write_text(
-            json.dumps(list(trial.trajectory), indent=2) + "\n", encoding="utf-8"
-        )
-        if trial.projection is not None:
-            (trial_dir / "projection.json").write_text(
-                json.dumps(
-                    {
-                        "projection": trial.projection,
-                        "projection_identity": result.projection_identity,
-                        "projection_spec_digest": trial.projection_spec_digest,
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+        write_trial(out, result.task_id, trial, result.projection_identity)
     from or_audit.eval.scorecard import write_scorecards
 
     world_engine = config.get("world_engine")
