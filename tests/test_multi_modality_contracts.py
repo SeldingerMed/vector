@@ -224,7 +224,7 @@ def test_adapter_registry() -> None:
 
 def test_adapter_revision_returns_pin() -> None:
     assert adapter_revision("video-laparoscopic") == (
-        "b1b06a17ff0da168c8f6d5a60442a0279e56b7d2cfaf234f681f8195ca9fe12d"
+        "1181d4f61120cd7a78a1d4917dae3d75d68f653918122fe0adda86ea9ee41c2c"
     )
     # Unknown / unpinned plugins report an empty revision.
     assert adapter_revision("no-such-plugin") == ""
@@ -422,7 +422,7 @@ def load_predictor(*, root: Path, weights_path: Path) -> Predictor:
     return Predictor()
 """
 
-_VIDEO_ADAPTER_DIGEST = "b1b06a17ff0da168c8f6d5a60442a0279e56b7d2cfaf234f681f8195ca9fe12d"
+_VIDEO_ADAPTER_DIGEST = "1181d4f61120cd7a78a1d4917dae3d75d68f653918122fe0adda86ea9ee41c2c"
 
 
 def test_interactive_turns_use_stream_pipeline(tmp_path: Path) -> None:

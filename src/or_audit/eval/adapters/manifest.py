@@ -34,14 +34,14 @@ BUNDLED_ADAPTER_PLUGINS: tuple[dict[str, Any], ...] = (
         "id": "video-laparoscopic",
         "module": "or_audit.eval.adapters.video",
         "attr": "VideoAdapter",
-        "sha256": "b1b06a17ff0da168c8f6d5a60442a0279e56b7d2cfaf234f681f8195ca9fe12d",
+        "sha256": "1181d4f61120cd7a78a1d4917dae3d75d68f653918122fe0adda86ea9ee41c2c",
     },
     {
         "id": "video-endoscopic",
         "module": "or_audit.eval.adapters.video",
         "attr": "VideoAdapter",
         "params": {"modality": "video-endoscopic"},
-        "sha256": "48991e39f5afb997f60d402c44be5502e35b6c82e155a807007a0bfac3a7c24c",
+        "sha256": "aa8508bcc9ccf138b2b0b4efd1759ff8ef13b67f5cd5b0fb6a152c2b579b558a",
     },
     {
         "id": "airway-bronchoscopy",

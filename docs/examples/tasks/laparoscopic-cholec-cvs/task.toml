@@ -33,7 +33,7 @@ features = ["abstention"]
 id = "laparoscopic-video"
 schema_id = "video-clip"
 adapter = "video-laparoscopic"
-adapter_digest = "b1b06a17ff0da168c8f6d5a60442a0279e56b7d2cfaf234f681f8195ca9fe12d"
+adapter_digest = "1181d4f61120cd7a78a1d4917dae3d75d68f653918122fe0adda86ea9ee41c2c"
 
 [harness]
 interaction_mode = "single-turn"
