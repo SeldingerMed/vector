@@ -15,6 +15,7 @@ from or_audit.errors import TaskContractError
 from or_audit.eval.contracts import PerturbationSpec
 from or_audit.eval.gym_world import (
     assert_perturbations_applied,
+    episode_diverged,
     run_gym_episode,
     split_perturbations,
 )
@@ -616,3 +617,10 @@ def test_make_gym_without_lumen_explains_install() -> None:
 
     with pytest.raises(TaskContractError, match="Lumen"):
         make_gym(load_task(LUMEN_TASK))
+
+
+def test_episode_diverged_reads_recorder_tags() -> None:
+    assert episode_diverged([{"info": {"max_pen": 0.1}}]) is False
+    assert episode_diverged([{"info": {"max_pen": "__nonfinite__:nan"}}]) is True
+    assert episode_diverged([{"nested": [{"v": "__nonfinite__:+inf"}]}]) is True
+    assert episode_diverged([]) is False

@@ -381,6 +381,28 @@ def nonfinite_kind(value: Any) -> str:
     return ""
 
 
+def episode_diverged(steps: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> bool:
+    """Whether the recorder saw non-finite engine output this episode.
+
+    Recorded infos carry tagged strings where the engine reported NaN or an
+    infinity (never a silent 0.0). Any tag means the solver diverged at
+    least once — observed fact about this episode, not an inference from
+    one channel. Absence means no divergence was observed, which verifiers
+    interpret under their own contracts; it is data, not proof.
+    """
+    stack: list[Any] = list(steps)
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            if current.startswith(NONFINITE_TAG):
+                return True
+        elif isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+    return False
+
+
 def jsonable(value: Any) -> Any:
     """Convert numpy values so a trajectory can be JSON and canonical.
 
