@@ -27,6 +27,10 @@ Recorded perturbations present in every fault trial trajectory
 (un-faulted) bundle is correctly refused as a head mismatch — replay
 re-executes, it does not hallucinate the faults back.
 
+Paired comparison (`or_audit.eval.compare.compare_jobs` on `safe_success`):
+seeds (0, 1), dropped 0, mean diff 0.0, 95% CI (0.0, 0.0) — the machinery
+works; the result is uninformative because neither arm succeeds.
+
 ## Limits
 
 - Random actions neither reach the target nor touch the wall, so both arms
