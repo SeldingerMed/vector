@@ -17,6 +17,26 @@ not report those workstreams as implemented. The historical N1–N11 ledger and
 audit findings are retained after the roadmap. An old `shipped` designation
 applies to its named mechanism, not to every new acceptance criterion here.
 
+### Implementation status — 2026-09-09
+
+Work is merged per phase as PRs; nothing below claims a workstream finished
+unless every acceptance criterion is met. Partial means shipped mechanism
+with named gaps; blocked means a non-code prerequisite (partner, hardware,
+data, or product decision). The per-workstream sections below predate this
+table: where they still say "planned", read that as the original plan
+language — this table is the current status source of truth.
+
+| ID | Status | Shipped (PRs) | Explicitly remaining |
+|---|---|---|---|
+| A | partial | Brief + runnable lumen task v1 + strict verifier (#33-35), reference-policy A3 comparison (#44) | A3 trained-checkpoint comparison; A5 external reproduction (blocked: partner) |
+| B | partial | Threat model + env scrubbing (#36), container backend (#38), bounded transfer (#39), remainder + attestation + CI image (#40), probes (#41) | B5 cloud mint/storage (blocked: cloud owner); registry image publication (commercial decision) |
+| C | partial | Dossier + cited gate (#37), orphan-label refusal + provenance + fault robustness (#42) | C4 world-native distributions (need SOFA/GPU world revisions); C5 phantom (blocked: partner) |
+| D | partial | Paired comparison + CIs (#43), compare CLI (#45) | D1 case manifests with patient/site grouping; D5 uncertainty views in scorecards (no dataset carries the metadata yet) |
+| E | partial | Obs/action contract + A3 (#44), interactive streams (#46), LeRobot reader + MONAI (#51), honest video adapter (#54) | E4 media alignment (no test media; mp4 banned from VC); semantic output schemas (needs E contract design) |
+| F | partial | Prefix-replay branching proof + seed caveat (#47) | F1/F2 trajectory-backed scoring (needs imported trajectory benchmark); F4/F5 planning utility (blocked: no learned dynamics model) |
+| G | partial | SB3 PPO recipe + measurement (#48), runnable fixes (#50, #52) | Verifier-derived training rewards (blocked: divergence unobservable, projection withdrawn); Prime interop |
+| H | partial | Episode resume (#49), crash-safe writes + partial recovery (#53) | Fleet queue/autoscaling (blocked: hosted capacity decision); vectorized stepping (not justified by measured need) |
+
 ### Status and evidence rules
 
 - **Existing:** found in the reviewed source; runtime verification is stated
