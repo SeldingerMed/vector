@@ -19,6 +19,7 @@ from or_audit.eval.job_config import BUILTIN_RANDOM, EvaluationStageSpec, Resolv
 from or_audit.eval.loader import load_agent, load_task
 from or_audit.eval.predict import load_items
 from or_audit.eval.runner import assert_trial_capacity, builtin_random_agent, replay_job, run_job
+from or_audit.eval.split import load_split_manifest
 from or_audit.eval.task import ProjectionSpec, TaskSpec
 
 
@@ -148,15 +149,66 @@ def _independent_case_count(
         )
     cases: set[str] = set()
     for root, task, trials in tasks:
-        for item in load_items(root / task.environment.inputs_path)[:trials]:
-            if stage.independent_case_key not in item:
+        if task.environment.splits_path:
+            manifest = load_split_manifest(root / task.environment.splits_path)
+            target_split = stage.split if stage.split else str(stage.name)
+            matching = [e for e in manifest.entries if e.split == target_split]
+            if not matching:
+                available_splits = sorted({e.split for e in manifest.entries})
                 raise TaskContractError(
-                    f"task {task.id} input {item['id']!r} has no independent-case field "
-                    f"{stage.independent_case_key!r}"
+                    f"stage {stage.name} requests split {target_split!r} but "
+                    f"manifest for {task.id} only defines splits: {available_splits}"
                 )
-            cases.add(
-                json.dumps(item[stage.independent_case_key], sort_keys=True, separators=(",", ":"))
-            )
+
+            unit_str = stage.independent_case_unit.lower()
+            if unit_str in ("case", "held-out clip", "clip", "case_id"):
+                unit = "case"
+            elif unit_str in ("patient", "patient_id"):
+                unit = "patient"
+            elif unit_str in ("site", "site_id", "center"):
+                unit = "site"
+            else:
+                raise TaskContractError(
+                    f"stage {stage.name} declares unsupported independent_case_unit "
+                    f"{stage.independent_case_unit!r}; must be 'case', 'patient', or 'site'"
+                )
+
+            if unit == "patient" and not manifest.supports_patient_disjoint:
+                raise TaskContractError(
+                    f"stage {stage.name} requests independent_case_unit='patient' but "
+                    f"manifest for {task.id} does not support patient-disjoint claims"
+                )
+            if unit == "site" and not manifest.supports_site_disjoint:
+                raise TaskContractError(
+                    f"stage {stage.name} requests independent_case_unit='site' but "
+                    f"manifest for {task.id} does not support site-disjoint claims"
+                )
+
+            task_group = stage.independent_case_groups.get(task.id, task.id)
+            split_items = manifest.items_for_split(target_split)
+            evaluated_items = set(split_items[:trials] if trials is not None else split_items)
+            for entry in matching:
+                if any(item in evaluated_items for item in entry.item_ids):
+                    if unit == "patient" and entry.patient_id:
+                        cases.add(f"{task_group}:patient:{entry.patient_id}")
+                    elif unit == "site" and entry.site_id:
+                        cases.add(f"{task_group}:site:{entry.site_id}")
+                    else:
+                        cases.add(f"{task_group}:case:{entry.case_id}")
+        else:
+            for item in load_items(root / task.environment.inputs_path)[:trials]:
+                if stage.independent_case_key not in item:
+                    raise TaskContractError(
+                        f"task {task.id} input {item['id']!r} has no independent-case field "
+                        f"{stage.independent_case_key!r}"
+                    )
+                cases.add(
+                    json.dumps(
+                        item[stage.independent_case_key],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
     return len(cases)
 
 

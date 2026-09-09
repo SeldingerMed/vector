@@ -42,6 +42,7 @@ class EvaluationStageSpec(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: StageName
+    split: str = ""
     evaluation_unit: NonEmptyPath
     unit_source: UnitSource = "trials"
     target_units: Annotated[int, Field(ge=1)]

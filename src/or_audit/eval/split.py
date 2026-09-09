@@ -125,8 +125,10 @@ class SplitManifest(BaseModel):
         """Whether all entries carry pseudonymous site identifiers."""
         return all(bool(entry.site_id) for entry in self.entries)
 
-    def validate_against_input_items(self, input_ids: Iterable[str]) -> None:
-        """Verify that input items exactly match the manifest's mapped items."""
+    def validate_against_input_items(
+        self, input_ids: Iterable[str], *, strict: bool = False
+    ) -> None:
+        """Verify that input items are mapped in the manifest."""
         expected_set = set(input_ids)
         manifest_items: set[str] = set()
         for entry in self.entries:
@@ -138,16 +140,43 @@ class SplitManifest(BaseModel):
                 f"split manifest for {self.dataset_id} missing items from inputs: "
                 f"{sorted(missing_from_manifest)}"
             )
-        extra_in_manifest = manifest_items - expected_set
-        if extra_in_manifest:
-            raise TaskContractError(
-                f"split manifest for {self.dataset_id} contains items not in inputs: "
-                f"{sorted(extra_in_manifest)}"
-            )
+        if strict:
+            extra_in_manifest = manifest_items - expected_set
+            if extra_in_manifest:
+                raise TaskContractError(
+                    f"split manifest for {self.dataset_id} contains items not in inputs: "
+                    f"{sorted(extra_in_manifest)}"
+                )
 
     def independent_case_count(self, split: SplitName, unit: DisjointUnit = "case") -> int:
         """Count distinct independent statistical units in a declared split."""
         matching = [entry for entry in self.entries if entry.split == split]
+        if not matching:
+            return 0
+        if unit == "patient":
+            if not self.supports_patient_disjoint:
+                raise TaskContractError(
+                    f"dataset {self.dataset_id} cannot count independent patients: "
+                    "one or more entries lack patient_id"
+                )
+            return len({entry.patient_id for entry in matching if entry.patient_id})
+        if unit == "site":
+            if not self.supports_site_disjoint:
+                raise TaskContractError(
+                    f"dataset {self.dataset_id} cannot count independent sites: "
+                    "one or more entries lack site_id"
+                )
+            return len({entry.site_id for entry in matching if entry.site_id})
+        return len({entry.case_id for entry in matching})
+
+    def independent_case_count_for_items(
+        self, item_ids: Iterable[str], unit: DisjointUnit = "case"
+    ) -> int:
+        """Count distinct independent units among the specified item IDs."""
+        item_set = set(item_ids)
+        matching = [
+            entry for entry in self.entries if any(item in item_set for item in entry.item_ids)
+        ]
         if not matching:
             return 0
         if unit == "patient":

@@ -226,6 +226,7 @@ agents = [{json.dumps(str(VIDEO_AGENT))}]
 
 [stage]
 name = "qualification"
+split = "test"
 evaluation_unit = "scored clip"
 target_units = 3
 independent_case_unit = "held-out clip"
