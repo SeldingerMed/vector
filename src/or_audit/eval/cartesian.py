@@ -185,15 +185,18 @@ def _independent_case_count(
                 )
 
             task_group = stage.independent_case_groups.get(task.id, task.id)
-            split_items = manifest.items_for_split(target_split)
+            task_group = stage.independent_case_groups.get(task.id, task.id)
             all_inputs = load_items(root / task.environment.inputs_path)
-            split_order = {item_id: idx for idx, item_id in enumerate(split_items)}
-            filtered_inputs = [item for item in all_inputs if str(item["id"]) in set(split_items)]
-            filtered_inputs.sort(key=lambda item: split_order.get(str(item["id"]), 0))
+            item_by_id = {str(item["id"]): item for item in all_inputs}
+            ordered_inputs = [
+                item_by_id[item_id]
+                for item_id in manifest.items_for_split(target_split)
+                if item_id in item_by_id
+            ]
             evaluated_items = (
-                {str(item["id"]) for item in filtered_inputs[:trials]}
+                {str(item["id"]) for item in ordered_inputs[:trials]}
                 if trials is not None
-                else {str(item["id"]) for item in filtered_inputs}
+                else {str(item["id"]) for item in ordered_inputs}
             )
             for entry in matching:
                 if any(item in evaluated_items for item in entry.item_ids):
@@ -316,8 +319,9 @@ def run_cartesian_job(
             raise TaskContractError(
                 f"stage {stage.name} independent_case_groups keys must exactly match task ids"
             )
+        stage_split = stage.split if stage.split else None
         for task_dir, task, _, _, _, trials in planned:
-            assert_trial_capacity(task, task_dir, trials or 0)
+            assert_trial_capacity(task, task_dir, trials or 0, split=stage_split)
         observed_cases = _independent_case_count(planned, stage)
         if observed_cases != stage.independent_cases:
             raise TaskContractError(
@@ -325,6 +329,7 @@ def run_cartesian_job(
                 f"{stage.independent_case_key!r} identifies {observed_cases}"
             )
 
+    stage_split = stage.split if stage is not None and stage.split else None
     pairs: list[PairRecord] = []
     outcomes: list[str] = []
     observed_units = 0
@@ -337,6 +342,7 @@ def run_cartesian_job(
             out=out / dirname,
             n=pair_trials,
             gym_factory=gym_factory,
+            split=stage_split,
         )
         pairs.append(
             PairRecord(

@@ -692,11 +692,12 @@ def _run_predictions(
                 f"task {task.id} requests split {target_split!r} but "
                 f"manifest only defines splits: {available_splits}"
             )
-        split_order = {
-            item_id: idx for idx, item_id in enumerate(manifest.items_for_split(target_split))
-        }
-        filtered = [item for item in inputs if str(item["id"]) in allowed_items]
-        filtered.sort(key=lambda item: split_order.get(str(item["id"]), 0))
+        item_by_id = {str(item["id"]): item for item in inputs}
+        filtered = [
+            item_by_id[item_id]
+            for item_id in manifest.items_for_split(target_split)
+            if item_id in item_by_id
+        ]
         if not filtered:
             raise TaskContractError(
                 f"task {task.id} has no input items matching split {target_split!r}"
@@ -887,11 +888,12 @@ def _run_interactive(
                 f"task {task.id} requests split {target_split!r} but "
                 f"manifest only defines splits: {available_splits}"
             )
-        split_order = {
-            item_id: idx for idx, item_id in enumerate(manifest.items_for_split(target_split))
-        }
-        filtered = [item for item in inputs if str(item["id"]) in allowed_items]
-        filtered.sort(key=lambda item: split_order.get(str(item["id"]), 0))
+        item_by_id = {str(item["id"]): item for item in inputs}
+        filtered = [
+            item_by_id[item_id]
+            for item_id in manifest.items_for_split(target_split)
+            if item_id in item_by_id
+        ]
         if not filtered:
             raise TaskContractError(
                 f"task {task.id} has no input items matching split {target_split!r}"

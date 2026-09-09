@@ -679,10 +679,8 @@ def test_runner_filters_interleaved_splits_without_leakage(tmp_path: Path) -> No
     )
     assert result.n == 2
     assert result.split == "test"
-    for trial in result.trials:
-        item_id = trial.trajectory[0].get("input", {}).get("id")
-        assert item_id in ("clip-001", "clip-002")
-        assert "train" not in str(item_id)
+    executed_ids = [trial.trajectory[0].get("input", {}).get("id") for trial in result.trials]
+    assert executed_ids == ["clip-001", "clip-002"]
 
 
 def test_cross_split_resume_refused(tmp_path: Path) -> None:
@@ -851,3 +849,10 @@ prerequisites = ["integration-smoke", "pilot"]
     manifest = run_cartesian_job(resolve_job(job), out=tmp_path / "out-subset")
     assert manifest.stage is not None
     assert manifest.stage.independent_cases == 2
+    from or_audit.eval.job import read_job_result
+
+    assert len(manifest.pairs) == 1
+    pair_result = read_job_result(tmp_path / "out-subset" / manifest.pairs[0].dir)
+    assert pair_result.split == "test"
+    pair_ids = [trial.trajectory[0].get("input", {}).get("id") for trial in pair_result.trials]
+    assert pair_ids == ["clip-001", "clip-002"]
