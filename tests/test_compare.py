@@ -123,14 +123,17 @@ def test_cli_compare_refuses_mismatched_tasks(
 ) -> None:
     from or_audit.cli import main
 
-    assert main(["compare", str(tmp_path), str(tmp_path), "--metric", "m"]) == 1
-    assert "COMPARE REFUSED" in capsys.readouterr().err
-
-
-def test_task_mismatch_refuses() -> None:
-    other = _job({0: True}).model_copy(update={"task_id": "other"})
-    with pytest.raises(TaskContractError, match="identical task_id"):
-        compare_jobs(_job({0: True}), other, "m")
+    second = tmp_path / "b"
+    first = tmp_path / "a"
+    first.mkdir()
+    second.mkdir()
+    (first / "result.json").write_text(_job({0: True}).model_dump_json(), encoding="utf-8")
+    (second / "result.json").write_text(
+        _job({0: True}).model_copy(update={"task_id": "other"}).model_dump_json(),
+        encoding="utf-8",
+    )
+    assert main(["compare", str(first), str(second), "--metric", "m"]) == 1
+    assert "identical task_id" in capsys.readouterr().err
 
 
 def test_duplicate_seeds_refuse() -> None:

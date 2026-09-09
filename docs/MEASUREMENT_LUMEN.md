@@ -45,8 +45,9 @@ Status: frozen 2026-09-08 against `seldinger-lumen` world pin
   of tip angle, remaining distance — all route-normalized, L180-183).
 - Action: 2-dim float32 `(insertion, twist)` in [-1, 1], scaled by
   `max_insertion` (default 2.0) and `max_twist` (default 1.0) per step
-  (L53-56, L211-213). Machine-checked in
-  `tests/test_lumen_real_env.py::test_lumen_observation_action_contract`.
+  (L53-56, L211-213). Space shapes, dtypes, and bounds are machine-checked
+  in `tests/test_lumen_real_env.py::test_lumen_observation_action_contract`;
+  the scaling factors are read from source, not executed.
 - The reference linear policy (`seldingermed/lumen-linear`) consumes the
   raw normalized observation with no extra preprocessing and clips to
   [-1, 1]: weights, bias, and clipping are all pinned in the package.

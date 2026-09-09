@@ -13,6 +13,7 @@ Written against ``argparse`` rather than a CLI framework.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import tempfile
 from collections.abc import Sequence
@@ -326,6 +327,9 @@ def _compare(args: argparse.Namespace) -> int:
         )
     except TaskContractError as exc:
         print(f"COMPARE REFUSED: {exc}", file=sys.stderr)
+        return 1
+    except (json.JSONDecodeError, ValueError) as exc:
+        print(f"COMPARE REFUSED: malformed job artifact: {exc}", file=sys.stderr)
         return 1
     print(f"paired comparison: {args.b} - {args.a} metric {result.metric_id}")
     print(f"seeds: {list(result.paired_seeds)} dropped_unassessable: {result.dropped_unassessable}")
