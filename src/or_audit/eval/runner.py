@@ -185,6 +185,40 @@ def builtin_random_agent(interface_id: str = "gym-policy") -> AgentPackage:
     )
 
 
+def _resume_trials(
+    out: Path,
+    *,
+    task_id: str,
+    task_digest: str,
+    agent_digest: str,
+    n: int,
+    enabled: bool,
+) -> dict[int, TrialRecord]:
+    """Completed trials to keep when resuming an interrupted job.
+
+    Refuses when the previous result names a different task, package
+    digests, or episode count: resuming across a changed contract would
+    silently mix incomparable trials into one head.
+    """
+    if not enabled:
+        return {}
+    previous = read_job_result(out)
+    if previous.task_id != task_id:
+        raise TaskContractError(
+            f"cannot resume {out}: previous result is task {previous.task_id!r}"
+        )
+    if previous.task_digest != task_digest:
+        raise TaskContractError(f"cannot resume {out}: task package changed since")
+    if previous.agent_digest != agent_digest:
+        raise TaskContractError(f"cannot resume {out}: agent package changed since")
+    if previous.n > n:
+        raise TaskContractError(
+            f"cannot resume {out}: previous n={previous.n} exceeds requested n={n}; "
+            "shrinking a schedule would drop evidence"
+        )
+    return {trial.seed: trial for trial in previous.trials}
+
+
 def run_job(
     *,
     task: TaskSpec,
@@ -194,6 +228,7 @@ def run_job(
     out: Path,
     n: int | None = None,
     gym_factory: GymFactory | None = None,
+    resume: bool = False,
 ) -> JobResult:
     assert_bind(task, agent)
     task.assert_runnable()
@@ -209,6 +244,14 @@ def run_job(
     if episodes < 1:
         raise TaskContractError(f"n must be >= 1, got {episodes}")
     assert_trial_capacity(task, task_dir, episodes)
+    resume_trials: dict[int, TrialRecord] = _resume_trials(
+        out,
+        task_id=task.id,
+        task_digest=task_package_digest,
+        agent_digest=agent_package_digest,
+        n=episodes,
+        enabled=resume,
+    )
     extra: dict[str, Any] = {
         "interaction_mode": task.harness.interaction_mode.value,
         "world_engine": _engine_provenance(task, None),
@@ -234,6 +277,7 @@ def run_job(
             agent_digest=agent_package_digest,
             n=episodes,
             gym_factory=gym_factory,
+            resume_trials=resume_trials,
         )
         extra["safety_max_pen"] = safety
         extra["world_engine"] = provenance
@@ -246,6 +290,7 @@ def run_job(
             task_digest=task_package_digest,
             agent_digest=agent_package_digest,
             n=episodes,
+            resume_trials=resume_trials,
         )
     elif task.harness.interaction_mode is InteractionMode.INTERACTIVE:
         result = _run_interactive(
@@ -256,6 +301,7 @@ def run_job(
             task_digest=task_package_digest,
             agent_digest=agent_package_digest,
             n=episodes,
+            resume_trials=resume_trials,
         )
     elif task.harness.interaction_mode is InteractionMode.COUNTERFACTUAL:
         result = _run_counterfactual(
@@ -266,6 +312,7 @@ def run_job(
             task_digest=task_package_digest,
             agent_digest=agent_package_digest,
             n=episodes,
+            resume_trials=resume_trials,
         )
     else:  # pragma: no cover - enum exhaustiveness
         raise TaskContractError(f"unsupported harness mode {task.harness.interaction_mode}")
@@ -287,6 +334,18 @@ def run_job(
     return result
 
 
+def _with_resumed(
+    trials: list[TrialRecord], resume_trials: dict[int, TrialRecord]
+) -> tuple[TrialRecord, ...]:
+    """Merge fresh trials with resumed ones, ordered by seed."""
+    merged = {trial.seed: trial for trial in trials}
+    overlap = set(merged) & set(resume_trials)
+    if overlap:
+        raise TaskContractError(f"resume collision on seeds {sorted(overlap)}")
+    merged.update(resume_trials)
+    return tuple(merged[seed] for seed in sorted(merged))
+
+
 def _run_closed_loop(
     *,
     task: TaskSpec,
@@ -297,6 +356,7 @@ def _run_closed_loop(
     task_digest: str,
     agent_digest: str,
     gym_factory: GymFactory | None,
+    resume_trials: dict[int, TrialRecord] | None = None,
 ) -> tuple[JobResult, float, dict[str, Any]]:
     if agent.kind not in {AgentKind.RANDOM.value, AgentKind.POLICY.value}:
         raise TaskContractError(f"closed-loop runner does not implement kind={agent.kind}")
@@ -320,6 +380,8 @@ def _run_closed_loop(
     trials = []
     try:
         for seed in range(n):
+            if resume_trials is not None and seed in resume_trials:
+                continue
             if policy is not None:
                 policy.reset(seed=seed)
             scenario = next(
@@ -420,7 +482,7 @@ def _run_closed_loop(
         assemble_job_result(
             task=task,
             agent=agent,
-            trials=tuple(trials),
+            trials=tuple(_with_resumed(trials, resume_trials or {})),
             task_digest=task_digest,
             world_engine=provenance,
             agent_digest=agent_digest,
@@ -440,6 +502,7 @@ def _run_predictions(
     agent_digest: str,
     n: int,
     mode: InteractionMode,
+    resume_trials: dict[int, TrialRecord] | None = None,
 ) -> JobResult:
     if agent_dir is None:
         raise TaskContractError(f"agent {agent.id} has no package directory")
@@ -463,6 +526,8 @@ def _run_predictions(
     trials = []
     try:
         for seed, item in enumerate(inputs[:n]):
+            if resume_trials is not None and seed in resume_trials:
+                continue
             item_id = str(item["id"])
             if item_id not in labels:
                 raise TaskContractError(f"task {task.id} has no label for item {item_id!r}")
@@ -545,7 +610,7 @@ def _run_predictions(
     return assemble_job_result(
         task=task,
         agent=agent,
-        trials=tuple(trials),
+        trials=tuple(_with_resumed(trials, resume_trials or {})),
         task_digest=task_digest,
         agent_digest=agent_digest,
         claim_footer=footer,
@@ -566,6 +631,7 @@ def _run_interactive(
     task_digest: str,
     agent_digest: str,
     n: int,
+    resume_trials: dict[int, TrialRecord] | None = None,
 ) -> JobResult:
     if agent_dir is None:
         raise TaskContractError(f"agent {agent.id} has no package directory")
@@ -592,6 +658,8 @@ def _run_interactive(
     trials = []
     try:
         for seed, item in enumerate(inputs[:n]):
+            if resume_trials is not None and seed in resume_trials:
+                continue
             item_id = str(item["id"])
             if item_id not in labels:
                 raise TaskContractError(f"task {task.id} has no label for item {item_id!r}")
@@ -689,7 +757,7 @@ def _run_interactive(
     return assemble_job_result(
         task=task,
         agent=agent,
-        trials=tuple(trials),
+        trials=tuple(_with_resumed(trials, resume_trials or {})),
         task_digest=task_digest,
         agent_digest=agent_digest,
         claim_footer=footer,
