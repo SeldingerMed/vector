@@ -1,0 +1,19 @@
+format_version = "2"
+id = "example/trajectory-forecaster"
+agent_version = "0"
+kind = "frozen-model"
+weights_pin = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+weights_path = "weights.json"
+
+[[capabilities]]
+interface = "trajectory-forecast"
+interaction_modes = ["single-turn"]
+protocol_versions = ["1"]
+observations = ["episode-history"]
+outputs = ["horizon-forecast"]
+
+[runtime]
+kind = "local"
+protocol_version = "1"
+entrypoint = "predictor.py:load_predictor"
+timeout_sec = 600.0
