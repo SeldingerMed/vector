@@ -16,6 +16,7 @@ from or_audit.eval.enums import AgentKind, PortId, WorldKind
 from or_audit.eval.gym_world import (
     GymFactory,
     assert_perturbations_applied,
+    episode_diverged,
     make_gym,
     run_gym_episode,
     sample_action,
@@ -530,6 +531,7 @@ def _run_closed_loop(
                     "info": info,
                     "trajectory": list(trace),
                     "safety_max_pen": safety,
+                    "diverged_observed": episode_diverged([step.get("info", {}) for step in steps]),
                 },
                 runtime=verifier,
             )
