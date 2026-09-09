@@ -376,8 +376,8 @@ def nonfinite_kind(value: Any) -> str:
     """
     if isinstance(value, str) and value.startswith(NONFINITE_TAG):
         return value[len(NONFINITE_TAG) :] or "non-finite"
-    if isinstance(value, float) and not np.isfinite(value):
-        return nonfinite_tag(value)[len(NONFINITE_TAG) :]
+    if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+        return nonfinite_tag(float(value))[len(NONFINITE_TAG) :]
     return ""
 
 

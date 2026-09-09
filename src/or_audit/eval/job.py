@@ -430,7 +430,16 @@ def read_partial_trials(out: Path, task_id: str) -> tuple[list[TrialRecord], dic
         projection = None
         projection_spec_digest = ""
         if projection_path.is_file():
-            payload = json.loads(projection_path.read_text(encoding="utf-8"))
+            try:
+                payload = json.loads(projection_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise TaskContractError(
+                    f"trial dir {trial_dir.name} is corrupt: invalid projection.json ({exc})"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise TaskContractError(
+                    f"trial dir {trial_dir.name} is corrupt: projection.json is not an object"
+                )
             projection = payload.get("projection")
             projection_spec_digest = str(payload.get("projection_spec_digest", ""))
         records.append(

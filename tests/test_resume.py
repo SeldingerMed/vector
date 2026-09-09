@@ -224,3 +224,23 @@ def test_kill_recovery_pre_write_drift_refuses(tmp_path: Path) -> None:
             resume=True,
         )
     assert not trial1_dir.exists(), "drifted trial was written before rejection"
+
+
+def test_resume_with_corrupt_projection_refuses(tmp_path: Path) -> None:
+    out = tmp_path / "job"
+    _run(out, 2)
+    (out / "result.json").unlink()
+    proj = out / "trial-video-nextstep-0" / "projection.json"
+    proj.write_text("not-valid-json{", encoding="utf-8")
+    with pytest.raises(TaskContractError, match=r"invalid projection\.json"):
+        _run(out, 2, resume=True)
+
+
+def test_resume_with_non_object_projection_refuses(tmp_path: Path) -> None:
+    out = tmp_path / "job"
+    _run(out, 2)
+    (out / "result.json").unlink()
+    proj = out / "trial-video-nextstep-0" / "projection.json"
+    proj.write_text('["not", "an", "object"]', encoding="utf-8")
+    with pytest.raises(TaskContractError, match=r"projection\.json is not an object"):
+        _run(out, 2, resume=True)
