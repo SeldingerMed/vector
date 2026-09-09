@@ -82,7 +82,7 @@ class VideoAdapter(ModalityAdapter):
             return VideoFrameObservation(
                 frame_index=int(observation["frame_index"]),
                 timestamp_ms=float(ts) if ts is not None else None,
-                image_uri=observation.get("image_uri"),
+                image_uri=str(uri) if (uri := observation.get("image_uri")) is not None else None,
                 width=int(w) if w is not None else None,
                 height=int(h) if h is not None else None,
                 optical_flow=flow_tuple,
