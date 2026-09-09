@@ -8,8 +8,9 @@ nothing — not evidence the model is good, and not closed-loop MPC.
 
 MLP dynamics `(obs[5], act[2]) → next obs[5]`, 7-128-128-5, trained on 32
 random-policy episodes (30 steps each), held out 8 episodes. Normalized
-MSE: train 0.11, held out 0.13. Pinned stack: same as the training recipe
-(`seldinger-lumen` @3c6bb39e, warp 1.15.0, torch 2.14.0 CPU).
+MSE: train 0.11, held out 0.13. Pinned stack: same as
+[`TRAINING_LUMEN.md`](TRAINING_LUMEN.md) (`seldinger-lumen` @3c6bb39e,
+warp-lang 1.15.0, newton @6dfe730, gymnasium 1.3.0, torch 2.14.0 CPU).
 
 ## Protocol (fixed before running)
 
@@ -38,7 +39,9 @@ backward — plausible forecasts do not imply safe actions.
 
 - Toy model, toy horizon, n=5: no significance claim, no transfer claim.
 - Open-loop blocks, not per-step MPC; no uncertainty-aware planning.
-- Seeds do not vary initial conditions (see dossier), so this measures
+- Seeds do not vary initial conditions (see
+  [`MEASUREMENT_LUMEN.md`](MEASUREMENT_LUMEN.md)), so this measures
   planner quality on fixed starts, not generalization.
-- No checkpoint is committed; retrain from the recipe above. A stronger
+- No checkpoint is committed; retrain with the training script in
+  [`TRAINING_LUMEN.md`](TRAINING_LUMEN.md) plus the planner loop above. A stronger
   model or a real planner would change the numbers, not the protocol.
