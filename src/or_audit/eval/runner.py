@@ -193,7 +193,7 @@ def _resume_trials(
     agent_digest: str,
     n: int,
     enabled: bool,
-) -> dict[int, TrialRecord]:
+) -> tuple[dict[int, TrialRecord], JobResult | None]:
     """Completed trials to keep when resuming an interrupted job.
 
     Refuses when the previous result names a different task, package
@@ -201,7 +201,7 @@ def _resume_trials(
     silently mix incomparable trials into one head.
     """
     if not enabled:
-        return {}
+        return {}, None
     previous = read_job_result(out)
     if previous.task_id != task_id:
         raise TaskContractError(
@@ -216,7 +216,7 @@ def _resume_trials(
             f"cannot resume {out}: previous n={previous.n} exceeds requested n={n}; "
             "shrinking a schedule would drop evidence"
         )
-    return {trial.seed: trial for trial in previous.trials}
+    return {trial.seed: trial for trial in previous.trials}, previous
 
 
 def run_job(
@@ -244,7 +244,7 @@ def run_job(
     if episodes < 1:
         raise TaskContractError(f"n must be >= 1, got {episodes}")
     assert_trial_capacity(task, task_dir, episodes)
-    resume_trials: dict[int, TrialRecord] = _resume_trials(
+    resume_trials, previous_result = _resume_trials(
         out,
         task_id=task.id,
         task_digest=task_package_digest,
@@ -316,6 +316,13 @@ def run_job(
         )
     else:  # pragma: no cover - enum exhaustiveness
         raise TaskContractError(f"unsupported harness mode {task.harness.interaction_mode}")
+    if previous_result is not None and resume_trials:
+        before, after = previous_result.world_engine, result.world_engine
+        if before is not None and after is not None and before != after:
+            raise TaskContractError(
+                f"cannot resume {out}: world engine changed since "
+                f"({before} -> {after}); resumed trials would be mis-attested"
+            )
     config = {
         "format_version": "2",
         "task_id": task.id,

@@ -82,3 +82,35 @@ def test_cli_resume_flag(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     assert "n=1" in second
     assert len(read_job_result(out).trials) == 1
     assert first.split("head ")[1] == second.split("head ")[1]
+
+
+def test_resume_across_backend_change_refuses(tmp_path: Path) -> None:
+    from or_audit.eval.loader import load_task
+    from or_audit.eval.runner import builtin_random_agent, run_job
+    from tests.test_eval_run import LUMEN_TASK, FakeLumenEnv
+
+    class OtherBackend(FakeLumenEnv):
+        def engine_provenance(self) -> dict[str, str]:
+            return {**super().engine_provenance(), "backend": "real"}
+
+    out = tmp_path / "job"
+    run_job(
+        task=load_task(LUMEN_TASK),
+        task_dir=LUMEN_TASK,
+        agent=builtin_random_agent(),
+        agent_dir=None,
+        out=out,
+        n=1,
+        gym_factory=lambda task: FakeLumenEnv(),
+    )
+    with pytest.raises(TaskContractError, match="world engine changed"):
+        run_job(
+            task=load_task(LUMEN_TASK),
+            task_dir=LUMEN_TASK,
+            agent=builtin_random_agent(),
+            agent_dir=None,
+            out=out,
+            n=2,
+            gym_factory=lambda task: OtherBackend(),
+            resume=True,
+        )
