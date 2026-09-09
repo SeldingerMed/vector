@@ -16,13 +16,18 @@ from or_audit.eval.enums import ModalityKind
 
 @dataclass(frozen=True)
 class VideoFrameObservation:
-    """Standard observation payload for procedural video tasks."""
+    """Standard observation payload for procedural video tasks.
+
+    Only ``frame_index`` is ever positioned; every other field is ``None``
+    when the source did not report it. A defaulted timestamp or resolution
+    is a fabricated measurement.
+    """
 
     frame_index: int
-    timestamp_ms: float
-    image_uri: str = ""
-    width: int = 1920
-    height: int = 1080
+    timestamp_ms: float | None = None
+    image_uri: str | None = None
+    width: int | None = None
+    height: int | None = None
     optical_flow: tuple[float, ...] | None = None
     active_tools: tuple[str, ...] = ()
     extra: dict[str, Any] = field(default_factory=dict)
@@ -51,7 +56,8 @@ class VideoAdapter(ModalityAdapter):
     def validate_observation(self, observation: Any) -> bool:
         """Validate observation has required video frame metadata."""
         if isinstance(observation, VideoFrameObservation):
-            return observation.frame_index >= 0 and observation.timestamp_ms >= 0.0
+            timestamp_ok = observation.timestamp_ms is None or observation.timestamp_ms >= 0.0
+            return observation.frame_index >= 0 and timestamp_ok
         if isinstance(observation, dict):
             return "frame_index" in observation or "image" in observation or "frame" in observation
         return hasattr(observation, "__array__") or isinstance(observation, (list, tuple))
@@ -75,10 +81,10 @@ class VideoAdapter(ModalityAdapter):
             h = observation.get("height")
             return VideoFrameObservation(
                 frame_index=int(observation["frame_index"]),
-                timestamp_ms=float(ts) if ts is not None else 0.0,
-                image_uri=str(observation.get("image_uri") or ""),
-                width=int(w) if w is not None else 1920,
-                height=int(h) if h is not None else 1080,
+                timestamp_ms=float(ts) if ts is not None else None,
+                image_uri=str(uri) if (uri := observation.get("image_uri")) is not None else None,
+                width=int(w) if w is not None else None,
+                height=int(h) if h is not None else None,
                 optical_flow=flow_tuple,
                 active_tools=tuple(tools) if isinstance(tools, (list, tuple)) else (),
                 extra=extra_dict if isinstance(extra_dict, dict) else {},
@@ -86,7 +92,7 @@ class VideoAdapter(ModalityAdapter):
         if isinstance(observation, dict) and "video_uri" in observation:
             return {
                 "frame_index": 0,
-                "timestamp_ms": 0.0,
+                "timestamp_ms": None,
                 "image_uri": str(observation["video_uri"]),
                 "clip_id": str(observation.get("id", "")),
                 "frame_count": int(observation.get("frame_count", 0)),
