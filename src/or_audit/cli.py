@@ -278,6 +278,7 @@ def _run(args: argparse.Namespace) -> int:
                 agent_dir=agent_dir,
                 out=Path(args.out),
                 n=n,
+                resume=args.resume,
             )
             print(f"ran: {result.task_id} n={result.n} head {result.head}")
             return 0
@@ -301,6 +302,7 @@ def _run(args: argparse.Namespace) -> int:
                 agent_dir=agent_dir,
                 out=out_root / task.id,
                 n=n,
+                resume=args.resume,
             )
             print(f"ran: {result.task_id} n={result.n} head {result.head}")
         return 0
@@ -587,6 +589,11 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         help="episodes (CLI > job.toml n > task n_eval_episodes)",
     )
     run.add_argument("--out", required=True, help="job output directory")
+    run.add_argument(
+        "--resume",
+        action="store_true",
+        help="keep completed trials in an existing out dir and run only missing seeds",
+    )
     run.add_argument(
         "--registry",
         default=DEFAULT_REGISTRY,
