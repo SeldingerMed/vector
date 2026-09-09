@@ -117,11 +117,16 @@ def materialize_episode(
         raise TaskContractError(f"not a LeRobotDataset v3 directory: {base} (no data/)")
     rows: list[EpisodeRow] = []
     for shard in sorted(data_dir.glob("*.parquet")):
-        table = parquet.read_table(shard)
-        names = set(table.column_names)
+        names = set(parquet.read_schema(shard).names)
+        if "episode_index" not in names:
+            raise TaskContractError(f"data shard {shard.name} has no 'episode_index' column")
         for required in (state_key, action_key):
             if required not in names:
                 raise TaskContractError(f"data shard {shard.name} has no {required!r} column")
+        wanted = ["episode_index", state_key, action_key]
+        if timestamp_key in names:
+            wanted.append(timestamp_key)
+        table = parquet.read_table(shard, columns=wanted)
         for position, record in enumerate(table.to_pylist()):
             if int(record.get("episode_index", -1)) != episode_index:
                 continue

@@ -39,11 +39,32 @@ def _fixture(root: Path) -> Path:
                 "timestamp": [0.0, 0.1, 0.2, 0.0, 0.1],
                 "observation.state": [[0.0, 0.1], [0.2, 0.3], [0.4, 0.5], [1.0, 1.1], [1.2, 1.3]],
                 "action": [[0.0], [0.1], [0.2], [0.5], [0.6]],
+                "video_blob": [b"x" * 1000] * 5,
             }
         ),
         ds / "data" / "chunk-000.parquet",
     )
     return ds
+
+
+def test_fat_columns_never_load(tmp_path: Path) -> None:
+    rows = materialize_episode(_fixture(tmp_path), 0)
+    assert len(rows) == 3
+    assert all("video_blob" not in row.source for row in rows)
+
+
+def test_missing_episode_index_refuses(tmp_path: Path) -> None:
+    import pyarrow as pa_local
+    import pyarrow.parquet as pq_local
+
+    ds = _fixture(tmp_path)
+    (ds / "data" / "chunk-000.parquet").unlink()
+    pq_local.write_table(
+        pa_local.table({"timestamp": [0.0], "observation.state": [[0.0]], "action": [[0.0]]}),
+        ds / "data" / "chunk-000.parquet",
+    )
+    with pytest.raises(TaskContractError, match="no 'episode_index' column"):
+        materialize_episode(ds, 0)
 
 
 def test_episode_index_lists_tasks_and_lengths(tmp_path: Path) -> None:
