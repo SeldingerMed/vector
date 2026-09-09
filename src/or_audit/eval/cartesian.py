@@ -151,13 +151,39 @@ def _independent_case_count(
     for root, task, trials in tasks:
         if task.environment.splits_path:
             manifest = load_split_manifest(root / task.environment.splits_path)
-            unit = (
-                stage.independent_case_unit
-                if stage.independent_case_unit in ("case", "patient", "site")
-                else "case"
-            )
-            split_name = str(stage.name)
-            matching = [e for e in manifest.entries if e.split == split_name or e.split == "test"]
+            target_split = stage.split if stage.split else str(stage.name)
+            matching = [e for e in manifest.entries if e.split == target_split]
+            if not matching:
+                available_splits = sorted({e.split for e in manifest.entries})
+                raise TaskContractError(
+                    f"stage {stage.name} requests split {target_split!r} but "
+                    f"manifest for {task.id} only defines splits: {available_splits}"
+                )
+
+            unit_str = stage.independent_case_unit.lower()
+            if unit_str in ("case", "held-out clip", "clip", "case_id"):
+                unit = "case"
+            elif unit_str in ("patient", "patient_id"):
+                unit = "patient"
+            elif unit_str in ("site", "site_id", "center"):
+                unit = "site"
+            else:
+                raise TaskContractError(
+                    f"stage {stage.name} declares unsupported independent_case_unit "
+                    f"{stage.independent_case_unit!r}; must be 'case', 'patient', or 'site'"
+                )
+
+            if unit == "patient" and not manifest.supports_patient_disjoint:
+                raise TaskContractError(
+                    f"stage {stage.name} requests independent_case_unit='patient' but "
+                    f"manifest for {task.id} does not support patient-disjoint claims"
+                )
+            if unit == "site" and not manifest.supports_site_disjoint:
+                raise TaskContractError(
+                    f"stage {stage.name} requests independent_case_unit='site' but "
+                    f"manifest for {task.id} does not support site-disjoint claims"
+                )
+
             for entry in matching:
                 if unit == "patient" and entry.patient_id:
                     cases.add(f"{task.id}:patient:{entry.patient_id}")

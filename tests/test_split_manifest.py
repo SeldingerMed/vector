@@ -382,3 +382,128 @@ def test_runner_refuses_input_items_missing_from_split_manifest(tmp_path: Path) 
             out=out,
             n=3,
         )
+
+
+def test_cartesian_refuses_missing_split_selection(tmp_path: Path) -> None:
+    from or_audit.eval.cartesian import run_cartesian_job
+    from or_audit.eval.job_config import resolve_job
+
+    root = Path(__file__).resolve().parents[1]
+    task_src = root / "docs/examples/tasks/video-nextstep"
+    agent_src = root / "docs/examples/agents/example-video-predictor"
+
+    job = tmp_path / "job-stage-missing-split"
+    job.mkdir()
+    body = f"""format_version = "1"
+id = "video-stage-test"
+n = 3
+tasks = [{json.dumps(str(task_src))}]
+agents = [{json.dumps(str(agent_src))}]
+[stage]
+name = "qualification"
+evaluation_unit = "scored clip"
+target_units = 3
+independent_case_unit = "held-out clip"
+independent_case_key = "id"
+independent_cases = 3
+scenarios = ["video-nextstep"]
+operator_contexts = ["offline"]
+stop_conditions = ["stop on any hard gate failure"]
+prerequisites = ["integration-smoke", "pilot"]
+"""
+    (job / "job.toml").write_text(body, encoding="utf-8")
+    with pytest.raises(
+        TaskContractError, match=r"requests split 'qualification' but manifest.*only defines splits"
+    ):
+        run_cartesian_job(resolve_job(job), out=tmp_path / "out")
+
+
+def test_cartesian_refuses_unsupported_case_unit(tmp_path: Path) -> None:
+    from or_audit.eval.cartesian import run_cartesian_job
+    from or_audit.eval.job_config import resolve_job
+
+    root = Path(__file__).resolve().parents[1]
+    task_src = root / "docs/examples/tasks/video-nextstep"
+    agent_src = root / "docs/examples/agents/example-video-predictor"
+
+    job = tmp_path / "job-stage-bad-unit"
+    job.mkdir()
+    body = f"""format_version = "1"
+id = "video-stage-test"
+n = 3
+tasks = [{json.dumps(str(task_src))}]
+agents = [{json.dumps(str(agent_src))}]
+[stage]
+name = "qualification"
+split = "test"
+evaluation_unit = "scored clip"
+target_units = 3
+independent_case_unit = "unsupported-free-prose"
+independent_case_key = "id"
+independent_cases = 3
+scenarios = ["video-nextstep"]
+operator_contexts = ["offline"]
+stop_conditions = ["stop on any hard gate failure"]
+prerequisites = ["integration-smoke", "pilot"]
+"""
+    (job / "job.toml").write_text(body, encoding="utf-8")
+    with pytest.raises(
+        TaskContractError,
+        match=r"unsupported independent_case_unit 'unsupported-free-prose'",
+    ):
+        run_cartesian_job(resolve_job(job), out=tmp_path / "out")
+
+
+def test_cartesian_refuses_patient_unit_without_patient_support(tmp_path: Path) -> None:
+    import shutil
+
+    from or_audit.eval.cartesian import run_cartesian_job
+    from or_audit.eval.job_config import resolve_job
+
+    root = Path(__file__).resolve().parents[1]
+    task_src = root / "docs/examples/tasks/video-nextstep"
+    agent_src = root / "docs/examples/agents/example-video-predictor"
+
+    task_dir = tmp_path / "task-no-patient"
+    shutil.copytree(task_src, task_dir)
+
+    # Write manifest without patient_id
+    splits_data = {
+        "format_version": "1",
+        "dataset_id": "video-nextstep-dataset",
+        "dataset_revision": "1.0",
+        "disjoint_by": ["case"],
+        "entries": [
+            {
+                "case_id": "case-1",
+                "episode_id": "ep-1",
+                "split": "test",
+                "item_ids": ["clip-001", "clip-002", "clip-003"],
+            },
+        ],
+    }
+    (task_dir / "splits.json").write_text(json.dumps(splits_data), encoding="utf-8")
+
+    job = tmp_path / "job-stage-patient"
+    job.mkdir()
+    body = f"""format_version = "1"
+id = "video-stage-test"
+n = 3
+tasks = [{json.dumps(str(task_dir))}]
+agents = [{json.dumps(str(agent_src))}]
+[stage]
+name = "qualification"
+split = "test"
+evaluation_unit = "scored clip"
+target_units = 3
+independent_case_unit = "patient"
+independent_case_key = "id"
+independent_cases = 1
+scenarios = ["video-nextstep"]
+operator_contexts = ["offline"]
+stop_conditions = ["stop on any hard gate failure"]
+prerequisites = ["integration-smoke", "pilot"]
+"""
+    (job / "job.toml").write_text(body, encoding="utf-8")
+    with pytest.raises(TaskContractError, match=r"does not support patient-disjoint"):
+        run_cartesian_job(resolve_job(job), out=tmp_path / "out")
