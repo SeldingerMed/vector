@@ -1,0 +1,70 @@
+format_version = "2"
+id = "lumen-forecast-v1"
+task_version = "0"
+
+[metadata]
+title = "Action-conditioned penetration forecast on recorded Lumen episodes"
+modality = "endovascular-sim"
+tags = ["forecast", "lumen", "world-model", "observational"]
+safety_critical = false
+
+[subject]
+kind = "model"
+
+[phi]
+class = "procedural"
+
+[environment]
+kind = "counterfactual"
+world_pin = "3c6bb39ecc916c73e81131b94353ad8deee62bd4"
+n_eval_episodes = 8
+seed_policy = "recorded-episodes-v1"
+inputs_path = "inputs.json"
+labels_path = "labels.json"
+metrics_only = true
+
+[interface]
+id = "trajectory-forecast"
+interaction_mode = "single-turn"
+protocol_version = "1"
+observations = ["episode-history"]
+outputs = ["horizon-forecast"]
+[oracle]
+kind = "contract"
+
+[harness]
+interaction_mode = "single-turn"
+protocol_version = "1"
+max_steps = 1
+
+[agent]
+kinds = ["frozen-model", "world-model"]
+timeout_sec = 600.0
+
+[verifier]
+abstain_ok = true
+headline = "mae_h5"
+entrypoint = "verifier.py:load_verifier"
+
+[[verifier.metrics]]
+id = "mae_h1"
+kind = "continuous"
+unit = "mm"
+direction = "minimize"
+
+[[verifier.metrics]]
+id = "mae_h5"
+kind = "continuous"
+unit = "mm"
+direction = "minimize"
+
+[[verifier.metrics]]
+id = "mae_h20"
+kind = "continuous"
+unit = "mm"
+direction = "minimize"
+
+[[verifier.metrics]]
+id = "unsafe_correct"
+kind = "boolean"
+direction = "maximize"
