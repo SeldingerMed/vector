@@ -1,8 +1,9 @@
 # G — Training-to-evaluation recipe, Lumen PPO (Phase G)
 
-Status: measured 2026-09-08 on CPU. Reference-level proof that a trained
-checkpoint runs through independent held-out evaluation with safety
-reporting preserved — not a frontier result.
+# Status: measured 2026-09-08 on CPU. Train→same-environment evaluation
+# plumbing only: a trained checkpoint runs through the harness on the same
+# frozen cases with safety reporting preserved. Not held-out evaluation in
+# any generalization sense (see Limits), and not a frontier result.
 
 ## Separation of concerns
 
@@ -31,15 +32,62 @@ model.learn(total_timesteps=20480)
 model.save('/tmp/lumen-ppo-g1')
 EOF
 
-# 2. wrap as an agent package (policy.py loads the SB3 zip; weights pinned
-#    by full sha256 in agent.toml; see /tmp/lumen-ppo-agent for the layout)
+# 2. wrap the checkpoint as an agent package. stable-baselines3 is the
+#    agent's runtime (present in the probe venv), never a harness dependency.
+mkdir -p /tmp/lumen-ppo-agent && cp /tmp/lumen-ppo-g1.zip /tmp/lumen-ppo-agent/ppo.zip
+WEIGHTS_PIN=$(sha256sum /tmp/lumen-ppo-agent/ppo.zip | cut -d' ' -f1)
+cat > /tmp/lumen-ppo-agent/agent.toml <<EOF
+format_version = "2"
+id = "local/ppo-nav"
+agent_version = "0"
+kind = "policy"
+weights_pin = "$WEIGHTS_PIN"
+weights_path = "ppo.zip"
 
-# 3. evaluate the identical frozen cases (seeds 0-9) through the harness
-vector run -t docs/examples/tasks/lumen-nav-safe -a /tmp/lumen-ppo-agent -n 10 \
-  --out /tmp/vector-lumen-ppo10
+[[capabilities]]
+interface = "gym-policy"
+interaction_modes = ["closed-loop"]
+protocol_versions = ["1"]
+observations = ["gym-obs"]
+actions = ["insertion_twist"]
+
+[runtime]
+kind = "local"
+protocol_version = "1"
+entrypoint = "policy.py:load_policy"
+timeout_sec = 120.0
+EOF
+cat > /tmp/lumen-ppo-agent/policy.py <<'EOF'
+from pathlib import Path
+from typing import Any
+import numpy as np
+
+class SB3Policy:
+    def __init__(self, weights_path):
+        from stable_baselines3 import PPO
+        self._model = PPO.load(weights_path)
+    def reset(self, *, seed):
+        del seed
+    def act(self, observation, *, step):
+        del step
+        action, _ = self._model.predict(np.asarray(observation, dtype=np.float32))
+        return np.asarray(action, dtype=np.float32)
+
+def load_policy(*, root, weights_path):
+    del root
+    return SB3Policy(weights_path)
+EOF
+
+# 3. baseline: the identical frozen cases (seeds 0-9) with the random agent
+vector run -t docs/examples/tasks/lumen-nav-safe -a docs/examples/agents/seldingermed-random \
+  -n 10 --out /tmp/vector-lumen-random10
+
+# 4. evaluate the trained checkpoint on the same cases
+vector run -t docs/examples/tasks/lumen-nav-safe -a /tmp/lumen-ppo-agent \
+  -n 10 --out /tmp/vector-lumen-ppo10
 vector replay /tmp/vector-lumen-ppo10
 
-# 4. compare against the random baseline on the same seeds
+# 5. compare with uncertainty
 vector compare /tmp/vector-lumen-random10 /tmp/vector-lumen-ppo10 \
   --metric safe_success
 ```
