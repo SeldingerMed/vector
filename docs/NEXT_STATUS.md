@@ -17,6 +17,24 @@ not report those workstreams as implemented. The historical N1–N11 ledger and
 audit findings are retained after the roadmap. An old `shipped` designation
 applies to its named mechanism, not to every new acceptance criterion here.
 
+### Implementation status — 2026-09-09
+
+Work is merged per phase as PRs; nothing below claims a workstream finished
+unless every acceptance criterion is met. Partial means shipped mechanism
+with named gaps; blocked means a non-code prerequisite (partner, hardware,
+data, or product decision).
+
+| ID | Status | Shipped (PRs) | Explicitly remaining |
+|---|---|---|---|
+| A | partial | Brief, runnable lumen task v1, strict verifier, real A3 comparison | A3 trained-checkpoint comparison; A5 external reproduction (blocked: partner) |
+| B | partial | Threat model, env scrubbing, container backend + CI image job, bounded transfer, staging tests, attestation contract | B5 cloud mint/storage (blocked: cloud owner); registry image publication (commercial decision) |
+| C | partial | Dossier, cited 0.3mm gate, orphan-label refusal, bench provenance, harness-fault robustness | C4 world-native distributions (need SOFA/GPU world revisions); C5 phantom (blocked: partner) |
+| D | partial | Paired comparison + CIs, cohort enforcement, compare CLI | D1 case manifests with patient/site grouping; D5 uncertainty views in scorecards (no dataset carries the metadata yet) |
+| E | partial | Obs/action contract test, interactive streams, LeRobot reader, MONAI delegation, honest video adapter | E4 media alignment (no test media; mp4 banned from VC); semantic output schemas (needs E contract design) |
+| F | partial | Prefix-replay branching proof + seed caveat | F1/F2 trajectory-backed scoring (needs imported trajectory benchmark); F4/F5 planning utility (blocked: no learned dynamics model) |
+| G | partial | SB3 PPO recipe with measured train→evaluate result | Verifier-derived training rewards (blocked: divergence unobservable, projection withdrawn); Prime interop |
+| H | partial | Episode resume + crash-safe writes + partial recovery + CLI flag | Fleet queue/autoscaling (blocked: hosted capacity decision); vectorized stepping (not justified by measured need) |
+
 ### Status and evidence rules
 
 - **Existing:** found in the reviewed source; runtime verification is stated
