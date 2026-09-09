@@ -1,10 +1,15 @@
 """Paired model comparison with uncertainty (Phase D, core).
 
 Scorecards describe one job; this module compares two jobs run on the same
-cases. Trials pair by seed — mismatched seed sets are refused, never
-inner-joined silently, because a paired difference over different cases is
-not a paired difference. Unassessable values on either side drop that pair
-and are counted, never zero-filled.
+cases. Comparability is enforced, not assumed: same task, version, world
+pin, and interface; unique seeds per job; identical seed sets (mismatched
+cohorts are refused, never inner-joined). Unassessable values on either
+side drop that pair and are counted, never zero-filled.
+
+Seeds pair trials; they are not claimed to be independent cases. Clustered
+resampling by declared independent unit is follow-up work for when trial
+records carry case manifests (D1). Until then the bootstrap resamples
+seeds, and small-n intervals stay honestly wide.
 
 Uncertainty is a seeded percentile bootstrap over the paired differences.
 It quantifies sampling noise of the comparison, not clinical significance,
@@ -60,15 +65,34 @@ def _metric_number(vector: Any, metric_id: str) -> float | None:
     return None
 
 
+def _assert_comparable(a: JobResult, b: JobResult) -> None:
+    """Refuse comparisons across different tasks, worlds, or cohorts."""
+    for field in ("task_id", "task_version", "world_pin", "interface_id"):
+        first, second = getattr(a, field), getattr(b, field)
+        if first != second:
+            raise TaskContractError(
+                f"paired comparison needs identical {field}: {first!r} != {second!r}"
+            )
+    for label, job in (("a", a), ("b", b)):
+        seeds = [trial.seed for trial in job.trials]
+        if len(set(seeds)) != len(seeds):
+            raise TaskContractError(f"job {label} has duplicate trial seeds; cannot pair")
+    only_a = sorted({t.seed for t in a.trials} - {t.seed for t in b.trials})
+    only_b = sorted({t.seed for t in b.trials} - {t.seed for t in a.trials})
+    if only_a or only_b:
+        raise TaskContractError(
+            f"paired comparison needs identical seed sets: only in a={only_a}, only in b={only_b}"
+        )
+
+
 def paired_differences(
     a: JobResult, b: JobResult, metric_id: str
 ) -> tuple[tuple[int, ...], list[float], int]:
     """Kept seeds, per-seed (b - a) differences, and dropped count."""
+    _assert_comparable(a, b)
     a_by_seed = {trial.seed: trial.vector for trial in a.trials}
     b_by_seed = {trial.seed: trial.vector for trial in b.trials}
     shared = sorted(set(a_by_seed) & set(b_by_seed))
-    if not shared:
-        raise TaskContractError("paired comparison needs at least one shared seed")
     seeds: list[int] = []
     diffs: list[float] = []
     dropped = 0
@@ -80,6 +104,8 @@ def paired_differences(
             continue
         seeds.append(seed)
         diffs.append(second - first)
+    if not diffs:
+        raise TaskContractError("paired comparison kept no assessable pairs")
     return tuple(seeds), diffs, dropped
 
 
@@ -91,6 +117,8 @@ def bootstrap_ci(
         raise TaskContractError("bootstrap needs at least one paired difference")
     if not 0.0 < confidence < 1.0:
         raise TaskContractError(f"confidence {confidence!r} must be in (0, 1)")
+    if draws < 1:
+        raise TaskContractError(f"draws {draws!r} must be >= 1")
     rng = np.random.default_rng(seed)
     sample = np.asarray(diffs, dtype=float)
     means = np.mean(rng.choice(sample, size=(draws, sample.size), replace=True), axis=1)

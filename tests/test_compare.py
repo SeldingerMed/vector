@@ -64,7 +64,7 @@ def test_unassessable_pairs_drop_and_count() -> None:
 
 
 def test_disjoint_seeds_refuse() -> None:
-    with pytest.raises(TaskContractError, match="shared seed"):
+    with pytest.raises(TaskContractError, match="identical seed sets"):
         compare_jobs(_job({0: True}), _job({1: True}), "m")
 
 
@@ -88,3 +88,26 @@ def test_intervals_reproduce_under_seed() -> None:
 def test_bootstrap_needs_data() -> None:
     with pytest.raises(TaskContractError, match="at least one paired difference"):
         bootstrap_ci([])
+
+
+def test_task_mismatch_refuses() -> None:
+    other = _job({0: True}).model_copy(update={"task_id": "other"})
+    with pytest.raises(TaskContractError, match="identical task_id"):
+        compare_jobs(_job({0: True}), other, "m")
+
+
+def test_duplicate_seeds_refuse() -> None:
+    job = _job({0: True})
+    doubled = job.model_copy(update={"trials": job.trials + job.trials, "n": 2})
+    with pytest.raises(TaskContractError, match="duplicate trial seeds"):
+        compare_jobs(doubled, _job({0: True}), "m")
+
+
+def test_all_dropped_refuses() -> None:
+    with pytest.raises(TaskContractError, match="no assessable pairs"):
+        compare_jobs(_job({0: None}), _job({0: None}), "m")
+
+
+def test_zero_draws_refuses() -> None:
+    with pytest.raises(TaskContractError, match="draws"):
+        compare_jobs(_job({0: True}), _job({0: False}), "m", draws=0)
