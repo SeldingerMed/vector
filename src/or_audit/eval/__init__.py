@@ -90,6 +90,11 @@ from or_audit.eval.trace import (
     ToolEvent,
     TraceStep,
 )
+from or_audit.eval.uncertainty import (
+    bootstrap_mean_ci,
+    clustered_bootstrap_mean_ci,
+    wilson_score_interval,
+)
 from or_audit.eval.vector import TrialVector, project
 from or_audit.eval.worlds import (
     WORLD_KIND_ENTRY_POINT_GROUP,
@@ -166,9 +171,11 @@ __all__ = [
     "WorldSpec",
     "assemble_job_result",
     "assert_bind",
+    "bootstrap_mean_ci",
     "builtin_random_agent",
     "clear_adapter_registry",
     "clear_simulation_registry",
+    "clustered_bootstrap_mean_ci",
     "determinism_at_least",
     "discover_world_adapters",
     "export_rl",
@@ -203,6 +210,7 @@ __all__ = [
     "run_cartesian_job",
     "run_job",
     "stream_adapters",
+    "wilson_score_interval",
     "world_adapter_discovery",
     "world_kind_key",
     "world_kind_spec",
