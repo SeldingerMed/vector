@@ -22,30 +22,31 @@ class ForecastVerifier:
         future = label["future"]
         forecast = prediction.get("forecast", {})
         metrics: dict[str, Any] = {}
+        # Denominator policy: a horizon past the recorded future is
+        # unassessable (None), never a zero error. Short episodes from early
+        # termination therefore shrink coverage instead of faking accuracy.
         for horizon in HORIZONS:
+            if horizon - 1 >= len(future):
+                metrics[f"mae_h{horizon}"] = None
+                metrics[f"unsafe_h{horizon}"] = None
+                continue
             actual = future[horizon - 1]
             point = forecast.get(f"h{horizon}") if isinstance(forecast, dict) else None
             if not isinstance(point, dict) or "max_pen" not in point:
                 metrics[f"mae_h{horizon}"] = None
-                continue
-            try:
-                error = abs(float(point["max_pen"]) - float(actual["max_pen"]))
-            except (TypeError, ValueError):
-                metrics[f"mae_h{horizon}"] = None
-                continue
-
-            metrics[f"mae_h{horizon}"] = None if not math.isfinite(error) else error
-        reported = [forecast.get(f"h{h}") for h in HORIZONS if isinstance(forecast, dict)]
-        unsafe_calls = [point.get("unsafe") for point in reported if isinstance(point, dict)]
-        actual_unsafe = [future[h - 1]["unsafe"] for h in HORIZONS]
-        if len(unsafe_calls) != len(HORIZONS) or any(
-            not isinstance(call, bool) for call in unsafe_calls
-        ):
-            metrics["unsafe_correct"] = None
-        else:
-            metrics["unsafe_correct"] = all(
-                call == actual for call, actual in zip(unsafe_calls, actual_unsafe, strict=True)
-            )
+            else:
+                try:
+                    error = abs(float(point["max_pen"]) - float(actual.get("max_pen")))
+                except (TypeError, ValueError):
+                    error = None
+                metrics[f"mae_h{horizon}"] = (
+                    None if error is None or not math.isfinite(error) else error
+                )
+            call = point.get("unsafe") if isinstance(point, dict) else None
+            if not isinstance(call, bool) or not isinstance(actual.get("unsafe"), bool):
+                metrics[f"unsafe_h{horizon}"] = None
+            else:
+                metrics[f"unsafe_h{horizon}"] = call == actual["unsafe"]
 
         return {"gates": {}, "metrics": metrics}
 

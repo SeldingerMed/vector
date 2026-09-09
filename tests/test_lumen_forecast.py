@@ -24,7 +24,7 @@ def test_forecast_task_scores_recorded_futures(tmp_path: Path) -> None:
     )
     assert len(result.trials) == 8
     for trial in result.trials:
-        for metric_id in ("mae_h1", "mae_h5", "mae_h20", "unsafe_correct"):
+        for metric_id in ("mae_h1", "mae_h5", "mae_h20", "unsafe_h1", "unsafe_h5", "unsafe_h20"):
             metric = trial.vector.metric(metric_id)
             assert metric is not None
             assert metric.value is not None
@@ -55,3 +55,29 @@ def test_null_model_is_beatable_but_honest(tmp_path: Path) -> None:
             values.append(metric.value)
         means[metric_id] = sum(values) / len(values)
     assert all(mean >= 0.0 for mean in means.values())
+
+
+def test_short_episode_abstains_beyond_recording() -> None:
+    import importlib.util
+
+    path = ROOT / "docs/examples/tasks/lumen-forecast-v1/verifier.py"
+    spec = importlib.util.spec_from_file_location("forecast_verifier", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    vector = module.load_verifier(root=None).score(
+        {
+            "label": {"future": [{"max_pen": 0.1, "unsafe": False}] * 3},
+            "prediction": {
+                "forecast": {
+                    "h1": {"max_pen": 0.1, "unsafe": False},
+                    "h5": {"max_pen": 0.2, "unsafe": False},
+                    "h20": {"max_pen": 0.3, "unsafe": False},
+                }
+            },
+        }
+    )
+    assert vector["metrics"]["mae_h1"] == 0.0
+    assert vector["metrics"]["mae_h5"] is None
+    assert vector["metrics"]["unsafe_h20"] is None

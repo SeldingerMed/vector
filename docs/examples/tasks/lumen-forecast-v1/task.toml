@@ -65,6 +65,16 @@ unit = "mm"
 direction = "minimize"
 
 [[verifier.metrics]]
-id = "unsafe_correct"
+id = "unsafe_h1"
+kind = "boolean"
+direction = "maximize"
+
+[[verifier.metrics]]
+id = "unsafe_h5"
+kind = "boolean"
+direction = "maximize"
+
+[[verifier.metrics]]
+id = "unsafe_h20"
 kind = "boolean"
 direction = "maximize"
