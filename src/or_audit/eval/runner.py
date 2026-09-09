@@ -1096,6 +1096,7 @@ def replay_job(
         out=out,
         n=int(config["n"]),
         gym_factory=gym_factory,
+        split=config.get("split") or previous.split or None,
     )
     if rerun.head != previous.head:
         raise TaskContractError(f"replay head mismatch: stored {previous.head} reran {rerun.head}")

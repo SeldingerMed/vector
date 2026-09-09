@@ -757,3 +757,97 @@ def test_cross_split_resume_refused(tmp_path: Path) -> None:
             split="train",
             resume=True,
         )
+
+
+def test_replay_job_preserves_split(tmp_path: Path) -> None:
+    from or_audit.eval.loader import load_agent, load_task
+    from or_audit.eval.runner import replay_job, run_job
+
+    root = Path(__file__).resolve().parents[1]
+    task_src = root / "docs/examples/tasks/video-nextstep"
+    agent_src = root / "docs/examples/agents/example-video-predictor"
+
+    out = tmp_path / "job-replay-split"
+    result = run_job(
+        task=load_task(task_src),
+        task_dir=task_src,
+        agent=load_agent(agent_src),
+        agent_dir=agent_src,
+        out=out,
+        n=2,
+        split="test",
+    )
+    assert result.split == "test"
+    replayed = replay_job(out, load_task=load_task, load_agent=load_agent)
+    assert replayed.split == "test"
+    assert replayed.head == result.head
+
+
+def test_cartesian_independent_cases_matches_input_subset(tmp_path: Path) -> None:
+    import shutil
+
+    from or_audit.eval.cartesian import run_cartesian_job
+    from or_audit.eval.job_config import resolve_job
+
+    root = Path(__file__).resolve().parents[1]
+    task_src = root / "docs/examples/tasks/video-nextstep"
+    agent_src = root / "docs/examples/agents/example-video-predictor"
+
+    task_dir = tmp_path / "task-input-subset"
+    shutil.copytree(task_src, task_dir)
+
+    # Manifest defines 4 test items across 4 cases
+    splits_data = {
+        "format_version": "1",
+        "dataset_id": "subset-test",
+        "dataset_revision": "1.0",
+        "disjoint_by": ["case"],
+        "entries": [
+            {"case_id": "c1", "episode_id": "e1", "split": "test", "item_ids": ["clip-001"]},
+            {"case_id": "c2", "episode_id": "e2", "split": "test", "item_ids": ["clip-002"]},
+            {"case_id": "c3", "episode_id": "e3", "split": "test", "item_ids": ["clip-003"]},
+            {"case_id": "c4", "episode_id": "e4", "split": "test", "item_ids": ["clip-004"]},
+        ],
+    }
+    (task_dir / "splits.json").write_text(json.dumps(splits_data), encoding="utf-8")
+
+    # But inputs.json only has clip-001 and clip-002 (2 items)
+    inputs_data = {
+        "items": [
+            {"id": "clip-001", "media": "public://clip-1"},
+            {"id": "clip-002", "media": "public://clip-2"},
+        ]
+    }
+    (task_dir / "inputs.json").write_text(json.dumps(inputs_data), encoding="utf-8")
+    labels_data = {
+        "items": [
+            {"id": "clip-001", "next_step": "advance", "outcome": "continue", "unsafe": False},
+            {"id": "clip-002", "next_step": "advance", "outcome": "continue", "unsafe": False},
+        ]
+    }
+    (task_dir / "labels.json").write_text(json.dumps(labels_data), encoding="utf-8")
+
+    job = tmp_path / "job-cartesian-subset"
+    job.mkdir()
+    body = f"""format_version = "1"
+id = "subset-stage"
+n = 2
+tasks = [{json.dumps(str(task_dir))}]
+agents = [{json.dumps(str(agent_src))}]
+[stage]
+name = "qualification"
+split = "test"
+evaluation_unit = "scored clip"
+target_units = 2
+independent_case_unit = "case"
+independent_case_key = "id"
+independent_cases = 2
+scenarios = ["video-nextstep"]
+operator_contexts = ["offline"]
+stop_conditions = ["stop on any hard gate failure"]
+prerequisites = ["integration-smoke", "pilot"]
+"""
+    (job / "job.toml").write_text(body, encoding="utf-8")
+    manifest = run_cartesian_job(resolve_job(job), out=tmp_path / "out-subset")
+    assert manifest.stage is not None
+    assert manifest.stage.independent_cases == 2
