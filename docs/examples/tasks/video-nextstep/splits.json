@@ -1,0 +1,32 @@
+{
+  "format_version": "1",
+  "dataset_id": "seldingermed/video-nextstep",
+  "dataset_revision": "0",
+  "disjoint_by": ["case", "patient"],
+  "entries": [
+    {
+      "case_id": "case-001",
+      "episode_id": "ep-001",
+      "patient_id": "pt-deid-001",
+      "site_id": "site-center-a",
+      "split": "test",
+      "item_ids": ["clip-001"]
+    },
+    {
+      "case_id": "case-002",
+      "episode_id": "ep-002",
+      "patient_id": "pt-deid-002",
+      "site_id": "site-center-a",
+      "split": "test",
+      "item_ids": ["clip-002"]
+    },
+    {
+      "case_id": "case-003",
+      "episode_id": "ep-003",
+      "patient_id": "pt-deid-003",
+      "site_id": "site-center-b",
+      "split": "test",
+      "item_ids": ["clip-003"]
+    }
+  ]
+}

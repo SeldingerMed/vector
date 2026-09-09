@@ -125,8 +125,10 @@ class SplitManifest(BaseModel):
         """Whether all entries carry pseudonymous site identifiers."""
         return all(bool(entry.site_id) for entry in self.entries)
 
-    def validate_against_input_items(self, input_ids: Iterable[str]) -> None:
-        """Verify that input items exactly match the manifest's mapped items."""
+    def validate_against_input_items(
+        self, input_ids: Iterable[str], *, strict: bool = False
+    ) -> None:
+        """Verify that input items are mapped in the manifest."""
         expected_set = set(input_ids)
         manifest_items: set[str] = set()
         for entry in self.entries:
@@ -138,12 +140,13 @@ class SplitManifest(BaseModel):
                 f"split manifest for {self.dataset_id} missing items from inputs: "
                 f"{sorted(missing_from_manifest)}"
             )
-        extra_in_manifest = manifest_items - expected_set
-        if extra_in_manifest:
-            raise TaskContractError(
-                f"split manifest for {self.dataset_id} contains items not in inputs: "
-                f"{sorted(extra_in_manifest)}"
-            )
+        if strict:
+            extra_in_manifest = manifest_items - expected_set
+            if extra_in_manifest:
+                raise TaskContractError(
+                    f"split manifest for {self.dataset_id} contains items not in inputs: "
+                    f"{sorted(extra_in_manifest)}"
+                )
 
     def independent_case_count(self, split: SplitName, unit: DisjointUnit = "case") -> int:
         """Count distinct independent statistical units in a declared split."""

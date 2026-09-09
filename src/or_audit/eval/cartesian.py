@@ -19,6 +19,7 @@ from or_audit.eval.job_config import BUILTIN_RANDOM, EvaluationStageSpec, Resolv
 from or_audit.eval.loader import load_agent, load_task
 from or_audit.eval.predict import load_items
 from or_audit.eval.runner import assert_trial_capacity, builtin_random_agent, replay_job, run_job
+from or_audit.eval.split import load_split_manifest
 from or_audit.eval.task import ProjectionSpec, TaskSpec
 
 
@@ -148,15 +149,36 @@ def _independent_case_count(
         )
     cases: set[str] = set()
     for root, task, trials in tasks:
-        for item in load_items(root / task.environment.inputs_path)[:trials]:
-            if stage.independent_case_key not in item:
-                raise TaskContractError(
-                    f"task {task.id} input {item['id']!r} has no independent-case field "
-                    f"{stage.independent_case_key!r}"
-                )
-            cases.add(
-                json.dumps(item[stage.independent_case_key], sort_keys=True, separators=(",", ":"))
+        if task.environment.splits_path:
+            manifest = load_split_manifest(root / task.environment.splits_path)
+            unit = (
+                stage.independent_case_unit
+                if stage.independent_case_unit in ("case", "patient", "site")
+                else "case"
             )
+            split_name = str(stage.name)
+            matching = [e for e in manifest.entries if e.split == split_name or e.split == "test"]
+            for entry in matching:
+                if unit == "patient" and entry.patient_id:
+                    cases.add(f"{task.id}:patient:{entry.patient_id}")
+                elif unit == "site" and entry.site_id:
+                    cases.add(f"{task.id}:site:{entry.site_id}")
+                else:
+                    cases.add(f"{task.id}:case:{entry.case_id}")
+        else:
+            for item in load_items(root / task.environment.inputs_path)[:trials]:
+                if stage.independent_case_key not in item:
+                    raise TaskContractError(
+                        f"task {task.id} input {item['id']!r} has no independent-case field "
+                        f"{stage.independent_case_key!r}"
+                    )
+                cases.add(
+                    json.dumps(
+                        item[stage.independent_case_key],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
     return len(cases)
 
 

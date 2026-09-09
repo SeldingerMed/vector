@@ -22,6 +22,7 @@ n_eval_episodes = 3
 seed_policy = "held-out-split"
 inputs_path = "inputs.json"
 labels_path = "labels.json"
+splits_path = "splits.json"
 
 [interface]
 id = "video-predict"

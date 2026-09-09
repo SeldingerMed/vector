@@ -170,7 +170,7 @@ def test_validate_against_input_items_matches() -> None:
 
     # Missing input item present in manifest
     with pytest.raises(TaskContractError, match="contains items not in inputs"):
-        manifest.validate_against_input_items(["item-1", "item-2"])
+        manifest.validate_against_input_items(["item-1", "item-2"], strict=True)
 
 
 def test_unsupported_patient_disjoint_refused_on_count() -> None:
@@ -320,15 +320,6 @@ def test_runner_validates_split_manifest_and_stamps_head(tmp_path: Path) -> None
     }
     (task_dir / "splits.json").write_text(json.dumps(splits_data), encoding="utf-8")
 
-    # Update task.toml to specify splits_path = "splits.json"
-    task_toml_path = task_dir / "task.toml"
-    content = task_toml_path.read_text(encoding="utf-8")
-    content = content.replace(
-        'inputs_path = "inputs.json"',
-        'inputs_path = "inputs.json"\nsplits_path = "splits.json"',
-    )
-    task_toml_path.write_text(content, encoding="utf-8")
-
     task = load_task(task_dir)
     agent = load_agent(agent_src)
     out = tmp_path / "job"
@@ -377,14 +368,6 @@ def test_runner_refuses_input_items_missing_from_split_manifest(tmp_path: Path) 
         ],
     }
     (task_dir / "splits.json").write_text(json.dumps(splits_data), encoding="utf-8")
-
-    task_toml_path = task_dir / "task.toml"
-    content = task_toml_path.read_text(encoding="utf-8")
-    content = content.replace(
-        'inputs_path = "inputs.json"',
-        'inputs_path = "inputs.json"\nsplits_path = "splits.json"',
-    )
-    task_toml_path.write_text(content, encoding="utf-8")
 
     task = load_task(task_dir)
     agent = load_agent(agent_src)
