@@ -176,7 +176,7 @@ class SplitManifest(BaseModel):
 
 
 def load_split_manifest(path: Path) -> SplitManifest:
-    """Load a split manifest from a JSON or YAML file."""
+    """Load a split manifest from a JSON file."""
     if not path.is_file():
         raise TaskContractError(f"split manifest file not found: {path}")
     content = path.read_text(encoding="utf-8")
