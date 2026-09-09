@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -88,6 +89,42 @@ def test_intervals_reproduce_under_seed() -> None:
 def test_bootstrap_needs_data() -> None:
     with pytest.raises(TaskContractError, match="at least one paired difference"):
         bootstrap_ci([])
+
+
+def test_cli_compare_reports_paired_difference(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from or_audit.cli import main
+    from or_audit.eval.loader import load_agent, load_task
+    from or_audit.eval.runner import run_job
+
+    root = Path(__file__).resolve().parents[1]
+    task_dir = root / "docs" / "examples" / "tasks" / "video-nextstep"
+    agent_dir = root / "docs" / "examples" / "agents" / "example-video-predictor"
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    for out in (first, second):
+        run_job(
+            task=load_task(task_dir),
+            task_dir=task_dir,
+            agent=load_agent(agent_dir),
+            agent_dir=agent_dir,
+            out=out,
+            n=3,
+        )
+    assert main(["compare", str(first), str(second), "--metric", "next_step_correct"]) == 0
+    printed = capsys.readouterr().out
+    assert "mean_diff:" in printed
+    assert "CI:" in printed
+
+
+def test_cli_compare_refuses_mismatched_tasks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from or_audit.cli import main
+
+    assert main(["compare", str(tmp_path), str(tmp_path), "--metric", "m"]) == 1
+    assert "COMPARE REFUSED" in capsys.readouterr().err
 
 
 def test_task_mismatch_refuses() -> None:
