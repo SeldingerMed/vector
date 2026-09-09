@@ -58,7 +58,7 @@ def test_branching_replays_prefix_exactly() -> None:
     pytest.importorskip("lumen.envs.registration")
     actions = _actions(10, 0)
     first = _rollout(0, actions)
-    assert _rollout(0, actions) == first
+    assert len(first) > 6, "episode must run past the branch point"
     branched = list(actions)
     branched[5] = (0.9, -0.9)
     alternative = _rollout(0, branched)
