@@ -31,11 +31,11 @@ language — this table is the current status source of truth.
 | A | partial | Brief + runnable lumen task v1 + strict verifier (#33-35), reference-policy A3 comparison (#44) | A3 trained-checkpoint comparison; A5 external reproduction (blocked: partner) |
 | B | partial | Threat model + env scrubbing (#36), container backend (#38), bounded transfer (#39), remainder + attestation + CI image (#40), probes (#41) | B5 cloud mint/storage (blocked: cloud owner); registry image publication (commercial decision) |
 | C | partial | Dossier + cited gate (#37), orphan-label refusal + provenance + fault robustness (#42) | C4 world-native distributions (need SOFA/GPU world revisions); C5 phantom (blocked: partner) |
-| D | partial | Paired comparison + CIs (#43), compare CLI (#45) | D1 case manifests with patient/site grouping; D5 uncertainty views in scorecards (no dataset carries the metadata yet) |
+| D | partial | Paired comparison + CIs (#43), compare CLI (#45), split manifests with patient/site grouping | D5 uncertainty views in scorecards (no dataset carries the metadata yet) |
 | E | partial | Obs/action contract + A3 (#44), interactive streams (#46), LeRobot reader + MONAI (#51), honest video adapter (#54) | E4 media alignment (no test media; mp4 banned from VC); semantic output schemas (needs E contract design) |
-| F | partial | Prefix-replay branching proof + seed caveat (#47) | F1/F2 trajectory-backed scoring (needs imported trajectory benchmark); F4/F5 planning utility (blocked: no learned dynamics model) |
-| G | partial | SB3 PPO recipe + measurement (#48), runnable fixes (#50, #52) | Verifier-derived training rewards (blocked: divergence unobservable, projection withdrawn); Prime interop |
-| H | partial | Episode resume (#49), crash-safe writes + partial recovery (#53) | Fleet queue/autoscaling (blocked: hosted capacity decision); vectorized stepping (not justified by measured need) |
+| F | partial | Prefix-replay branching proof + seed caveat (#47), trajectory-backed forecast task + null baseline (#56), planning utility measurement and recipe (#58) | F1 trajectory benchmark imports; F4 closed-loop simulator branching |
+| G | partial | SB3 PPO recipe + measurement (#48), runnable fixes (#50, #52), kernel-observed episode divergence (#57, #59) | Verifier-derived training rewards (projection withdrawn); Prime interop |
+| H | partial | Episode resume (#49), crash-safe writes + partial recovery (#53), strict trial provenance + pre-write drift rejection (#59) | Fleet queue/autoscaling (blocked: hosted capacity decision); vectorized stepping (not justified by measured need) |
 
 ### Status and evidence rules
 
