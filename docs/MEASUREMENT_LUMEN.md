@@ -38,6 +38,11 @@ Status: frozen 2026-09-08 against `seldinger-lumen` world pin
   limit, so penetration depth past the boundary is observed, not cut off.
 - Physics step `dt=5e-3 * substeps` (L213) with Newtonian guidewire sim;
   CPU Warp execution verified, GPU equivalence unmeasured.
+- Seeds do not vary initial conditions on the pinned revision (identical
+  actions from any seed give identical trajectories): repeated seeds
+  measure policy stochasticity only. Branching works by prefix replay —
+  same seed plus shared action prefix reproduces identical trajectories
+  before diverging (see `tests/test_lumen_branch.py`).
 
 ## Controller and observation contract (E1)
 
