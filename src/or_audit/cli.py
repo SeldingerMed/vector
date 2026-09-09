@@ -13,6 +13,7 @@ Written against ``argparse`` rather than a CLI framework.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import tempfile
 from collections.abc import Sequence
@@ -308,6 +309,38 @@ def _run(args: argparse.Namespace) -> int:
         return 1
 
 
+def _compare(args: argparse.Namespace) -> int:
+    """Paired (b - a) comparison of one metric across two jobs with uncertainty."""
+    from or_audit.eval.compare import compare_jobs
+    from or_audit.eval.job import read_job_result
+
+    try:
+        first = read_job_result(Path(args.a))
+        second = read_job_result(Path(args.b))
+        result = compare_jobs(
+            first,
+            second,
+            args.metric,
+            confidence=args.confidence,
+            draws=args.draws,
+            bootstrap_seed=args.seed,
+        )
+    except TaskContractError as exc:
+        print(f"COMPARE REFUSED: {exc}", file=sys.stderr)
+        return 1
+    except (json.JSONDecodeError, ValueError) as exc:
+        print(f"COMPARE REFUSED: malformed job artifact: {exc}", file=sys.stderr)
+        return 1
+    print(f"paired comparison: {args.b} - {args.a} metric {result.metric_id}")
+    print(f"seeds: {list(result.paired_seeds)} dropped_unassessable: {result.dropped_unassessable}")
+    print(f"mean_diff: {result.mean_diff:.6f}")
+    print(
+        f"{result.confidence:.2f} CI: [{result.ci_low:.6f}, {result.ci_high:.6f}] "
+        f"(draws={result.draws} seed={result.bootstrap_seed})"
+    )
+    return 0
+
+
 def _replay(args: argparse.Namespace) -> int:
     """Re-run a job (or cartesian parent) and require the stored head to match."""
     path = Path(args.path)
@@ -572,6 +605,17 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     replay.add_argument("path", help="job directory or cartesian parent")
     replay.add_argument("--expect-head", help="require this job or manifest head")
     replay.set_defaults(func=_replay)
+
+    compare = sub.add_parser(
+        "compare", help="paired metric comparison of two jobs with uncertainty"
+    )
+    compare.add_argument("a", help="first job directory (baseline)")
+    compare.add_argument("b", help="second job directory")
+    compare.add_argument("--metric", required=True, help="metric id to compare")
+    compare.add_argument("--confidence", type=float, default=0.95)
+    compare.add_argument("--draws", type=int, default=2000)
+    compare.add_argument("--seed", type=int, default=0, help="bootstrap seed")
+    compare.set_defaults(func=_compare)
 
     export_rl = sub.add_parser(
         "export-rl",

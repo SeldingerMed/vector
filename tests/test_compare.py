@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -90,10 +91,49 @@ def test_bootstrap_needs_data() -> None:
         bootstrap_ci([])
 
 
-def test_task_mismatch_refuses() -> None:
-    other = _job({0: True}).model_copy(update={"task_id": "other"})
-    with pytest.raises(TaskContractError, match="identical task_id"):
-        compare_jobs(_job({0: True}), other, "m")
+def test_cli_compare_reports_paired_difference(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from or_audit.cli import main
+    from or_audit.eval.loader import load_agent, load_task
+    from or_audit.eval.runner import run_job
+
+    root = Path(__file__).resolve().parents[1]
+    task_dir = root / "docs" / "examples" / "tasks" / "video-nextstep"
+    agent_dir = root / "docs" / "examples" / "agents" / "example-video-predictor"
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    for out in (first, second):
+        run_job(
+            task=load_task(task_dir),
+            task_dir=task_dir,
+            agent=load_agent(agent_dir),
+            agent_dir=agent_dir,
+            out=out,
+            n=3,
+        )
+    assert main(["compare", str(first), str(second), "--metric", "next_step_correct"]) == 0
+    printed = capsys.readouterr().out
+    assert "mean_diff:" in printed
+    assert "CI:" in printed
+
+
+def test_cli_compare_refuses_mismatched_tasks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from or_audit.cli import main
+
+    second = tmp_path / "b"
+    first = tmp_path / "a"
+    first.mkdir()
+    second.mkdir()
+    (first / "result.json").write_text(_job({0: True}).model_dump_json(), encoding="utf-8")
+    (second / "result.json").write_text(
+        _job({0: True}).model_copy(update={"task_id": "other"}).model_dump_json(),
+        encoding="utf-8",
+    )
+    assert main(["compare", str(first), str(second), "--metric", "m"]) == 1
+    assert "identical task_id" in capsys.readouterr().err
 
 
 def test_duplicate_seeds_refuse() -> None:
