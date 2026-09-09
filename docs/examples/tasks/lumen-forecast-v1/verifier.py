@@ -6,6 +6,7 @@ is scored on forecasting the executed future, never on counterfactual
 branches it did not observe. Branching evaluation needs a simulator, not
 this fixture.
 """
+
 from __future__ import annotations
 
 import math
@@ -34,12 +35,8 @@ class ForecastVerifier:
                 continue
 
             metrics[f"mae_h{horizon}"] = None if not math.isfinite(error) else error
-        reported = [
-            forecast.get(f"h{h}") for h in HORIZONS if isinstance(forecast, dict)
-        ]
-        unsafe_calls = [
-            point.get("unsafe") for point in reported if isinstance(point, dict)
-        ]
+        reported = [forecast.get(f"h{h}") for h in HORIZONS if isinstance(forecast, dict)]
+        unsafe_calls = [point.get("unsafe") for point in reported if isinstance(point, dict)]
         actual_unsafe = [future[h - 1]["unsafe"] for h in HORIZONS]
         if len(unsafe_calls) != len(HORIZONS) or any(
             not isinstance(call, bool) for call in unsafe_calls
