@@ -94,6 +94,8 @@ class JobResult(BaseModel):
     any_gate_failed: int
     unique_trajectories: Annotated[int, Field(ge=1)] | None = None
     duplicate_trajectories: Annotated[int, Field(ge=0)] | None = None
+    independent_cases: Annotated[int, Field(ge=1)] | None = None
+    split_manifest_digest: str = ""
     gate_outcome: Literal["passed", "failed", "not-assessable", "unknown"] = "unknown"
     claim_footer: str = ""
     head: str = ""
@@ -165,6 +167,8 @@ def assemble_job_result(
     agent_digest: str,
     claim_footer: str = "",
     world_engine: dict[str, Any] | None = None,
+    independent_cases: int | None = None,
+    split_manifest_digest: str = "",
 ) -> JobResult:
     """Build a publishable job result and stamp its head."""
     assert_publishable(task, trials, claim_footer)
@@ -212,6 +216,8 @@ def assemble_job_result(
         any_gate_failed=gate_failed,
         unique_trajectories=unique_trajectories,
         duplicate_trajectories=len(trials) - unique_trajectories,
+        independent_cases=independent_cases,
+        split_manifest_digest=split_manifest_digest,
         gate_outcome=(
             "failed"
             if gate_failed

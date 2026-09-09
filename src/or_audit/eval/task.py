@@ -275,6 +275,7 @@ class WorldSpec(_Frozen):
     inputs_path: str = ""
     labels_path: str = ""
     contract_path: str = ""
+    splits_path: str = ""
 
     @field_validator("kind", mode="before")
     @classmethod

@@ -222,3 +222,180 @@ def test_load_split_manifest_from_file(tmp_path: Path) -> None:
     assert loaded.dataset_revision == "rev-1"
     assert loaded.independent_case_count("train") == 1
     assert loaded.independent_case_count("test") == 1
+
+
+def test_assert_disjoint_stage_manifests() -> None:
+    from or_audit.eval.split import assert_disjoint_stage_manifests
+
+    m_qual = SplitManifest(
+        dataset_id="ds-1",
+        dataset_revision="v1",
+        disjoint_by=("patient",),
+        entries=(
+            SplitCaseEntry(
+                case_id="c1",
+                episode_id="e1",
+                split="qualification",
+                patient_id="p1",
+                item_ids=("i1",),
+            ),
+        ),
+    )
+    m_val = SplitManifest(
+        dataset_id="ds-1",
+        dataset_revision="v1",
+        disjoint_by=("patient",),
+        entries=(
+            SplitCaseEntry(
+                case_id="c2",
+                episode_id="e2",
+                split="validation",
+                patient_id="p1",  # Overlap with qual!
+                item_ids=("i2",),
+            ),
+        ),
+    )
+    # Overlap refused
+    with pytest.raises(TaskContractError, match="patient 'p1' appears across multiple stages"):
+        assert_disjoint_stage_manifests(
+            {"qualification": m_qual, "validation": m_val},
+            require_patient_disjoint=True,
+        )
+
+    # Dataset revision mismatch refused
+    m_val_rev2 = SplitManifest(
+        dataset_id="ds-1",
+        dataset_revision="v2",
+        disjoint_by=("patient",),
+        entries=(
+            SplitCaseEntry(
+                case_id="c2",
+                episode_id="e2",
+                split="validation",
+                patient_id="p2",
+                item_ids=("i2",),
+            ),
+        ),
+    )
+    with pytest.raises(TaskContractError, match="differing from stage 'qualification'"):
+        assert_disjoint_stage_manifests(
+            {"qualification": m_qual, "validation": m_val_rev2},
+        )
+
+
+def test_runner_validates_split_manifest_and_stamps_head(tmp_path: Path) -> None:
+    import shutil
+
+    from or_audit.eval.loader import load_agent, load_task
+    from or_audit.eval.runner import run_job
+
+    root = Path(__file__).resolve().parents[1]
+    task_src = root / "docs/examples/tasks/video-nextstep"
+    agent_src = root / "docs/examples/agents/example-video-predictor"
+
+    task_dir = tmp_path / "task"
+    shutil.copytree(task_src, task_dir)
+
+    # 3 clips in inputs.json: clip-001, clip-002, clip-003
+    # Group clip-001 and clip-002 into case-1, clip-003 into case-2
+    splits_data = {
+        "format_version": "1",
+        "dataset_id": "video-nextstep-dataset",
+        "dataset_revision": "1.0",
+        "disjoint_by": ["case"],
+        "entries": [
+            {
+                "case_id": "case-1",
+                "episode_id": "ep-1",
+                "split": "test",
+                "item_ids": ["clip-001", "clip-002"],
+            },
+            {
+                "case_id": "case-2",
+                "episode_id": "ep-2",
+                "split": "test",
+                "item_ids": ["clip-003"],
+            },
+        ],
+    }
+    (task_dir / "splits.json").write_text(json.dumps(splits_data), encoding="utf-8")
+
+    # Update task.toml to specify splits_path = "splits.json"
+    task_toml_path = task_dir / "task.toml"
+    content = task_toml_path.read_text(encoding="utf-8")
+    content = content.replace(
+        'inputs_path = "inputs.json"',
+        'inputs_path = "inputs.json"\nsplits_path = "splits.json"',
+    )
+    task_toml_path.write_text(content, encoding="utf-8")
+
+    task = load_task(task_dir)
+    agent = load_agent(agent_src)
+    out = tmp_path / "job"
+
+    result = run_job(
+        task=task,
+        task_dir=task_dir,
+        agent=agent,
+        agent_dir=agent_src,
+        out=out,
+        n=3,
+    )
+    # 3 trials, but only 2 independent cases
+    assert result.n == 3
+    assert result.independent_cases == 2
+    assert len(result.split_manifest_digest) == 64
+    assert result.head
+
+
+def test_runner_refuses_input_items_missing_from_split_manifest(tmp_path: Path) -> None:
+    import shutil
+
+    from or_audit.eval.loader import load_agent, load_task
+    from or_audit.eval.runner import run_job
+
+    root = Path(__file__).resolve().parents[1]
+    task_src = root / "docs/examples/tasks/video-nextstep"
+    agent_src = root / "docs/examples/agents/example-video-predictor"
+
+    task_dir = tmp_path / "task"
+    shutil.copytree(task_src, task_dir)
+
+    # Omit clip-003 from split manifest
+    splits_data = {
+        "format_version": "1",
+        "dataset_id": "video-nextstep-dataset",
+        "dataset_revision": "1.0",
+        "disjoint_by": ["case"],
+        "entries": [
+            {
+                "case_id": "case-1",
+                "episode_id": "ep-1",
+                "split": "test",
+                "item_ids": ["clip-001", "clip-002"],
+            },
+        ],
+    }
+    (task_dir / "splits.json").write_text(json.dumps(splits_data), encoding="utf-8")
+
+    task_toml_path = task_dir / "task.toml"
+    content = task_toml_path.read_text(encoding="utf-8")
+    content = content.replace(
+        'inputs_path = "inputs.json"',
+        'inputs_path = "inputs.json"\nsplits_path = "splits.json"',
+    )
+    task_toml_path.write_text(content, encoding="utf-8")
+
+    task = load_task(task_dir)
+    agent = load_agent(agent_src)
+    out = tmp_path / "job"
+
+    with pytest.raises(TaskContractError, match=r"missing items from inputs.*clip-003"):
+        run_job(
+            task=task,
+            task_dir=task_dir,
+            agent=agent,
+            agent_dir=agent_src,
+            out=out,
+            n=3,
+        )

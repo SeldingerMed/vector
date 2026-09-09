@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -52,6 +53,7 @@ from or_audit.eval.sim import (
     world_kind_key,
     world_kind_spec,
 )
+from or_audit.eval.split import load_split_manifest
 from or_audit.eval.task import TaskSpec
 from or_audit.eval.trace import ProceduralTrace
 from or_audit.eval.vector import project
@@ -577,6 +579,19 @@ def _run_closed_loop(
         _close(policy)
         _close(verifier)
         _close(env)
+    split_manifest_digest = ""
+    independent_cases = None
+    if task.environment.splits_path:
+        manifest_path = task_dir / task.environment.splits_path
+        manifest = load_split_manifest(manifest_path)
+        split_manifest_digest = digest(manifest.model_dump(mode="json"))
+        split_name = (
+            task.environment.seed_policy
+            if task.environment.seed_policy in ("train", "val", "test")
+            else "test"
+        )
+        with contextlib.suppress(Exception):
+            independent_cases = manifest.independent_case_count(split_name, unit="case")
     return (
         assemble_job_result(
             task=task,
@@ -585,6 +600,8 @@ def _run_closed_loop(
             task_digest=task_digest,
             world_engine=provenance,
             agent_digest=agent_digest,
+            independent_cases=independent_cases,
+            split_manifest_digest=split_manifest_digest,
         ),
         safety,
         provenance,
@@ -733,6 +750,20 @@ def _run_predictions(
     footer = ""
     if task.environment.kind is WorldKind.ANGIOSTRESS_CONTRACT:
         footer = load_claim_footer(task_dir / task.environment.contract_path)
+    split_manifest_digest = ""
+    independent_cases = None
+    if task.environment.splits_path:
+        manifest_path = task_dir / task.environment.splits_path
+        manifest = load_split_manifest(manifest_path)
+        manifest.validate_against_input_items(input_ids)
+        split_manifest_digest = digest(manifest.model_dump(mode="json"))
+        split_name = (
+            task.environment.seed_policy
+            if task.environment.seed_policy in ("train", "val", "test")
+            else "test"
+        )
+        with contextlib.suppress(Exception):
+            independent_cases = manifest.independent_case_count(split_name, unit="case")
     return assemble_job_result(
         task=task,
         agent=agent,
@@ -741,6 +772,8 @@ def _run_predictions(
         agent_digest=agent_digest,
         claim_footer=footer,
         world_engine=_engine_provenance(task, None),
+        independent_cases=independent_cases,
+        split_manifest_digest=split_manifest_digest,
     )
 
 
@@ -907,6 +940,20 @@ def _run_interactive(
     footer = ""
     if task.environment.kind is WorldKind.ANGIOSTRESS_CONTRACT:
         footer = load_claim_footer(task_dir / task.environment.contract_path)
+    split_manifest_digest = ""
+    independent_cases = None
+    if task.environment.splits_path:
+        manifest_path = task_dir / task.environment.splits_path
+        manifest = load_split_manifest(manifest_path)
+        manifest.validate_against_input_items(input_ids)
+        split_manifest_digest = digest(manifest.model_dump(mode="json"))
+        split_name = (
+            task.environment.seed_policy
+            if task.environment.seed_policy in ("train", "val", "test")
+            else "test"
+        )
+        with contextlib.suppress(Exception):
+            independent_cases = manifest.independent_case_count(split_name, unit="case")
     return assemble_job_result(
         task=task,
         agent=agent,
@@ -915,6 +962,8 @@ def _run_interactive(
         agent_digest=agent_digest,
         claim_footer=footer,
         world_engine=_engine_provenance(task, None),
+        independent_cases=independent_cases,
+        split_manifest_digest=split_manifest_digest,
     )
 
 

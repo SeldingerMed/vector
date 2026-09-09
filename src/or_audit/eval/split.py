@@ -187,3 +187,71 @@ def load_split_manifest(path: Path) -> SplitManifest:
     if not isinstance(data, dict):
         raise TaskContractError(f"split manifest at {path} is not an object")
     return SplitManifest.model_validate(data)
+
+
+def assert_disjoint_stage_manifests(
+    manifests: dict[str, SplitManifest],
+    *,
+    require_patient_disjoint: bool = False,
+    require_site_disjoint: bool = False,
+) -> None:
+    """Validate that named stage manifests do not leak cases, patients, or sites across stages."""
+    if len(manifests) <= 1:
+        return
+
+    # Check source-data identity alignment
+    first_name, first_m = next(iter(manifests.items()))
+    for name, m in manifests.items():
+        if m.dataset_id != first_m.dataset_id:
+            raise TaskContractError(
+                f"stage manifest {name!r} has dataset_id {m.dataset_id!r}, "
+                f"differing from stage {first_name!r} ({first_m.dataset_id!r})"
+            )
+        if m.dataset_revision != first_m.dataset_revision:
+            raise TaskContractError(
+                f"stage manifest {name!r} has dataset_revision {m.dataset_revision!r}, "
+                f"differing from stage {first_name!r} ({first_m.dataset_revision!r})"
+            )
+
+    # Check case, patient, site disjointness across stage manifests
+    case_to_stages: dict[str, set[str]] = defaultdict(set)
+    patient_to_stages: dict[str, set[str]] = defaultdict(set)
+    site_to_stages: dict[str, set[str]] = defaultdict(set)
+
+    for stage_name, manifest in manifests.items():
+        for entry in manifest.entries:
+            case_to_stages[entry.case_id].add(stage_name)
+            if entry.patient_id:
+                patient_to_stages[entry.patient_id].add(stage_name)
+            elif require_patient_disjoint:
+                raise TaskContractError(
+                    f"stage {stage_name!r} case {entry.case_id!r} is missing patient_id "
+                    "required for patient-disjoint stage validation"
+                )
+            if entry.site_id:
+                site_to_stages[entry.site_id].add(stage_name)
+            elif require_site_disjoint:
+                raise TaskContractError(
+                    f"stage {stage_name!r} case {entry.case_id!r} is missing site_id "
+                    "required for site-disjoint stage validation"
+                )
+
+    for case_id, stages in case_to_stages.items():
+        if len(stages) > 1:
+            raise TaskContractError(
+                f"case {case_id!r} appears across multiple stages: {sorted(stages)}"
+            )
+
+    if require_patient_disjoint:
+        for patient_id, stages in patient_to_stages.items():
+            if len(stages) > 1:
+                raise TaskContractError(
+                    f"patient {patient_id!r} appears across multiple stages: {sorted(stages)}"
+                )
+
+    if require_site_disjoint:
+        for site_id, stages in site_to_stages.items():
+            if len(stages) > 1:
+                raise TaskContractError(
+                    f"site {site_id!r} appears across multiple stages: {sorted(stages)}"
+                )
