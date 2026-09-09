@@ -279,9 +279,7 @@ def run_cartesian_job(
             planned.append((task_dir, task, agent, agent_dir, dirname, pair_trials))
 
     stage = resolved.config.stage
-    stage_split: str | None = None
     if stage is not None:
-        stage_split = stage.split if stage.split else str(stage.name)
         if any(trials is None for *_, trials in planned):
             raise TaskContractError(f"stage {stage.name} must declare job n or task_trials")
         scheduled = sum(trials or 0 for *_, trials in planned)
@@ -318,7 +316,12 @@ def run_cartesian_job(
             )
 
         for task_dir, task, _, _, _, trials in planned:
-            assert_trial_capacity(task, task_dir, trials or 0, split=stage_split)
+            task_split = (
+                stage.split
+                if stage.split
+                else (str(stage.name) if task.environment.splits_path else None)
+            )
+            assert_trial_capacity(task, task_dir, trials or 0, split=task_split)
         observed_cases = _independent_case_count(planned, stage)
         if observed_cases != stage.independent_cases:
             raise TaskContractError(
@@ -330,6 +333,11 @@ def run_cartesian_job(
     outcomes: list[str] = []
     observed_units = 0
     for task_dir, task, agent, agent_dir, dirname, pair_trials in planned:
+        task_split = (
+            stage.split
+            if stage is not None and stage.split
+            else (str(stage.name) if stage is not None and task.environment.splits_path else None)
+        )
         result: JobResult = run_job(
             task=task,
             task_dir=task_dir,
@@ -338,7 +346,7 @@ def run_cartesian_job(
             out=out / dirname,
             n=pair_trials,
             gym_factory=gym_factory,
-            split=stage_split,
+            split=task_split,
         )
         pairs.append(
             PairRecord(

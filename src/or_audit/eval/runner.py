@@ -313,6 +313,10 @@ def run_job(
     episodes = n if n is not None else task.environment.n_eval_episodes
     if episodes < 1:
         raise TaskContractError(f"n must be >= 1, got {episodes}")
+    if split and not task.environment.splits_path:
+        raise TaskContractError(
+            f"task {task.id} has no declared splits_path; cannot execute explicit split {split!r}"
+        )
     target_split = (
         split
         if split

@@ -856,3 +856,40 @@ prerequisites = ["integration-smoke", "pilot"]
     assert pair_result.split == "test"
     pair_ids = [trial.trajectory[0].get("input", {}).get("id") for trial in pair_result.trials]
     assert pair_ids == ["clip-001", "clip-002"]
+
+
+def test_explicit_split_without_splits_path_refused(tmp_path: Path) -> None:
+    import shutil
+
+    from or_audit.eval.loader import load_agent, load_task
+    from or_audit.eval.runner import run_job
+
+    root = Path(__file__).resolve().parents[1]
+    task_src = root / "docs/examples/tasks/video-nextstep"
+    agent_src = root / "docs/examples/agents/example-video-predictor"
+
+    task_dir = tmp_path / "task-no-split-decl"
+    shutil.copytree(task_src, task_dir)
+
+    # Remove splits_path from task.toml
+    task_toml = task_dir / "task.toml"
+    old_text = task_toml.read_text(encoding="utf-8")
+    task_toml.write_text(old_text.replace('splits_path = "splits.json"', ""), encoding="utf-8")
+
+    task = load_task(task_dir)
+    agent = load_agent(agent_src)
+    out = tmp_path / "out"
+
+    with pytest.raises(
+        TaskContractError,
+        match="has no declared splits_path; cannot execute explicit split",
+    ):
+        run_job(
+            task=task,
+            task_dir=task_dir,
+            agent=agent,
+            agent_dir=agent_src,
+            out=out,
+            n=1,
+            split="test",
+        )
