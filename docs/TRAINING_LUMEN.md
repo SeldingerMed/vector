@@ -1,8 +1,9 @@
 # G — Training-to-evaluation recipe, Lumen PPO (Phase G)
 
-Status: measured 2026-09-08 on CPU. Reference-level proof that a trained
-checkpoint runs through independent held-out evaluation with safety
-reporting preserved — not a frontier result.
+# Status: measured 2026-09-08 on CPU. Train→same-environment evaluation
+# plumbing only: a trained checkpoint runs through the harness on the same
+# frozen cases with safety reporting preserved. Not held-out evaluation in
+# any generalization sense (see Limits), and not a frontier result.
 
 ## Separation of concerns
 
@@ -34,12 +35,13 @@ EOF
 # 2. wrap the checkpoint as an agent package. stable-baselines3 is the
 #    agent's runtime (present in the probe venv), never a harness dependency.
 mkdir -p /tmp/lumen-ppo-agent && cp /tmp/lumen-ppo-g1.zip /tmp/lumen-ppo-agent/ppo.zip
-cat > /tmp/lumen-ppo-agent/agent.toml <<'EOF'
+WEIGHTS_PIN=$(sha256sum /tmp/lumen-ppo-agent/ppo.zip | cut -d' ' -f1)
+cat > /tmp/lumen-ppo-agent/agent.toml <<EOF
 format_version = "2"
 id = "local/ppo-nav"
 agent_version = "0"
 kind = "policy"
-weights_pin = "<sha256 of ppo.zip>"
+weights_pin = "$WEIGHTS_PIN"
 weights_path = "ppo.zip"
 
 [[capabilities]]
