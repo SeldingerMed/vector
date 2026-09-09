@@ -376,19 +376,20 @@ def nonfinite_kind(value: Any) -> str:
     """
     if isinstance(value, str) and value.startswith(NONFINITE_TAG):
         return value[len(NONFINITE_TAG) :] or "non-finite"
-    if isinstance(value, float) and not np.isfinite(value):
-        return nonfinite_tag(value)[len(NONFINITE_TAG) :]
+    if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+        return nonfinite_tag(float(value))[len(NONFINITE_TAG) :]
     return ""
 
 
-def episode_diverged(steps: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> bool:
-    """Whether the recorder saw non-finite engine output this episode.
+def episode_diverged(steps: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> bool | None:
+    """Whether non-finite engine output was observed this episode.
 
     Recorded infos carry tagged strings where the engine reported NaN or an
-    infinity (never a silent 0.0). Any tag means the solver diverged at
-    least once — observed fact about this episode, not an inference from
-    one channel. Absence means no divergence was observed, which verifiers
-    interpret under their own contracts; it is data, not proof.
+    infinity (never a silent 0.0). Returns ``True`` if any non-finite tag
+    was observed; ``None`` if none was observed. Absence of a non-finite
+    tag is not proof of solver convergence, so this returns ``None`` rather
+    than ``False`` to prevent unobserved divergence from being laundered as
+    verified convergence.
     """
     stack: list[Any] = list(steps)
     while stack:
@@ -400,7 +401,7 @@ def episode_diverged(steps: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -
             stack.extend(current.values())
         elif isinstance(current, (list, tuple)):
             stack.extend(current)
-    return False
+    return None
 
 
 def jsonable(value: Any) -> Any:

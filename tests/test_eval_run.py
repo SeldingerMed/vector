@@ -16,6 +16,7 @@ from or_audit.eval.contracts import PerturbationSpec
 from or_audit.eval.gym_world import (
     assert_perturbations_applied,
     episode_diverged,
+    nonfinite_kind,
     run_gym_episode,
     split_perturbations,
 )
@@ -620,7 +621,17 @@ def test_make_gym_without_lumen_explains_install() -> None:
 
 
 def test_episode_diverged_reads_recorder_tags() -> None:
-    assert episode_diverged([{"info": {"max_pen": 0.1}}]) is False
+    assert episode_diverged([{"info": {"max_pen": 0.1}}]) is None
     assert episode_diverged([{"info": {"max_pen": "__nonfinite__:nan"}}]) is True
     assert episode_diverged([{"nested": [{"v": "__nonfinite__:+inf"}]}]) is True
-    assert episode_diverged([]) is False
+    assert episode_diverged([{"obs": {"position": "__nonfinite__:nan"}}]) is True
+    assert episode_diverged([{"reward": "__nonfinite__:-inf"}]) is True
+    assert episode_diverged([{"action": [0.0], "observation": "__nonfinite__:nan"}]) is True
+    assert episode_diverged([]) is None
+
+
+def test_nonfinite_kind_numpy_scalars() -> None:
+    assert nonfinite_kind(np.float32("nan")) == "nan"
+    assert nonfinite_kind(np.float64("inf")) == "+inf"
+    assert nonfinite_kind(np.float32("-inf")) == "-inf"
+    assert nonfinite_kind(np.float32(1.5)) == ""

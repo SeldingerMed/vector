@@ -136,3 +136,111 @@ def test_resume_with_foreign_seed_refuses(tmp_path: Path) -> None:
     shutil.copytree(out / "trial-video-nextstep-0", foreign)
     with pytest.raises(TaskContractError, match="outside schedule"):
         _run(out, 2, resume=True)
+
+
+def test_resume_with_corrupt_provenance_refuses(tmp_path: Path) -> None:
+    out = tmp_path / "job"
+    _run(out, 2)
+    (out / "result.json").unlink()
+    prov_path = out / "trial-video-nextstep-0" / "provenance.json"
+    prov_path.write_text('{"backend": "not-a-valid-backend"}', encoding="utf-8")
+    with pytest.raises(TaskContractError, match=r"invalid provenance\.json"):
+        _run(out, 2, resume=True)
+
+
+def test_resume_with_conflicting_provenance_refuses(tmp_path: Path) -> None:
+    import json
+
+    out = tmp_path / "job"
+    _run(out, 2)
+    (out / "result.json").unlink()
+    prov0 = out / "trial-video-nextstep-0" / "provenance.json"
+    prov1 = out / "trial-video-nextstep-1" / "provenance.json"
+    data0 = {
+        "engine": "dummy",
+        "backend": "synthetic-stub",
+        "backend_version": "1.0",
+        "world_pin": "",
+        "adapter_id": "",
+        "adapter_digest": "",
+        "metrics_only": False,
+    }
+    data1 = {**data0, "backend": "real"}
+    prov0.write_text(json.dumps(data0), encoding="utf-8")
+    prov1.write_text(json.dumps(data1), encoding="utf-8")
+    with pytest.raises(TaskContractError, match="conflicting provenance"):
+        _run(out, 2, resume=True)
+
+
+def test_resume_with_mixed_provenance_refuses(tmp_path: Path) -> None:
+    from or_audit.eval.job import read_partial_trials
+
+    out = tmp_path / "job"
+    _run(out, 2)
+    (out / "result.json").unlink()
+    prov0 = out / "trial-video-nextstep-0" / "provenance.json"
+    prov1 = out / "trial-video-nextstep-1" / "provenance.json"
+    assert prov0.is_file(), "trial 0 must carry provenance"
+    assert prov1.is_file(), "trial 1 must carry provenance"
+    prov1.unlink()
+    assert not prov1.is_file()
+    with pytest.raises(TaskContractError, match=r"mixed provenance"):
+        read_partial_trials(out, "video-nextstep")
+    with pytest.raises(TaskContractError, match="mixed provenance"):
+        _run(out, 2, resume=True)
+
+
+def test_kill_recovery_pre_write_drift_refuses(tmp_path: Path) -> None:
+    from or_audit.eval.loader import load_task
+    from or_audit.eval.runner import builtin_random_agent, run_job
+    from tests.test_eval_run import LUMEN_TASK, FakeLumenEnv
+
+    class OtherBackend(FakeLumenEnv):
+        def engine_provenance(self) -> dict[str, str]:
+            return {**super().engine_provenance(), "backend": "real"}
+
+    out = tmp_path / "job"
+    run_job(
+        task=load_task(LUMEN_TASK),
+        task_dir=LUMEN_TASK,
+        agent=builtin_random_agent(),
+        agent_dir=None,
+        out=out,
+        n=1,
+        gym_factory=lambda task: FakeLumenEnv(),
+    )
+    (out / "result.json").unlink()
+    trial1_dir = out / "trial-lumen-nav-safe-1"
+    assert not trial1_dir.exists()
+    with pytest.raises(TaskContractError, match="world engine changed"):
+        run_job(
+            task=load_task(LUMEN_TASK),
+            task_dir=LUMEN_TASK,
+            agent=builtin_random_agent(),
+            agent_dir=None,
+            out=out,
+            n=2,
+            gym_factory=lambda task: OtherBackend(),
+            resume=True,
+        )
+    assert not trial1_dir.exists(), "drifted trial was written before rejection"
+
+
+def test_resume_with_corrupt_projection_refuses(tmp_path: Path) -> None:
+    out = tmp_path / "job"
+    _run(out, 2)
+    (out / "result.json").unlink()
+    proj = out / "trial-video-nextstep-0" / "projection.json"
+    proj.write_text("not-valid-json{", encoding="utf-8")
+    with pytest.raises(TaskContractError, match=r"invalid projection\.json"):
+        _run(out, 2, resume=True)
+
+
+def test_resume_with_non_object_projection_refuses(tmp_path: Path) -> None:
+    out = tmp_path / "job"
+    _run(out, 2)
+    (out / "result.json").unlink()
+    proj = out / "trial-video-nextstep-0" / "projection.json"
+    proj.write_text('["not", "an", "object"]', encoding="utf-8")
+    with pytest.raises(TaskContractError, match=r"projection\.json is not an object"):
+        _run(out, 2, resume=True)
