@@ -78,6 +78,7 @@ from or_audit.eval.sim import (
     reset_default_simulation_engines,
     world_adapter_discovery,
 )
+from or_audit.eval.split import SplitCaseEntry, SplitManifest, load_split_manifest
 from or_audit.eval.task import GateSpec, MetricSpec, PortSpec, ProjectionSpec, TaskSpec, WorldSpec
 from or_audit.eval.trace import (
     EvidenceReference,
@@ -148,6 +149,8 @@ __all__ = [
     "SimFactory",
     "SimulationEngine",
     "SofaBridge",
+    "SplitCaseEntry",
+    "SplitManifest",
     "SubjectKind",
     "TaskSpec",
     "TasksetSpec",
@@ -176,6 +179,7 @@ __all__ = [
     "list_world_kinds",
     "load_agent",
     "load_dataset",
+    "load_split_manifest",
     "load_task",
     "load_taskset",
     "make_gym_bridge",
