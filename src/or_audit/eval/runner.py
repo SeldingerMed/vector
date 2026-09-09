@@ -71,7 +71,14 @@ def assert_trial_capacity(task: TaskSpec, task_dir: Path, n: int, split: str | N
         input_ids = {str(item["id"]) for item in all_items}
         manifest.validate_against_input_items(input_ids, strict=False)
         target_split = split or "test"
-        available = len(manifest.items_for_split(target_split))
+        available_items = manifest.items_for_split(target_split)
+        if not available_items:
+            available_splits = sorted({e.split for e in manifest.entries})
+            raise TaskContractError(
+                f"task {task.id} requests split {target_split!r} but "
+                f"manifest only defines splits: {available_splits}"
+            )
+        available = len(available_items)
         if n > available:
             raise TaskContractError(
                 f"task {task.id} split {target_split!r} has {available} input items; "
@@ -692,12 +699,7 @@ def _run_predictions(
                 f"task {task.id} requests split {target_split!r} but "
                 f"manifest only defines splits: {available_splits}"
             )
-        item_by_id = {str(item["id"]): item for item in inputs}
-        filtered = [
-            item_by_id[item_id]
-            for item_id in manifest.items_for_split(target_split)
-            if item_id in item_by_id
-        ]
+        filtered = [item for item in inputs if str(item["id"]) in allowed_items]
         if not filtered:
             raise TaskContractError(
                 f"task {task.id} has no input items matching split {target_split!r}"
@@ -888,12 +890,7 @@ def _run_interactive(
                 f"task {task.id} requests split {target_split!r} but "
                 f"manifest only defines splits: {available_splits}"
             )
-        item_by_id = {str(item["id"]): item for item in inputs}
-        filtered = [
-            item_by_id[item_id]
-            for item_id in manifest.items_for_split(target_split)
-            if item_id in item_by_id
-        ]
+        filtered = [item for item in inputs if str(item["id"]) in allowed_items]
         if not filtered:
             raise TaskContractError(
                 f"task {task.id} has no input items matching split {target_split!r}"

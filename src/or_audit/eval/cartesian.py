@@ -185,18 +185,13 @@ def _independent_case_count(
                 )
 
             task_group = stage.independent_case_groups.get(task.id, task.id)
-            task_group = stage.independent_case_groups.get(task.id, task.id)
             all_inputs = load_items(root / task.environment.inputs_path)
-            item_by_id = {str(item["id"]): item for item in all_inputs}
-            ordered_inputs = [
-                item_by_id[item_id]
-                for item_id in manifest.items_for_split(target_split)
-                if item_id in item_by_id
-            ]
+            allowed_items = set(manifest.items_for_split(target_split))
+            filtered_inputs = [item for item in all_inputs if str(item["id"]) in allowed_items]
             evaluated_items = (
-                {str(item["id"]) for item in ordered_inputs[:trials]}
+                {str(item["id"]) for item in filtered_inputs[:trials]}
                 if trials is not None
-                else {str(item["id"]) for item in ordered_inputs}
+                else {str(item["id"]) for item in filtered_inputs}
             )
             for entry in matching:
                 if any(item in evaluated_items for item in entry.item_ids):
@@ -284,7 +279,9 @@ def run_cartesian_job(
             planned.append((task_dir, task, agent, agent_dir, dirname, pair_trials))
 
     stage = resolved.config.stage
+    stage_split: str | None = None
     if stage is not None:
+        stage_split = stage.split if stage.split else str(stage.name)
         if any(trials is None for *_, trials in planned):
             raise TaskContractError(f"stage {stage.name} must declare job n or task_trials")
         scheduled = sum(trials or 0 for *_, trials in planned)
@@ -319,7 +316,7 @@ def run_cartesian_job(
             raise TaskContractError(
                 f"stage {stage.name} independent_case_groups keys must exactly match task ids"
             )
-        stage_split = stage.split if stage.split else None
+
         for task_dir, task, _, _, _, trials in planned:
             assert_trial_capacity(task, task_dir, trials or 0, split=stage_split)
         observed_cases = _independent_case_count(planned, stage)
@@ -329,7 +326,6 @@ def run_cartesian_job(
                 f"{stage.independent_case_key!r} identifies {observed_cases}"
             )
 
-    stage_split = stage.split if stage is not None and stage.split else None
     pairs: list[PairRecord] = []
     outcomes: list[str] = []
     observed_units = 0
