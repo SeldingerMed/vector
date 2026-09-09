@@ -124,3 +124,15 @@ def test_resume_across_backend_change_refuses(tmp_path: Path) -> None:
             gym_factory=lambda task: OtherBackend(),
             resume=True,
         )
+
+
+def test_resume_with_foreign_seed_refuses(tmp_path: Path) -> None:
+    import shutil
+
+    out = tmp_path / "job"
+    _run(out, 2)
+    (out / "result.json").unlink()
+    foreign = out / "trial-video-nextstep-99"
+    shutil.copytree(out / "trial-video-nextstep-0", foreign)
+    with pytest.raises(TaskContractError, match="outside schedule"):
+        _run(out, 2, resume=True)

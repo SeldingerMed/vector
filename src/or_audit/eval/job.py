@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
@@ -273,11 +275,22 @@ def _copy_package(source: Path, target: Path) -> None:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write crash-atomically: readers never see a half-written file."""
+    """Write crash-atomically: readers never see a half-written file.
+
+    Uses mkstemp (O_EXCL) in the target directory so a pre-created symlink
+    cannot redirect the write, then renames over the target.
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with open(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def write_job_skeleton(
@@ -357,11 +370,13 @@ def read_partial_trials(out: Path, task_id: str) -> list[TrialRecord]:
             seed = int(trial_dir.name.rsplit("-", 1)[-1])
         except ValueError:
             continue
-        vector = TrialVector.model_validate(json.loads(vector_path.read_text(encoding="utf-8")))
-
-        trajectory = ProceduralTrace.model_validate(
-            json.loads(trajectory_path.read_text(encoding="utf-8"))
-        )
+        try:
+            vector = TrialVector.model_validate(json.loads(vector_path.read_text(encoding="utf-8")))
+            trajectory = ProceduralTrace.model_validate(
+                json.loads(trajectory_path.read_text(encoding="utf-8"))
+            )
+        except ValueError as exc:
+            raise TaskContractError(f"trial dir {trial_dir.name} is corrupt: {exc}") from exc
         projection_path = trial_dir / "projection.json"
         projection = None
         projection_spec_digest = ""
@@ -398,9 +413,6 @@ def write_job(
         task_digest=result.task_digest,
         agent_digest=result.agent_digest,
     )
-    _atomic_write_text(
-        out / "result.json", json.dumps(result.model_dump(mode="json"), indent=2) + "\n"
-    )
     for trial in result.trials:
         write_trial(out, result.task_id, trial, result.projection_identity)
     from or_audit.eval.scorecard import write_scorecards
@@ -410,6 +422,9 @@ def write_job(
         out,
         result,
         world_engine=world_engine if isinstance(world_engine, dict) else None,
+    )
+    _atomic_write_text(
+        out / "result.json", json.dumps(result.model_dump(mode="json"), indent=2) + "\n"
     )
 
 

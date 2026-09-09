@@ -246,7 +246,14 @@ def _resume_partial(
             f"cannot resume {out}: configured n exceeds requested n={n}; "
             "shrinking a schedule would drop evidence"
         )
-    return {trial.seed: trial for trial in read_partial_trials(out, task_id)}, None
+    records = read_partial_trials(out, task_id)
+    foreign = sorted(record.seed for record in records if not 0 <= record.seed < n)
+    if foreign:
+        raise TaskContractError(
+            f"cannot resume {out}: trial seeds {foreign} outside schedule n={n}; "
+            "refusing to merge foreign trials"
+        )
+    return {trial.seed: trial for trial in records}, None
 
 
 def run_job(
