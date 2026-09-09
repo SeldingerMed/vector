@@ -30,8 +30,11 @@ from or_audit.eval.job import (
     compute_head,
     read_job_config,
     read_job_result,
+    read_partial_trials,
     resolve_bundle_path,
     write_job,
+    write_job_skeleton,
+    write_trial,
 )
 from or_audit.eval.plugins import (
     load_policy_runtime,
@@ -196,13 +199,15 @@ def _resume_trials(
 ) -> tuple[dict[int, TrialRecord], JobResult | None]:
     """Completed trials to keep when resuming an interrupted job.
 
-    Refuses when the previous result names a different task, package
-    digests, or episode count: resuming across a changed contract would
-    silently mix incomparable trials into one head.
+    From a finished result when present, else from bundle/config plus
+    completed trial dirs after a kill. Refuses across changed contracts.
     """
     if not enabled:
         return {}, None
-    previous = read_job_result(out)
+    try:
+        previous = read_job_result(out)
+    except TaskContractError:
+        return _resume_partial(out, task_id, task_digest, agent_digest, n)
     if previous.task_id != task_id:
         raise TaskContractError(
             f"cannot resume {out}: previous result is task {previous.task_id!r}"
@@ -217,6 +222,38 @@ def _resume_trials(
             "shrinking a schedule would drop evidence"
         )
     return {trial.seed: trial for trial in previous.trials}, previous
+
+
+def _resume_partial(
+    out: Path, task_id: str, task_digest: str, agent_digest: str, n: int
+) -> tuple[dict[int, TrialRecord], None]:
+    """Resume a killed run: bundle/config plus completed trial dirs, no result.
+
+    Provenance caveat: trial dirs do not record the backend that produced
+    them, so crash-resume assumes the same host and runner. Cross-backend
+    crash recovery is unverified and therefore refused by omission here —
+    only same-run continuation is supported, not forensic reassembly.
+    """
+    config = read_job_config(out)
+    if config.get("task_id") != task_id:
+        raise TaskContractError(f"cannot resume {out}: config names another task")
+    if config.get("task_digest") != task_digest:
+        raise TaskContractError(f"cannot resume {out}: task package changed since")
+    if config.get("agent_digest") != agent_digest:
+        raise TaskContractError(f"cannot resume {out}: agent package changed since")
+    if int(config.get("n", 0)) > n:
+        raise TaskContractError(
+            f"cannot resume {out}: configured n exceeds requested n={n}; "
+            "shrinking a schedule would drop evidence"
+        )
+    records = read_partial_trials(out, task_id)
+    foreign = sorted(record.seed for record in records if not 0 <= record.seed < n)
+    if foreign:
+        raise TaskContractError(
+            f"cannot resume {out}: trial seeds {foreign} outside schedule n={n}; "
+            "refusing to merge foreign trials"
+        )
+    return {trial.seed: trial for trial in records}, None
 
 
 def run_job(
@@ -252,6 +289,26 @@ def run_job(
         n=episodes,
         enabled=resume,
     )
+    write_job_skeleton(
+        out,
+        config={
+            "format_version": "2",
+            "task_id": task.id,
+            "task_dir": "bundle/task",
+            "agent_id": agent.id,
+            "agent_dir": "bundle/agent" if agent_dir is not None else None,
+            "task_digest": task_package_digest,
+            "agent_digest": agent_package_digest,
+            "runtime_identity": agent.runtime_identity,
+            "n": episodes,
+            "world_pin": task.environment.world_pin,
+            "interface": task.interface.id,
+        },
+        task_dir=task_dir,
+        agent_dir=agent_dir,
+        task_digest=task_package_digest,
+        agent_digest=agent_package_digest,
+    )
     extra: dict[str, Any] = {
         "interaction_mode": task.harness.interaction_mode.value,
         "world_engine": _engine_provenance(task, None),
@@ -276,6 +333,7 @@ def run_job(
             task_digest=task_package_digest,
             agent_digest=agent_package_digest,
             n=episodes,
+            out=out,
             gym_factory=gym_factory,
             resume_trials=resume_trials,
         )
@@ -290,6 +348,7 @@ def run_job(
             task_digest=task_package_digest,
             agent_digest=agent_package_digest,
             n=episodes,
+            out=out,
             resume_trials=resume_trials,
         )
     elif task.harness.interaction_mode is InteractionMode.INTERACTIVE:
@@ -301,6 +360,7 @@ def run_job(
             task_digest=task_package_digest,
             agent_digest=agent_package_digest,
             n=episodes,
+            out=out,
             resume_trials=resume_trials,
         )
     elif task.harness.interaction_mode is InteractionMode.COUNTERFACTUAL:
@@ -312,6 +372,7 @@ def run_job(
             task_digest=task_package_digest,
             agent_digest=agent_package_digest,
             n=episodes,
+            out=out,
             resume_trials=resume_trials,
         )
     else:  # pragma: no cover - enum exhaustiveness
@@ -360,6 +421,7 @@ def _run_closed_loop(
     agent: AgentPackage,
     agent_dir: Path | None,
     n: int,
+    out: Path,
     task_digest: str,
     agent_digest: str,
     gym_factory: GymFactory | None,
@@ -481,6 +543,12 @@ def _run_closed_loop(
                     projection_spec_digest=(task.projection.rule_digest if task.projection else ""),
                 )
             )
+            write_trial(
+                out,
+                task.id,
+                trials[-1],
+                task.projection.identity if task.projection else "",
+            )
     finally:
         _close(policy)
         _close(verifier)
@@ -507,8 +575,9 @@ def _run_predictions(
     agent_dir: Path | None,
     task_digest: str,
     agent_digest: str,
-    n: int,
+    out: Path,
     mode: InteractionMode,
+    n: int,
     resume_trials: dict[int, TrialRecord] | None = None,
 ) -> JobResult:
     if agent_dir is None:
@@ -608,6 +677,12 @@ def _run_predictions(
                     projection_spec_digest=(task.projection.rule_digest if task.projection else ""),
                 )
             )
+            write_trial(
+                out,
+                task.id,
+                trials[-1],
+                task.projection.identity if task.projection else "",
+            )
     finally:
         _close(predictor)
         _close(verifier)
@@ -638,6 +713,7 @@ def _run_interactive(
     task_digest: str,
     agent_digest: str,
     n: int,
+    out: Path,
     resume_trials: dict[int, TrialRecord] | None = None,
 ) -> JobResult:
     if agent_dir is None:
@@ -754,6 +830,12 @@ def _run_interactive(
                     projection=projection,
                     projection_spec_digest=(task.projection.rule_digest if task.projection else ""),
                 )
+            )
+            write_trial(
+                out,
+                task.id,
+                trials[-1],
+                task.projection.identity if task.projection else "",
             )
     finally:
         _close(predictor)
