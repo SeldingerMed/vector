@@ -1,6 +1,6 @@
 format_version = "2"
 id = "laparoscopic-cholec-cvs"
-task_version = "0"
+task_version = "1"
 
 [metadata]
 title = "Laparoscopic Cholecystectomy Critical View of Safety Identification"
@@ -33,7 +33,7 @@ features = ["abstention"]
 id = "laparoscopic-video"
 schema_id = "video-clip"
 adapter = "video-laparoscopic"
-adapter_digest = "ada92b5e4c9cbe363980f8e657ba08ebc7e63b32fda61006b588b74e52c14205"
+adapter_digest = "b1b06a17ff0da168c8f6d5a60442a0279e56b7d2cfaf234f681f8195ca9fe12d"
 
 [harness]
 interaction_mode = "single-turn"

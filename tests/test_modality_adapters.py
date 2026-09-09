@@ -303,6 +303,10 @@ def test_adapters_null_handling() -> None:
     )
     assert isinstance(v_pre, VideoFrameObservation)
     assert v_pre.optical_flow is None
+    assert v_pre.timestamp_ms is None
+    assert v_pre.image_uri is None
+    assert v_pre.width is None
+    assert v_pre.height is None
 
     b_adapter = require_adapter(ModalityKind.AIRWAY_BRONCHOSCOPY)
     b_pre = b_adapter.preprocess_observation(
