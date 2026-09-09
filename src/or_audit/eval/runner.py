@@ -531,7 +531,7 @@ def _run_closed_loop(
                     "info": info,
                     "trajectory": list(trace),
                     "safety_max_pen": safety,
-                    "diverged_observed": episode_diverged([step.get("info", {}) for step in steps]),
+                    "diverged_observed": episode_diverged(steps),
                 },
                 runtime=verifier,
             )
