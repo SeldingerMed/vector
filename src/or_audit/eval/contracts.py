@@ -194,57 +194,56 @@ class CapabilitySpec(_Frozen):
             and schemas_match
         ):
             return False
-        if self.stream_profiles:
-            cap_profiles = {s.id: s for s in self.stream_profiles}
-            for intf_stream in interface.streams:
+        cap_profiles = {s.id: s for s in self.stream_profiles} if self.stream_profiles else {}
+        for intf_stream in interface.streams:
+            has_semantics = bool(
+                intf_stream.unit
+                or intf_stream.coordinate_frame
+                or intf_stream.controller_id
+                or intf_stream.dtype
+                or intf_stream.shape
+                or intf_stream.joint_order
+                or intf_stream.invalid_depth_encoding
+                or intf_stream.valid_range is not None
+            )
+            if has_semantics:
                 matching_profile = cap_profiles.get(intf_stream.id) or cap_profiles.get(
                     intf_stream.schema_id
                 )
-                if matching_profile is not None:
-                    if (
-                        intf_stream.unit
-                        and matching_profile.unit
-                        and intf_stream.unit != matching_profile.unit
-                    ):
-                        return False
-                    if (
-                        intf_stream.coordinate_frame
-                        and matching_profile.coordinate_frame
-                        and intf_stream.coordinate_frame != matching_profile.coordinate_frame
-                    ):
-                        return False
-                    if (
-                        intf_stream.controller_id
-                        and matching_profile.controller_id
-                        and intf_stream.controller_id != matching_profile.controller_id
-                    ):
-                        return False
-                    if (
-                        intf_stream.dtype
-                        and matching_profile.dtype
-                        and intf_stream.dtype != matching_profile.dtype
-                    ):
-                        return False
-                    if (
-                        intf_stream.shape
-                        and matching_profile.shape
-                        and intf_stream.shape != matching_profile.shape
-                    ):
-                        return False
-                    if (
-                        intf_stream.joint_order
-                        and matching_profile.joint_order
-                        and intf_stream.joint_order != matching_profile.joint_order
-                    ):
-                        return False
-                    if (
-                        intf_stream.invalid_depth_encoding
-                        and matching_profile.invalid_depth_encoding
-                        and intf_stream.invalid_depth_encoding
-                        != matching_profile.invalid_depth_encoding
-                    ):
-                        return False
-        for intf_stream in interface.streams:
+                if matching_profile is None:
+                    return False
+                if intf_stream.unit and matching_profile.unit != intf_stream.unit:
+                    return False
+                if (
+                    intf_stream.coordinate_frame
+                    and matching_profile.coordinate_frame != intf_stream.coordinate_frame
+                ):
+                    return False
+                if (
+                    intf_stream.controller_id
+                    and matching_profile.controller_id != intf_stream.controller_id
+                ):
+                    return False
+                if intf_stream.dtype and matching_profile.dtype != intf_stream.dtype:
+                    return False
+                if intf_stream.shape and matching_profile.shape != intf_stream.shape:
+                    return False
+                if (
+                    intf_stream.joint_order
+                    and matching_profile.joint_order != intf_stream.joint_order
+                ):
+                    return False
+                if (
+                    intf_stream.invalid_depth_encoding
+                    and matching_profile.invalid_depth_encoding
+                    != intf_stream.invalid_depth_encoding
+                ):
+                    return False
+                if (
+                    intf_stream.valid_range is not None
+                    and matching_profile.valid_range != intf_stream.valid_range
+                ):
+                    return False
             if intf_stream.privileged and not self.accepts_privileged:
                 return False
         return True

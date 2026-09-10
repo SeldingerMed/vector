@@ -661,3 +661,31 @@ def test_semantic_stream_profile_mismatches_refuse_binding() -> None:
     assert not matching_cap.satisfies(priv_interface)
     priv_cap = matching_cap.model_copy(update={"accepts_privileged": True})
     assert priv_cap.satisfies(priv_interface)
+
+    # 7. Missing stream profile entirely when interface declares semantics -> does not bind
+    no_profile_cap = matching_cap.model_copy(update={"stream_profiles": ()})
+    assert not no_profile_cap.satisfies(interface)
+
+    # 8. Empty string unit on capability profile when interface declares unit="mm" -> does not bind
+    empty_unit_cap = matching_cap.model_copy(
+        update={"stream_profiles": (base_stream.model_copy(update={"unit": ""}),)}
+    )
+    assert not empty_unit_cap.satisfies(interface)
+
+    # 9. schema_wildcard=True cannot bypass semantic profile requirements
+    wildcard_no_profile = CapabilitySpec(
+        interface="kinematics-control",
+        interaction_modes=(InteractionMode.CLOSED_LOOP,),
+        schema_wildcard=True,
+        stream_profiles=(),
+    )
+    assert not wildcard_no_profile.satisfies(interface)
+
+    # 10. schema_wildcard=True with matching semantic profile satisfies
+    wildcard_matching_profile = CapabilitySpec(
+        interface="kinematics-control",
+        interaction_modes=(InteractionMode.CLOSED_LOOP,),
+        schema_wildcard=True,
+        stream_profiles=(base_stream,),
+    )
+    assert wildcard_matching_profile.satisfies(interface)
