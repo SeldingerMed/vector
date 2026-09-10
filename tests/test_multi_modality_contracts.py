@@ -701,3 +701,26 @@ def test_semantic_stream_profile_mismatches_refuse_binding() -> None:
         stream_profiles=(schema_keyed_profile,),
     )
     assert schema_cap.satisfies(interface)
+
+    # 12. camera_calibration mismatch refuses binding, matching satisfies
+    calib_stream = base_stream.model_copy(update={"camera_calibration": {"focal_length": 50.0}})
+    calib_interface = interface.model_copy(update={"streams": (calib_stream,)})
+    calib_mismatch = matching_cap.model_copy(
+        update={
+            "stream_profiles": (
+                base_stream.model_copy(update={"camera_calibration": {"focal_length": 35.0}}),
+            )
+        }
+    )
+    assert not calib_mismatch.satisfies(calib_interface)
+    calib_match = matching_cap.model_copy(update={"stream_profiles": (calib_stream,)})
+    assert calib_match.satisfies(calib_interface)
+
+    # 13. Duplicate stream_profiles IDs on CapabilitySpec rejected with TaskContractError
+    with pytest.raises(TaskContractError, match="duplicate stream_profile id"):
+        CapabilitySpec(
+            interface="kinematics-control",
+            interaction_modes=(InteractionMode.CLOSED_LOOP,),
+            observations=("kinematic-telemetry",),
+            stream_profiles=(base_stream, base_stream),
+        )

@@ -169,9 +169,16 @@ class CapabilitySpec(_Frozen):
     accepts_privileged: bool = False
 
     @model_validator(mode="after")
-    def _non_empty_modes(self) -> Self:
+    def _validate_capability(self) -> Self:
         if not self.interaction_modes:
             raise TaskContractError(f"capability {self.interface} declares no interaction mode")
+        seen_ids: set[str] = set()
+        for s in self.stream_profiles:
+            if s.id in seen_ids:
+                raise TaskContractError(
+                    f"capability {self.interface} declares duplicate stream_profile id {s.id!r}"
+                )
+            seen_ids.add(s.id)
         return self
 
     def satisfies(self, interface: InterfaceSpec) -> bool:
@@ -211,6 +218,7 @@ class CapabilitySpec(_Frozen):
                 or intf_stream.joint_order
                 or intf_stream.invalid_depth_encoding
                 or intf_stream.valid_range is not None
+                or intf_stream.camera_calibration
             )
             if has_semantics:
                 matching_profile = cap_profiles.get(intf_stream.id) or cap_profiles.get(
@@ -248,6 +256,11 @@ class CapabilitySpec(_Frozen):
                 if (
                     intf_stream.valid_range is not None
                     and matching_profile.valid_range != intf_stream.valid_range
+                ):
+                    return False
+                if (
+                    intf_stream.camera_calibration
+                    and matching_profile.camera_calibration != intf_stream.camera_calibration
                 ):
                     return False
             if intf_stream.privileged and not self.accepts_privileged:
