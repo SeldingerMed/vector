@@ -59,6 +59,9 @@ def _metric_display(metric: Mapping[str, Any]) -> str:
     value = _metric_value(metric)
     if value is not None:
         unit = f" {metric['unit']}" if metric.get("unit") else ""
+        ci = metric.get("ci_95")
+        if ci:
+            return f"{value:.4g}{unit} [{ci[0]:.4g}, {ci[1]:.4g}]"
         return f"{value:.4g}{unit}"
     if metric["kind"] == "categorical":
         return ", ".join(f"{category}: {count}" for category, count in metric["counts"].items())

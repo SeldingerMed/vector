@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from or_audit.audit.canonical import digest
 from or_audit.errors import TaskContractError
@@ -18,6 +18,7 @@ from or_audit.eval.agent import AgentPackage
 from or_audit.eval.contracts import MetricKind
 from or_audit.eval.enums import WorldKind
 from or_audit.eval.integrity import tree_digest
+from or_audit.eval.split import validate_subgroups
 from or_audit.eval.task import TaskSpec
 from or_audit.eval.trace import ProceduralTrace
 from or_audit.eval.vector import TrialVector
@@ -33,6 +34,33 @@ class TrialRecord(BaseModel):
     trajectory: ProceduralTrace = Field(default_factory=lambda: ProceduralTrace(()))
     projection: float | None = None
     projection_spec_digest: str = ""
+    case_id: str = ""
+    patient_id: str = ""
+    site_id: str = ""
+    episode_id: str = ""
+    subgroups: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("subgroups", mode="before")
+    @classmethod
+    def _check_subgroups(cls, value: object) -> dict[str, str]:
+        return validate_subgroups(value) if value is not None else {}
+
+
+class TrialBinding(BaseModel):
+    """Head-covered trial metadata binding case, patient, site, and cohort subgroups."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    case_id: str = ""
+    patient_id: str = ""
+    site_id: str = ""
+    episode_id: str = ""
+    subgroups: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("subgroups", mode="before")
+    @classmethod
+    def _check_subgroups(cls, value: object) -> dict[str, str]:
+        return validate_subgroups(value) if value is not None else {}
 
 
 class WorldEngineProvenance(BaseModel):
@@ -352,7 +380,7 @@ def write_trial(
 ) -> None:
     """Persist one completed trial atomically (crash-safe resume unit).
 
-    Writes trajectory, projection, and provenance first, then writes
+    Writes trajectory, projection, provenance, and binding first, then writes
     result.json last as the commit marker for the trial.
     """
     trial_dir = out / f"trial-{task_id}-{trial.seed}"
@@ -377,12 +405,32 @@ def write_trial(
             trial_dir / "provenance.json",
             json.dumps(world_engine, indent=2) + "\n",
         )
+    binding = TrialBinding(
+        case_id=trial.case_id,
+        patient_id=trial.patient_id,
+        site_id=trial.site_id,
+        episode_id=trial.episode_id,
+        subgroups=trial.subgroups,
+    )
+    if (
+        binding.case_id
+        or binding.patient_id
+        or binding.site_id
+        or binding.episode_id
+        or binding.subgroups
+    ):
+        _atomic_write_text(
+            trial_dir / "binding.json",
+            json.dumps(binding.model_dump(mode="json"), indent=2) + "\n",
+        )
     _atomic_write_text(
         trial_dir / "result.json", json.dumps(_vector_dict(trial.vector), indent=2) + "\n"
     )
 
 
-def read_partial_trials(out: Path, task_id: str) -> tuple[list[TrialRecord], dict[str, Any] | None]:
+def read_partial_trials(
+    out: Path, task_id: str, *, require_binding: bool = False
+) -> tuple[list[TrialRecord], dict[str, Any] | None]:
     """Read committed trials from an interrupted job directory.
 
     Reads trial directories created by :func:`write_trial` when the job-level
@@ -394,6 +442,8 @@ def read_partial_trials(out: Path, task_id: str) -> tuple[list[TrialRecord], dic
     observed_provenance: dict[str, Any] | None = None
     trials_with_prov = 0
     trials_without_prov = 0
+    trials_with_binding = 0
+    trials_without_binding = 0
     for trial_dir in sorted(out.glob(f"trial-{task_id}-*")):
         vector_path = trial_dir / "result.json"
         trajectory_path = trial_dir / "trajectory.json"
@@ -451,6 +501,23 @@ def read_partial_trials(out: Path, task_id: str) -> tuple[list[TrialRecord], dic
                 )
             projection = payload.get("projection")
             projection_spec_digest = str(payload.get("projection_spec_digest", ""))
+        binding_path = trial_dir / "binding.json"
+        binding = TrialBinding()
+        if binding_path.is_file():
+            trials_with_binding += 1
+            try:
+                b_raw = json.loads(binding_path.read_text(encoding="utf-8"))
+                binding = TrialBinding.model_validate(b_raw)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise TaskContractError(
+                    f"trial dir {trial_dir.name} is corrupt: invalid binding.json ({exc})"
+                ) from exc
+        else:
+            trials_without_binding += 1
+            if require_binding:
+                raise TaskContractError(
+                    f"trial dir {trial_dir.name} is missing binding.json required by job split"
+                )
         records.append(
             TrialRecord(
                 seed=seed,
@@ -458,12 +525,22 @@ def read_partial_trials(out: Path, task_id: str) -> tuple[list[TrialRecord], dic
                 trajectory=trajectory,
                 projection=projection,
                 projection_spec_digest=projection_spec_digest,
+                case_id=binding.case_id,
+                patient_id=binding.patient_id,
+                site_id=binding.site_id,
+                episode_id=binding.episode_id,
+                subgroups=binding.subgroups,
             )
         )
     if trials_with_prov > 0 and trials_without_prov > 0:
         raise TaskContractError(
             f"job dir {out.name} has mixed provenance: {trials_with_prov} trial(s) have "
             f"provenance.json while {trials_without_prov} trial(s) are missing it"
+        )
+    if trials_with_binding > 0 and trials_without_binding > 0:
+        raise TaskContractError(
+            f"job dir {out.name} has mixed binding metadata: {trials_with_binding} trial(s) have "
+            f"binding.json while {trials_without_binding} trial(s) are missing it"
         )
     return sorted(records, key=lambda record: record.seed), observed_provenance
 

@@ -148,9 +148,27 @@ def test_scorecard_coverage_and_subgroup_analysis() -> None:
         }
     )
 
-    trial0 = TrialRecord(seed=0, vector=vector_pass, trajectory=ProceduralTrace((step_sc1,)))
-    trial1 = TrialRecord(seed=1, vector=vector_abstained, trajectory=ProceduralTrace((step_sc1,)))
-    trial2 = TrialRecord(seed=2, vector=vector_fail, trajectory=ProceduralTrace((step_sc2,)))
+    trial0 = TrialRecord(
+        seed=0,
+        vector=vector_pass,
+        trajectory=ProceduralTrace((step_sc1,)),
+        patient_id="patient-1",
+        subgroups={"anatomy": "bifurcation"},
+    )
+    trial1 = TrialRecord(
+        seed=1,
+        vector=vector_abstained,
+        trajectory=ProceduralTrace((step_sc1,)),
+        patient_id="patient-1",
+        subgroups={"anatomy": "bifurcation"},
+    )
+    trial2 = TrialRecord(
+        seed=2,
+        vector=vector_fail,
+        trajectory=ProceduralTrace((step_sc2,)),
+        patient_id="patient-2",
+        subgroups={"anatomy": "straight"},
+    )
 
     result = JobResult(
         task_id="test-task",
@@ -176,15 +194,262 @@ def test_scorecard_coverage_and_subgroup_analysis() -> None:
     assert data["coverage"]["risk_at_coverage"] == 0.5
 
     assert len(data["subgroups"]) == 2
-    sg_a = next(sg for sg in data["subgroups"] if sg["subgroup"] == "scenario-a")
-    sg_b = next(sg for sg in data["subgroups"] if sg["subgroup"] == "scenario-b")
-    assert sg_a["count"] == 2
-    assert sg_a["is_underpowered"] is True
-    assert sg_b["count"] == 1
-    assert sg_b["rate"] == 0.0
-    assert data["worst_case"]["subgroup"] == "scenario-b"
+    sg_bif = next(sg for sg in data["subgroups"] if sg["subgroup"] == "bifurcation")
+    sg_str = next(sg for sg in data["subgroups"] if sg["subgroup"] == "straight")
+    assert sg_bif["count"] == 2
+    assert sg_bif["is_underpowered"] is True
+    assert sg_str["count"] == 1
+    assert sg_str["rate"] == 0.0
+    assert data["worst_case"]["subgroup"] == "straight"
+    assert data["worst_case"]["axis"] == "anatomy"
+    # Patient identifiers must never be exposed as subgroups
+    subgroup_names = [sg["subgroup"] for sg in data["subgroups"]]
+    assert "patient-1" not in subgroup_names
+    assert "patient-2" not in subgroup_names
 
     markdown = render_markdown(result)
     assert "## Risk vs coverage" in markdown
     assert "## Subgroups and worst-case analysis" in markdown
-    assert "**Worst-case subgroup:** `scenario-b`" in markdown
+    assert "**Worst-case subgroup:** `anatomy=straight`" in markdown
+
+
+def test_generated_benchmark_report_fixture(tmp_path: Path) -> None:
+    import json
+    import shutil
+
+    from or_audit.eval.scorecard import write_scorecards
+
+    task_src = ROOT / "docs/examples/tasks/video-nextstep"
+    agent_src = ROOT / "docs/examples/agents/example-video-predictor"
+
+    task_dir = tmp_path / "benchmark-report-task"
+    shutil.copytree(task_src, task_dir)
+
+    # Manifest defining explicit cohorts and patient clusters
+    splits_data = {
+        "format_version": "1",
+        "dataset_id": "benchmark-video-dataset",
+        "dataset_revision": "1.0",
+        "disjoint_by": ["case", "patient"],
+        "entries": [
+            {
+                "case_id": "case-01",
+                "episode_id": "ep-01",
+                "patient_id": "patient-A",
+                "site_id": "site-1",
+                "split": "test",
+                "item_ids": ["clip-001"],
+                "subgroups": {"anatomy": "tortuous", "scanner": "siemens"},
+            },
+            {
+                "case_id": "case-02",
+                "episode_id": "ep-02",
+                "patient_id": "patient-A",
+                "site_id": "site-1",
+                "split": "test",
+                "item_ids": ["clip-002"],
+                "subgroups": {"anatomy": "tortuous", "scanner": "siemens"},
+            },
+            {
+                "case_id": "case-03",
+                "episode_id": "ep-03",
+                "patient_id": "patient-B",
+                "site_id": "site-2",
+                "split": "test",
+                "item_ids": ["clip-003"],
+                "subgroups": {"anatomy": "straight", "scanner": "ge"},
+            },
+        ],
+    }
+    (task_dir / "splits.json").write_text(json.dumps(splits_data), encoding="utf-8")
+
+    out = tmp_path / "benchmark-out"
+    result = run_job(
+        task=load_task(task_dir),
+        task_dir=task_dir,
+        agent=load_agent(agent_src),
+        agent_dir=agent_src,
+        out=out,
+        n=3,
+        split="test",
+    )
+
+    write_scorecards(out, result)
+
+    scorecard_json_path = out / "scorecard.json"
+    scorecard_md_path = out / "scorecard.md"
+    scorecard_html_path = out / "scorecard.html"
+    assert scorecard_json_path.is_file()
+    assert scorecard_md_path.is_file()
+    assert scorecard_html_path.is_file()
+
+    report = json.loads(scorecard_json_path.read_text(encoding="utf-8"))
+    assert report["n"] == 3
+    assert report["independent_cases"] == 3
+    assert report["split_manifest_digest"] == result.split_manifest_digest
+
+    # Verify uncertainty intervals and methods on metrics
+    headline_metric = next(m for m in report["metrics"] if m["headline"])
+    assert "ci_95" in headline_metric
+    assert headline_metric["ci_method"] == "wilson"
+    assert headline_metric["confidence"] == 0.95
+
+    # Verify subgroup analysis: must be grouped along declared cohort axes, NOT patient IDs!
+    assert len(report["subgroups"]) >= 2
+    axes = {sg["axis"] for sg in report["subgroups"]}
+    assert "anatomy" in axes or "scanner" in axes
+    assert "patient" not in axes
+
+    md = scorecard_md_path.read_text(encoding="utf-8")
+    assert "| 95% CI |" in md
+    assert "## Subgroups and worst-case analysis" in md
+    assert "Worst-case subgroup:" in md
+
+
+def test_leaderboard_renders_uncertainty_intervals(tmp_path: Path) -> None:
+    from or_audit.eval.leaderboard import leaderboard_data, render_html
+
+    task_src = ROOT / "docs/examples/tasks/video-nextstep"
+    agent_src = ROOT / "docs/examples/agents/example-video-predictor"
+
+    out = tmp_path / "lb-job"
+    run_job(
+        task=load_task(task_src),
+        task_dir=task_src,
+        agent=load_agent(agent_src),
+        agent_dir=agent_src,
+        out=out,
+        n=3,
+        split="test",
+    )
+
+    data = leaderboard_data([out])
+    row = data["rows"][0]
+    headline_metric = row["metrics"][row["headline"]]
+    assert "ci_95" in headline_metric
+    assert headline_metric["ci_95"] is not None
+
+    html_text = render_html(data)
+    assert "[" in html_text
+    assert "]" in html_text
+
+
+def test_subgroups_validation_constraints() -> None:
+    from or_audit.eval.split import validate_subgroups
+
+    # Valid mapping passes
+    valid = validate_subgroups({"anatomy": "bifurcation", "scanner_model": "siemens-1"})
+    assert valid == {"anatomy": "bifurcation", "scanner_model": "siemens-1"}
+
+    # Reserved keys rejected
+    with pytest.raises(TaskContractError, match="reserved identifier"):
+        validate_subgroups({"patient": "p1"})
+    with pytest.raises(TaskContractError, match="reserved identifier"):
+        validate_subgroups({"site_id": "s1"})
+    with pytest.raises(TaskContractError, match="reserved identifier"):
+        validate_subgroups({"case": "c1"})
+
+    # Non-slug key rejected
+    with pytest.raises(TaskContractError, match="must match slug pattern"):
+        validate_subgroups({"Invalid Key!": "val"})
+
+    # Non-string value rejected
+    with pytest.raises(TaskContractError, match="keys and values must be strings"):
+        validate_subgroups({"anatomy": 123})
+
+    # Empty key or value rejected
+    with pytest.raises(TaskContractError, match="cannot be empty"):
+        validate_subgroups({"": "val"})
+    with pytest.raises(TaskContractError, match="cannot be empty"):
+        validate_subgroups({"anatomy": ""})
+
+    # Exceeding maximum 16 axes rejected
+    too_many = {f"axis-{i}": f"val-{i}" for i in range(17)}
+    with pytest.raises(TaskContractError, match="exceeds maximum of 16 axes"):
+        validate_subgroups(too_many)
+
+
+def test_trial_binding_model_strictness() -> None:
+    from pydantic import ValidationError
+
+    from or_audit.eval.job import TrialBinding
+
+    # Extra fields forbidden
+    with pytest.raises(ValidationError):
+        TrialBinding.model_validate({"case_id": "c1", "unknown_field": "val"})
+
+
+def test_crash_resume_restores_bindings_intact(tmp_path: Path) -> None:
+    from or_audit.eval.job import read_partial_trials
+
+    task_src = ROOT / "docs/examples/tasks/video-nextstep"
+    agent_src = ROOT / "docs/examples/agents/example-video-predictor"
+
+    out = tmp_path / "job-resume-bindings"
+    original = run_job(
+        task=load_task(task_src),
+        task_dir=task_src,
+        agent=load_agent(agent_src),
+        agent_dir=agent_src,
+        out=out,
+        n=2,
+        split="test",
+    )
+    assert original.trials[0].case_id
+    assert original.trials[0].patient_id
+
+    # Simulate crash by removing result.json
+    (out / "result.json").unlink()
+
+    # Verify read_partial_trials recovers bindings
+    records, _ = read_partial_trials(out, "video-nextstep", require_binding=True)
+    assert len(records) == 2
+    assert records[0].case_id == original.trials[0].case_id
+    assert records[0].patient_id == original.trials[0].patient_id
+    assert records[0].site_id == original.trials[0].site_id
+
+    # Resume the job
+    resumed = run_job(
+        task=load_task(task_src),
+        task_dir=task_src,
+        agent=load_agent(agent_src),
+        agent_dir=agent_src,
+        out=out,
+        n=2,
+        split="test",
+        resume=True,
+    )
+    assert resumed.head == original.head
+    assert resumed.trials[0].case_id == original.trials[0].case_id
+    assert resumed.trials[0].patient_id == original.trials[0].patient_id
+
+
+def test_corrupt_or_missing_binding_json_refuses(tmp_path: Path) -> None:
+    from or_audit.eval.job import read_partial_trials
+
+    task_src = ROOT / "docs/examples/tasks/video-nextstep"
+    agent_src = ROOT / "docs/examples/agents/example-video-predictor"
+
+    out = tmp_path / "job-corrupt-binding"
+    run_job(
+        task=load_task(task_src),
+        task_dir=task_src,
+        agent=load_agent(agent_src),
+        agent_dir=agent_src,
+        out=out,
+        n=2,
+        split="test",
+    )
+    (out / "result.json").unlink()
+
+    # Corrupt binding.json
+    b_path = out / "trial-video-nextstep-0" / "binding.json"
+    assert b_path.is_file()
+    b_path.write_text("invalid-json{", encoding="utf-8")
+    with pytest.raises(TaskContractError, match=r"invalid binding\.json"):
+        read_partial_trials(out, "video-nextstep", require_binding=True)
+
+    # Remove binding.json when required
+    b_path.unlink()
+    with pytest.raises(TaskContractError, match=r"missing binding\.json"):
+        read_partial_trials(out, "video-nextstep", require_binding=True)
