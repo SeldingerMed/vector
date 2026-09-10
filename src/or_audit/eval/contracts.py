@@ -194,7 +194,13 @@ class CapabilitySpec(_Frozen):
             and schemas_match
         ):
             return False
-        cap_profiles = {s.id: s for s in self.stream_profiles} if self.stream_profiles else {}
+        cap_profiles: dict[Slug, StreamSpec] = {}
+        if self.stream_profiles:
+            for s in self.stream_profiles:
+                if s.schema_id:
+                    cap_profiles[s.schema_id] = s
+                if s.id:
+                    cap_profiles[s.id] = s
         for intf_stream in interface.streams:
             has_semantics = bool(
                 intf_stream.unit

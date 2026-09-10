@@ -689,3 +689,15 @@ def test_semantic_stream_profile_mismatches_refuse_binding() -> None:
         stream_profiles=(base_stream,),
     )
     assert wildcard_matching_profile.satisfies(interface)
+
+    # 11. Profile keyed by schema_id (not stream id) matches when stream id differs
+    schema_keyed_profile = base_stream.model_copy(update={"id": "different-stream-id"})
+    schema_cap = CapabilitySpec(
+        interface="kinematics-control",
+        interaction_modes=(InteractionMode.CLOSED_LOOP,),
+        observations=("kinematic-telemetry",),
+        actions=("joint-cmd",),
+        modalities=("robotic-kinematics",),
+        stream_profiles=(schema_keyed_profile,),
+    )
+    assert schema_cap.satisfies(interface)
