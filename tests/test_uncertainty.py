@@ -792,3 +792,217 @@ def test_subgroup_no_assessment_row_reports_na_and_excluded_from_worst_case() ->
     md = render_markdown(result)
     assert "| unassessed-group | 2 | 0 | 2 | n/a | n/a |" in md
     assert "**Worst-case subgroup:** `anatomy=assessed-group`" in md
+
+
+def test_continuous_subgroup_pass_counts_assessed_only() -> None:
+    m_val1 = MetricOutcome(
+        id="metric",
+        kind=MetricKind.CONTINUOUS,
+        headline=True,
+        value=1.0,
+        direction=MetricDirection.MAXIMIZE,
+    )
+    m_val2 = MetricOutcome(
+        id="metric",
+        kind=MetricKind.CONTINUOUS,
+        headline=True,
+        value=2.0,
+        direction=MetricDirection.MAXIMIZE,
+    )
+    m_unassessable = MetricOutcome(
+        id="metric",
+        kind=MetricKind.CONTINUOUS,
+        headline=True,
+        value=None,
+        direction=MetricDirection.MAXIMIZE,
+    )
+
+    t0 = TrialRecord(
+        seed=0,
+        vector=TrialVector(
+            task_id="t",
+            task_version="1",
+            agent_identity="a",
+            seed=0,
+            gates=(GateOutcome(id="g", status=GateStatus.FAIL),),
+            metrics=(m_val1,),
+        ),
+        subgroups={"cohort": "group-A"},
+    )
+    t1 = TrialRecord(
+        seed=1,
+        vector=TrialVector(
+            task_id="t",
+            task_version="1",
+            agent_identity="a",
+            seed=1,
+            gates=(GateOutcome(id="g", status=GateStatus.PASS),),
+            metrics=(m_val2,),
+        ),
+        subgroups={"cohort": "group-A"},
+    )
+    t2 = TrialRecord(
+        seed=2,
+        vector=TrialVector(
+            task_id="t",
+            task_version="1",
+            agent_identity="a",
+            seed=2,
+            gates=(GateOutcome(id="g", status=GateStatus.PASS),),
+            metrics=(m_unassessable,),
+        ),
+        subgroups={"cohort": "group-A"},
+    )
+    t3 = TrialRecord(
+        seed=3,
+        vector=TrialVector(
+            task_id="t",
+            task_version="1",
+            agent_identity="a",
+            seed=3,
+            gates=(GateOutcome(id="g", status=GateStatus.PASS),),
+            metrics=(m_val1,),
+        ),
+        subgroups={"cohort": "group-B"},
+    )
+
+    result = JobResult(
+        task_id="t",
+        task_version="1",
+        agent_identity="a",
+        world_pin="pin",
+        interface_id="intf",
+        interaction_mode="single-turn",
+        task_digest="td",
+        agent_digest="ad",
+        n=4,
+        headline="metric",
+        trials=(t0, t1, t2, t3),
+        headline_true=0,
+        headline_false=0,
+        headline_unassessable=1,
+        any_gate_failed=1,
+    )
+
+    data = scorecard_data(result)
+    sg_a = next(sg for sg in data["subgroups"] if sg["subgroup"] == "group-A")
+    assert sg_a["count"] == 3
+    assert sg_a["assessed"] == 2
+    assert sg_a["unassessable"] == 1
+    # s_pass must be 1 (only trial 1 passed among assessed trials), NOT 2!
+    assert sg_a["pass"] == 1
+    assert sg_a["rate"] == 1.5
+
+    md = render_markdown(result)
+    assert "| Estimate |" in md
+    assert "with estimate" in md
+
+
+def test_scorecard_continuous_metric_cluster_activation_and_seed() -> None:
+    m0 = MetricOutcome(id="cont", kind=MetricKind.CONTINUOUS, headline=True, value=10.0)
+    m1 = MetricOutcome(id="cont", kind=MetricKind.CONTINUOUS, headline=True, value=20.0)
+
+    # 1. Without declared patient/case bindings -> must be "bootstrap", NOT "clustered_bootstrap"!
+    t_unclustered_0 = TrialRecord(
+        seed=0,
+        vector=TrialVector(
+            task_id="t", task_version="1", agent_identity="a", seed=0, gates=(), metrics=(m0,)
+        ),
+    )
+    t_unclustered_1 = TrialRecord(
+        seed=1,
+        vector=TrialVector(
+            task_id="t", task_version="1", agent_identity="a", seed=1, gates=(), metrics=(m1,)
+        ),
+    )
+    res_unclustered = JobResult(
+        task_id="t",
+        task_version="1",
+        agent_identity="a",
+        world_pin="pin",
+        interface_id="intf",
+        interaction_mode="single-turn",
+        task_digest="td",
+        agent_digest="ad",
+        n=2,
+        headline="cont",
+        trials=(t_unclustered_0, t_unclustered_1),
+        headline_true=0,
+        headline_false=0,
+        headline_unassessable=0,
+        any_gate_failed=0,
+    )
+    data_unclustered = scorecard_data(res_unclustered)
+    m_data = next(m for m in data_unclustered["metrics"] if m["headline"])
+    assert m_data["ci_method"] == "bootstrap"
+    assert m_data["resampling_seed"] == 0
+    assert m_data["draws"] == 1000
+    assert m_data["confidence"] == 0.95
+
+    # 2. With declared patient clusters -> activates "clustered_bootstrap"
+    t_clustered_0 = TrialRecord(
+        seed=0,
+        vector=TrialVector(
+            task_id="t", task_version="1", agent_identity="a", seed=0, gates=(), metrics=(m0,)
+        ),
+        patient_id="patient-1",
+    )
+    t_clustered_1 = TrialRecord(
+        seed=1,
+        vector=TrialVector(
+            task_id="t", task_version="1", agent_identity="a", seed=1, gates=(), metrics=(m1,)
+        ),
+        patient_id="patient-2",
+    )
+    res_clustered = JobResult(
+        task_id="t",
+        task_version="1",
+        agent_identity="a",
+        world_pin="pin",
+        interface_id="intf",
+        interaction_mode="single-turn",
+        task_digest="td",
+        agent_digest="ad",
+        n=2,
+        headline="cont",
+        trials=(t_clustered_0, t_clustered_1),
+        headline_true=0,
+        headline_false=0,
+        headline_unassessable=0,
+        any_gate_failed=0,
+        independent_case_unit="patient",
+    )
+    data_clustered = scorecard_data(res_clustered)
+    m_data_cl = next(m for m in data_clustered["metrics"] if m["headline"])
+    assert m_data_cl["ci_method"] == "clustered_bootstrap"
+    assert m_data_cl["resampling_seed"] == 0
+    assert m_data_cl["draws"] == 1000
+    assert m_data_cl["confidence"] == 0.95
+
+    # 3. If independent_case_unit="patient" but a trial lacks patient_id -> raises TaskContractError
+    t_no_patient = TrialRecord(
+        seed=1,
+        vector=TrialVector(
+            task_id="t", task_version="1", agent_identity="a", seed=1, gates=(), metrics=(m1,)
+        ),
+    )
+    res_missing = JobResult(
+        task_id="t",
+        task_version="1",
+        agent_identity="a",
+        world_pin="pin",
+        interface_id="intf",
+        interaction_mode="single-turn",
+        task_digest="td",
+        agent_digest="ad",
+        n=2,
+        headline="cont",
+        trials=(t_clustered_0, t_no_patient),
+        headline_true=0,
+        headline_false=0,
+        headline_unassessable=0,
+        any_gate_failed=0,
+        independent_case_unit="patient",
+    )
+    with pytest.raises(TaskContractError, match="missing on trial"):
+        scorecard_data(res_missing)

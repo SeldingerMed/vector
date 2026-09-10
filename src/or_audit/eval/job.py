@@ -125,6 +125,7 @@ class JobResult(BaseModel):
     independent_cases: Annotated[int, Field(ge=1)] | None = None
     split_manifest_digest: str = ""
     split: str = ""
+    independent_case_unit: str = ""
     gate_outcome: Literal["passed", "failed", "not-assessable", "unknown"] = "unknown"
     claim_footer: str = ""
     head: str = ""
@@ -199,6 +200,7 @@ def assemble_job_result(
     independent_cases: int | None = None,
     split_manifest_digest: str = "",
     split: str = "",
+    independent_case_unit: str = "",
 ) -> JobResult:
     """Build a publishable job result and stamp its head."""
     assert_publishable(task, trials, claim_footer)
@@ -249,6 +251,7 @@ def assemble_job_result(
         independent_cases=independent_cases,
         split_manifest_digest=split_manifest_digest,
         split=split,
+        independent_case_unit=independent_case_unit,
         gate_outcome=(
             "failed"
             if gate_failed

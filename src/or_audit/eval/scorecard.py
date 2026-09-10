@@ -9,6 +9,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
+from or_audit.errors import TaskContractError
 from or_audit.eval.contracts import MetricKind
 from or_audit.eval.job import JobResult, TrialRecord
 from or_audit.eval.sim.base import BACKEND_SYNTHETIC_STUB, BACKEND_UNKNOWN
@@ -95,26 +96,54 @@ def scorecard_data(
             )
         elif row["kind"] == "continuous":
             numeric = [float(value) for value in assessed]
-            clusters: dict[str, list[float]] = defaultdict(list)
-            for trial in result.trials:
-                m = trial.vector.metric(metric_id)
-                if m is not None and m.value is not None:
-                    cluster_key = trial.patient_id or trial.case_id or f"seed-{trial.seed}"
-                    clusters[cluster_key].append(float(m.value))
-            ci_method = "bootstrap"
-            if len(clusters) >= 2:
-                ci_95 = list(clustered_bootstrap_mean_ci(clusters))
-                ci_method = "clustered_bootstrap"
+            declared_unit = result.independent_case_unit.strip().lower()
+            if declared_unit in ("patient", "patient_id"):
+                target_attr = "patient_id"
+            elif declared_unit in ("site", "site_id"):
+                target_attr = "site_id"
+            elif declared_unit in ("case", "case_id", "clip", "held-out clip"):
+                target_attr = "case_id"
             else:
-                ci_95 = list(bootstrap_mean_ci(numeric)) if numeric else None
+                target_attr = ""
+
+            clusters: dict[str, list[float]] = defaultdict(list)
+            ci_method = "bootstrap"
+            mean_val: float | None = None
+
+            if target_attr:
+                for trial in result.trials:
+                    m = trial.vector.metric(metric_id)
+                    if m is not None and m.value is not None:
+                        unit_val = getattr(trial, target_attr, "")
+                        if not unit_val:
+                            raise TaskContractError(
+                                f"declared independent_case_unit {declared_unit!r} missing on "
+                                f"trial seed {trial.seed}"
+                            )
+                        clusters[unit_val].append(float(m.value))
+
+                if len(clusters) >= 2:
+                    ci_95 = list(clustered_bootstrap_mean_ci(clusters, seed=0))
+                    ci_method = "clustered_bootstrap"
+                    cluster_level_means = [fmean(v) for v in clusters.values() if v]
+                    mean_val = fmean(cluster_level_means) if cluster_level_means else None
+                else:
+                    ci_95 = list(bootstrap_mean_ci(numeric, seed=0)) if numeric else None
+                    ci_method = "bootstrap"
+                    mean_val = fmean(numeric) if numeric else None
+            else:
+                ci_95 = list(bootstrap_mean_ci(numeric, seed=0)) if numeric else None
+                ci_method = "bootstrap"
+                mean_val = fmean(numeric) if numeric else None
             row.update(
                 {
-                    "mean": fmean(numeric) if numeric else None,
+                    "mean": mean_val,
                     "min": min(numeric) if numeric else None,
                     "max": max(numeric) if numeric else None,
                     "ci_95": ci_95,
                     "ci_method": ci_method,
                     "confidence": 0.95,
+                    "resampling_seed": 0,
                     "draws": 1000,
                 }
             )
@@ -190,17 +219,22 @@ def scorecard_data(
                     else:
                         s_pass = 0
                 elif headline_kind is MetricKind.CONTINUOUS:
-                    s_vals = [
-                        float(t.vector.headline.value)
+                    assessed_trials = [
+                        t
                         for t in s_trials
                         if t.vector.headline.value is not None and not _is_abstained(t)
                     ]
-                    s_assessed = len(s_vals)
+                    s_assessed = len(assessed_trials)
                     s_unassessable = s_count - s_assessed
                     if s_assessed > 0:
+                        s_vals = [
+                            float(t.vector.headline.value)
+                            for t in assessed_trials
+                            if isinstance(t.vector.headline.value, int | float)
+                        ]
                         s_rate = round(fmean(s_vals), 4)
                         ci = list(bootstrap_mean_ci(s_vals))
-                        s_pass = sum(1 for t in s_trials if not t.vector.any_gate_failed)
+                        s_pass = sum(1 for t in assessed_trials if not t.vector.any_gate_failed)
                     else:
                         s_pass = 0
                 else:
@@ -394,7 +428,7 @@ def render_markdown(
                 "## Subgroups and worst-case analysis",
                 "",
                 "| Cohort axis | Subgroup | Count | Assessed | Unassessable | "
-                "Pass rate | 95% CI | Power |",
+                "Estimate | 95% CI | Power |",
                 "|---|---|---:|---:|---:|---:|:---:|:---:|",
             ]
         )
@@ -411,13 +445,13 @@ def render_markdown(
             wc = data["worst_case"]
             lines.append(
                 f"\n> **Worst-case subgroup:** `{wc['axis']}={wc['subgroup']}` "
-                f"with pass rate `{wc['rate']:.4f}`."
+                f"with estimate `{wc['rate']:.4f}`."
             )
         elif data.get("worst_cases"):
             for axis, wc in sorted(data["worst_cases"].items()):
                 lines.append(
                     f"\n> **Worst-case subgroup ({axis}):** `{wc['subgroup']}` "
-                    f"with pass rate `{wc['rate']:.4f}`."
+                    f"with estimate `{wc['rate']:.4f}`."
                 )
     if data["claim_footer"]:
         lines.extend(["", "## Claim boundary", "", data["claim_footer"]])

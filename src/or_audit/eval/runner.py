@@ -328,6 +328,7 @@ def run_job(
     gym_factory: GymFactory | None = None,
     resume: bool = False,
     split: str | None = None,
+    independent_case_unit: str | None = None,
 ) -> JobResult:
     assert_bind(task, agent)
     task.assert_runnable()
@@ -365,6 +366,17 @@ def run_job(
             else ""
         )
     )
+    normalized_unit = ""
+    if independent_case_unit:
+        u = independent_case_unit.strip().lower()
+        if u in ("patient", "patient_id"):
+            normalized_unit = "patient"
+        elif u in ("site", "site_id"):
+            normalized_unit = "site"
+        elif u in ("case", "case_id", "clip", "held-out clip"):
+            normalized_unit = "case"
+        else:
+            normalized_unit = u
     split_manifest_digest = ""
     if task.environment.splits_path:
         manifest_path = task_dir / task.environment.splits_path
@@ -397,6 +409,7 @@ def run_job(
             "interface": task.interface.id,
             "split": target_split,
             "split_manifest_digest": split_manifest_digest,
+            "independent_case_unit": normalized_unit,
         },
         task_dir=task_dir,
         agent_dir=agent_dir,
@@ -432,6 +445,7 @@ def run_job(
             resume_trials=resume_trials,
             resume_provenance=previous_result,
             split=target_split,
+            independent_case_unit=normalized_unit,
         )
         extra["safety_max_pen"] = safety
         extra["world_engine"] = provenance
@@ -448,6 +462,7 @@ def run_job(
             resume_trials=resume_trials,
             resume_provenance=previous_result,
             split=target_split,
+            independent_case_unit=normalized_unit,
         )
     elif task.harness.interaction_mode is InteractionMode.INTERACTIVE:
         result = _run_interactive(
@@ -462,6 +477,7 @@ def run_job(
             resume_trials=resume_trials,
             resume_provenance=previous_result,
             split=target_split,
+            independent_case_unit=normalized_unit,
         )
     elif task.harness.interaction_mode is InteractionMode.COUNTERFACTUAL:
         result = _run_counterfactual(
@@ -476,6 +492,7 @@ def run_job(
             resume_trials=resume_trials,
             resume_provenance=previous_result,
             split=target_split,
+            independent_case_unit=normalized_unit,
         )
     if previous_result is not None and resume_trials:
         current_prov = result.world_engine.model_dump(mode="json") if result.world_engine else None
@@ -498,6 +515,7 @@ def run_job(
         "interface": task.interface.id,
         "split": result.split,
         "split_manifest_digest": result.split_manifest_digest,
+        "independent_case_unit": result.independent_case_unit,
         **extra,
     }
     write_job(out, config=config, result=result, task_dir=task_dir, agent_dir=agent_dir)
@@ -530,6 +548,7 @@ def _run_closed_loop(
     resume_trials: dict[int, TrialRecord] | None = None,
     resume_provenance: dict[str, Any] | None = None,
     split: str | None = None,
+    independent_case_unit: str = "",
 ) -> tuple[JobResult, float, dict[str, Any]]:
     if agent.kind not in {AgentKind.RANDOM.value, AgentKind.POLICY.value}:
         raise TaskContractError(f"closed-loop runner does not implement kind={agent.kind}")
@@ -709,6 +728,7 @@ def _run_predictions(
     resume_trials: dict[int, TrialRecord] | None = None,
     resume_provenance: dict[str, Any] | None = None,
     split: str | None = None,
+    independent_case_unit: str = "",
 ) -> JobResult:
     if agent_dir is None:
         raise TaskContractError(f"agent {agent.id} has no package directory")
@@ -890,6 +910,7 @@ def _run_predictions(
         independent_cases=independent_cases,
         split_manifest_digest=split_manifest_digest,
         split=target_split,
+        independent_case_unit=independent_case_unit,
     )
 
 
@@ -910,6 +931,7 @@ def _run_interactive(
     resume_trials: dict[int, TrialRecord] | None = None,
     resume_provenance: dict[str, Any] | None = None,
     split: str | None = None,
+    independent_case_unit: str = "",
 ) -> JobResult:
     if agent_dir is None:
         raise TaskContractError(f"agent {agent.id} has no package directory")
@@ -1109,6 +1131,7 @@ def _run_interactive(
         independent_cases=independent_cases,
         split_manifest_digest=split_manifest_digest,
         split=target_split,
+        independent_case_unit=independent_case_unit,
     )
 
 
@@ -1156,6 +1179,9 @@ def replay_job(
         n=int(config["n"]),
         gym_factory=gym_factory,
         split=config.get("split") or previous.split or None,
+        independent_case_unit=(
+            config.get("independent_case_unit") or previous.independent_case_unit or None
+        ),
     )
     if rerun.head != previous.head:
         raise TaskContractError(f"replay head mismatch: stored {previous.head} reran {rerun.head}")
