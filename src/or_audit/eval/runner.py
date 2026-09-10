@@ -52,7 +52,7 @@ from or_audit.eval.sim import (
     world_kind_key,
     world_kind_spec,
 )
-from or_audit.eval.split import load_split_manifest
+from or_audit.eval.split import DisjointUnit, load_split_manifest
 from or_audit.eval.task import TaskSpec
 from or_audit.eval.trace import ProceduralTrace
 from or_audit.eval.vector import project
@@ -220,6 +220,7 @@ def _resume_trials(
     n: int,
     enabled: bool,
     split: str = "",
+    split_manifest_digest: str = "",
 ) -> tuple[dict[int, TrialRecord], dict[str, Any] | None]:
     """Completed trials to keep when resuming an interrupted job.
 
@@ -248,13 +249,33 @@ def _resume_trials(
                 f"cannot resume {out}: previous result split is {previous.split!r}, "
                 f"requested {split!r}; cross-split resume is refused"
             )
+        if previous.split_manifest_digest != split_manifest_digest:
+            raise TaskContractError(
+                f"cannot resume {out}: previous result split manifest digest is "
+                f"{previous.split_manifest_digest!r}, requested {split_manifest_digest!r}; "
+                "manifest changed since original run"
+            )
         prev_prov = previous.world_engine.model_dump(mode="json") if previous.world_engine else None
         return {trial.seed: trial for trial in previous.trials}, prev_prov
-    return _resume_partial(out, task_id, task_digest, agent_digest, n, split=split)
+    return _resume_partial(
+        out,
+        task_id,
+        task_digest,
+        agent_digest,
+        n,
+        split=split,
+        split_manifest_digest=split_manifest_digest,
+    )
 
 
 def _resume_partial(
-    out: Path, task_id: str, task_digest: str, agent_digest: str, n: int, split: str = ""
+    out: Path,
+    task_id: str,
+    task_digest: str,
+    agent_digest: str,
+    n: int,
+    split: str = "",
+    split_manifest_digest: str = "",
 ) -> tuple[dict[int, TrialRecord], dict[str, Any] | None]:
     """Resume a killed run: bundle/config plus completed trial dirs, no result.
 
@@ -278,7 +299,15 @@ def _resume_partial(
             f"cannot resume {out}: configured n exceeds requested n={n}; "
             "shrinking a schedule would drop evidence"
         )
-    records, observed_provenance = read_partial_trials(out, task_id)
+    stored_digest = str(config.get("split_manifest_digest", ""))
+    if stored_digest != split_manifest_digest:
+        raise TaskContractError(
+            f"cannot resume {out}: config split manifest digest is {stored_digest!r}, "
+            f"requested {split_manifest_digest!r}; manifest changed since original run"
+        )
+    records, observed_provenance = read_partial_trials(
+        out, task_id, require_binding=bool(stored_digest)
+    )
     foreign = sorted(record.seed for record in records if not 0 <= record.seed < n)
     if foreign:
         raise TaskContractError(
@@ -299,6 +328,7 @@ def run_job(
     gym_factory: GymFactory | None = None,
     resume: bool = False,
     split: str | None = None,
+    independent_case_unit: str | None = None,
 ) -> JobResult:
     assert_bind(task, agent)
     task.assert_runnable()
@@ -313,6 +343,14 @@ def run_job(
     episodes = n if n is not None else task.environment.n_eval_episodes
     if episodes < 1:
         raise TaskContractError(f"n must be >= 1, got {episodes}")
+    if (
+        task.harness.interaction_mode is InteractionMode.CLOSED_LOOP
+        and task.environment.splits_path
+    ):
+        raise TaskContractError(
+            f"task {task.id} is closed-loop but declares splits_path; closed-loop tasks do not "
+            "currently support split manifests without an explicit seed-to-entry mapping"
+        )
     if split and not task.environment.splits_path:
         raise TaskContractError(
             f"task {task.id} has no declared splits_path; cannot execute explicit split {split!r}"
@@ -328,6 +366,22 @@ def run_job(
             else ""
         )
     )
+    normalized_unit = ""
+    if independent_case_unit:
+        u = independent_case_unit.strip().lower()
+        if u in ("patient", "patient_id"):
+            normalized_unit = "patient"
+        elif u in ("site", "site_id"):
+            normalized_unit = "site"
+        elif u in ("case", "case_id", "clip", "held-out clip"):
+            normalized_unit = "case"
+        else:
+            normalized_unit = u
+    split_manifest_digest = ""
+    if task.environment.splits_path:
+        manifest_path = task_dir / task.environment.splits_path
+        manifest = load_split_manifest(manifest_path)
+        split_manifest_digest = digest(manifest.model_dump(mode="json"))
     assert_trial_capacity(task, task_dir, episodes, split=target_split)
     resume_trials, previous_result = _resume_trials(
         out,
@@ -337,6 +391,7 @@ def run_job(
         n=episodes,
         enabled=resume,
         split=target_split,
+        split_manifest_digest=split_manifest_digest,
     )
     write_job_skeleton(
         out,
@@ -353,6 +408,8 @@ def run_job(
             "world_pin": task.environment.world_pin,
             "interface": task.interface.id,
             "split": target_split,
+            "split_manifest_digest": split_manifest_digest,
+            "independent_case_unit": normalized_unit,
         },
         task_dir=task_dir,
         agent_dir=agent_dir,
@@ -388,6 +445,7 @@ def run_job(
             resume_trials=resume_trials,
             resume_provenance=previous_result,
             split=target_split,
+            independent_case_unit=normalized_unit,
         )
         extra["safety_max_pen"] = safety
         extra["world_engine"] = provenance
@@ -404,6 +462,7 @@ def run_job(
             resume_trials=resume_trials,
             resume_provenance=previous_result,
             split=target_split,
+            independent_case_unit=normalized_unit,
         )
     elif task.harness.interaction_mode is InteractionMode.INTERACTIVE:
         result = _run_interactive(
@@ -418,6 +477,7 @@ def run_job(
             resume_trials=resume_trials,
             resume_provenance=previous_result,
             split=target_split,
+            independent_case_unit=normalized_unit,
         )
     elif task.harness.interaction_mode is InteractionMode.COUNTERFACTUAL:
         result = _run_counterfactual(
@@ -432,6 +492,7 @@ def run_job(
             resume_trials=resume_trials,
             resume_provenance=previous_result,
             split=target_split,
+            independent_case_unit=normalized_unit,
         )
     if previous_result is not None and resume_trials:
         current_prov = result.world_engine.model_dump(mode="json") if result.world_engine else None
@@ -453,6 +514,8 @@ def run_job(
         "world_pin": task.environment.world_pin,
         "interface": task.interface.id,
         "split": result.split,
+        "split_manifest_digest": result.split_manifest_digest,
+        "independent_case_unit": result.independent_case_unit,
         **extra,
     }
     write_job(out, config=config, result=result, task_dir=task_dir, agent_dir=agent_dir)
@@ -485,6 +548,7 @@ def _run_closed_loop(
     resume_trials: dict[int, TrialRecord] | None = None,
     resume_provenance: dict[str, Any] | None = None,
     split: str | None = None,
+    independent_case_unit: str = "",
 ) -> tuple[JobResult, float, dict[str, Any]]:
     if agent.kind not in {AgentKind.RANDOM.value, AgentKind.POLICY.value}:
         raise TaskContractError(f"closed-loop runner does not implement kind={agent.kind}")
@@ -633,15 +697,6 @@ def _run_closed_loop(
         _close(policy)
         _close(verifier)
         _close(env)
-    split_manifest_digest = ""
-    independent_cases = None
-    target_split = split or ""
-    if task.environment.splits_path:
-        manifest_path = task_dir / task.environment.splits_path
-        manifest = load_split_manifest(manifest_path)
-        split_manifest_digest = digest(manifest.model_dump(mode="json"))
-        target_split = split or "test"
-        independent_cases = manifest.independent_case_count(target_split, unit="case")
     return (
         assemble_job_result(
             task=task,
@@ -650,9 +705,10 @@ def _run_closed_loop(
             task_digest=task_digest,
             world_engine=provenance,
             agent_digest=agent_digest,
-            independent_cases=independent_cases,
-            split_manifest_digest=split_manifest_digest,
-            split=target_split,
+            independent_cases=None,
+            split_manifest_digest="",
+            split="",
+            independent_case_unit=independent_case_unit,
         ),
         safety,
         provenance,
@@ -673,6 +729,7 @@ def _run_predictions(
     resume_trials: dict[int, TrialRecord] | None = None,
     resume_provenance: dict[str, Any] | None = None,
     split: str | None = None,
+    independent_case_unit: str = "",
 ) -> JobResult:
     if agent_dir is None:
         raise TaskContractError(f"agent {agent.id} has no package directory")
@@ -807,6 +864,11 @@ def _run_predictions(
                     trace_payload[event_name] = item[event_name]
             trace = ProceduralTrace.from_steps([trace_payload], mode=mode)
             projection = project(vector, task.projection) if task.projection else None
+            m_entry = (
+                next((e for e in manifest.entries if item_id in e.item_ids), None)
+                if manifest is not None
+                else None
+            )
             trials.append(
                 TrialRecord(
                     seed=seed,
@@ -814,6 +876,11 @@ def _run_predictions(
                     trajectory=trace,
                     projection=projection,
                     projection_spec_digest=(task.projection.rule_digest if task.projection else ""),
+                    case_id=m_entry.case_id if m_entry else "",
+                    patient_id=m_entry.patient_id or "" if m_entry else "",
+                    site_id=m_entry.site_id or "" if m_entry else "",
+                    episode_id=m_entry.episode_id if m_entry else "",
+                    subgroups=dict(m_entry.subgroups) if m_entry else {},
                 )
             )
             write_trial(
@@ -832,7 +899,16 @@ def _run_predictions(
     independent_cases = None
     if manifest is not None:
         evaluated_ids = {str(item["id"]) for item in inputs[:n]}
-        independent_cases = manifest.independent_case_count_for_items(evaluated_ids, unit="case")
+        count_unit: DisjointUnit = (
+            "patient"
+            if independent_case_unit == "patient"
+            else "site"
+            if independent_case_unit == "site"
+            else "case"
+        )
+        independent_cases = manifest.independent_case_count_for_items(
+            evaluated_ids, unit=count_unit
+        )
     return assemble_job_result(
         task=task,
         agent=agent,
@@ -844,6 +920,7 @@ def _run_predictions(
         independent_cases=independent_cases,
         split_manifest_digest=split_manifest_digest,
         split=target_split,
+        independent_case_unit=independent_case_unit,
     )
 
 
@@ -864,6 +941,7 @@ def _run_interactive(
     resume_trials: dict[int, TrialRecord] | None = None,
     resume_provenance: dict[str, Any] | None = None,
     split: str | None = None,
+    independent_case_unit: str = "",
 ) -> JobResult:
     if agent_dir is None:
         raise TaskContractError(f"agent {agent.id} has no package directory")
@@ -1016,6 +1094,11 @@ def _run_interactive(
                 mode=InteractionMode.INTERACTIVE,
             )
             projection = project(vector, task.projection) if task.projection else None
+            m_entry = (
+                next((e for e in manifest.entries if item_id in e.item_ids), None)
+                if manifest is not None
+                else None
+            )
             trials.append(
                 TrialRecord(
                     seed=seed,
@@ -1023,6 +1106,11 @@ def _run_interactive(
                     trajectory=trace,
                     projection=projection,
                     projection_spec_digest=(task.projection.rule_digest if task.projection else ""),
+                    case_id=m_entry.case_id if m_entry else "",
+                    patient_id=m_entry.patient_id or "" if m_entry else "",
+                    site_id=m_entry.site_id or "" if m_entry else "",
+                    episode_id=m_entry.episode_id if m_entry else "",
+                    subgroups=dict(m_entry.subgroups) if m_entry else {},
                 )
             )
             write_trial(
@@ -1041,7 +1129,16 @@ def _run_interactive(
     independent_cases = None
     if manifest is not None:
         evaluated_ids = {str(item["id"]) for item in inputs[:n]}
-        independent_cases = manifest.independent_case_count_for_items(evaluated_ids, unit="case")
+        count_unit: DisjointUnit = (
+            "patient"
+            if independent_case_unit == "patient"
+            else "site"
+            if independent_case_unit == "site"
+            else "case"
+        )
+        independent_cases = manifest.independent_case_count_for_items(
+            evaluated_ids, unit=count_unit
+        )
     return assemble_job_result(
         task=task,
         agent=agent,
@@ -1053,6 +1150,7 @@ def _run_interactive(
         independent_cases=independent_cases,
         split_manifest_digest=split_manifest_digest,
         split=target_split,
+        independent_case_unit=independent_case_unit,
     )
 
 
@@ -1100,6 +1198,9 @@ def replay_job(
         n=int(config["n"]),
         gym_factory=gym_factory,
         split=config.get("split") or previous.split or None,
+        independent_case_unit=(
+            config.get("independent_case_unit") or previous.independent_case_unit or None
+        ),
     )
     if rerun.head != previous.head:
         raise TaskContractError(f"replay head mismatch: stored {previous.head} reran {rerun.head}")

@@ -8,18 +8,87 @@ episodes cannot inflate statistical degrees of freedom.
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from or_audit.errors import TaskContractError
 
 SplitName = Annotated[str, StringConstraints(min_length=1, max_length=64, pattern=r"^[a-z0-9_-]+$")]
 Identifier = Annotated[str, StringConstraints(min_length=1, max_length=128)]
 DisjointUnit = Literal["case", "patient", "site"]
+
+RESERVED_SUBGROUP_KEYS: frozenset[str] = frozenset(
+    {
+        "patient",
+        "patient_id",
+        "site",
+        "site_id",
+        "case",
+        "case_id",
+        "episode",
+        "episode_id",
+        "seed",
+    }
+)
+MAX_SUBGROUP_AXES = 16
+MAX_SUBGROUP_KEY_LENGTH = 64
+MAX_SUBGROUP_VALUE_LENGTH = 128
+SUBGROUP_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def validate_subgroups(raw: object) -> dict[str, str]:
+    """Validate bounded, slug-keyed, categorical subgroup mapping."""
+    if not isinstance(raw, dict):
+        raise TaskContractError(f"subgroups must be a dictionary, got {type(raw).__name__}")
+    if len(raw) > MAX_SUBGROUP_AXES:
+        raise TaskContractError(
+            f"subgroups dictionary exceeds maximum of {MAX_SUBGROUP_AXES} axes: {len(raw)}"
+        )
+    validated: dict[str, str] = {}
+    for key, val in raw.items():
+        if not isinstance(key, str) or not isinstance(val, str):
+            raise TaskContractError(
+                f"subgroup keys and values must be strings, got "
+                f"{type(key).__name__}:{type(val).__name__}"
+            )
+        k = key.strip()
+        v = val.strip()
+        if not k:
+            raise TaskContractError("subgroup key cannot be empty")
+        if not v:
+            raise TaskContractError(f"subgroup value for key {k!r} cannot be empty")
+        if len(k) > MAX_SUBGROUP_KEY_LENGTH:
+            raise TaskContractError(
+                f"subgroup key {k!r} exceeds maximum length of {MAX_SUBGROUP_KEY_LENGTH}"
+            )
+        if len(v) > MAX_SUBGROUP_VALUE_LENGTH:
+            raise TaskContractError(
+                f"subgroup value for key {k!r} exceeds maximum length "
+                f"of {MAX_SUBGROUP_VALUE_LENGTH}"
+            )
+        if not SUBGROUP_KEY_PATTERN.match(k):
+            raise TaskContractError(
+                f"subgroup key {k!r} must match slug pattern {SUBGROUP_KEY_PATTERN.pattern}"
+            )
+        if k in RESERVED_SUBGROUP_KEYS:
+            raise TaskContractError(
+                f"subgroup key {k!r} is a reserved identifier; patient/site/case/episode IDs "
+                "must be specified in their dedicated fields, not subgroups"
+            )
+        validated[k] = v
+    return validated
 
 
 class SplitCaseEntry(BaseModel):
@@ -34,6 +103,12 @@ class SplitCaseEntry(BaseModel):
     site_id: Identifier | None = None
     scenario_id: Identifier | None = None
     item_ids: tuple[Identifier, ...] = Field(default_factory=tuple)
+    subgroups: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("subgroups", mode="before")
+    @classmethod
+    def _check_subgroups(cls, value: object) -> dict[str, str]:
+        return validate_subgroups(value) if value is not None else {}
 
     @model_validator(mode="after")
     def _validate_items(self) -> Self:

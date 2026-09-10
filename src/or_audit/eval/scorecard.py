@@ -9,10 +9,15 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
+from or_audit.errors import TaskContractError
 from or_audit.eval.contracts import MetricKind
 from or_audit.eval.job import JobResult, TrialRecord
 from or_audit.eval.sim.base import BACKEND_SYNTHETIC_STUB, BACKEND_UNKNOWN
-from or_audit.eval.uncertainty import bootstrap_mean_ci, wilson_score_interval
+from or_audit.eval.uncertainty import (
+    bootstrap_mean_ci,
+    clustered_bootstrap_mean_ci,
+    wilson_score_interval,
+)
 
 STUB_HEADLINE = "NOT PHYSICAL EVIDENCE - SYNTHETIC STAND-IN"
 METRICS_ONLY_HEADLINE = "METRICS-ONLY - NOT SAFETY-ATTESTED"
@@ -38,20 +43,6 @@ def _is_abstained(trial: TrialRecord) -> bool:
         return True
     ab_metric = trial.vector.metric("abstained")
     return bool(ab_metric is not None and ab_metric.value is True)
-
-
-def _trial_subgroup(trial: TrialRecord) -> str:
-    """Extract declared subgroup from trial trajectory/metadata; never invent seeds."""
-    for step in trial.trajectory:
-        sc = step.get("scenario") if isinstance(step, dict) else getattr(step, "scenario", None)
-        if sc is not None:
-            if isinstance(sc, dict):
-                subgroup = sc.get("subgroup") or sc.get("id")
-            else:
-                subgroup = getattr(sc, "subgroup", None) or getattr(sc, "id", None)
-            if subgroup:
-                return str(subgroup)
-    return ""
 
 
 def scorecard_data(
@@ -99,17 +90,61 @@ def scorecard_data(
                     "false": assessed.count(False),
                     "rate": rate,
                     "ci_95": ci_95,
+                    "ci_method": "wilson",
+                    "confidence": 0.95,
                 }
             )
         elif row["kind"] == "continuous":
             numeric = [float(value) for value in assessed]
-            ci_95 = list(bootstrap_mean_ci(numeric)) if numeric else None
+            declared_unit = result.independent_case_unit.strip().lower()
+            if declared_unit in ("patient", "patient_id"):
+                target_attr = "patient_id"
+            elif declared_unit in ("site", "site_id"):
+                target_attr = "site_id"
+            elif declared_unit in ("case", "case_id", "clip", "held-out clip"):
+                target_attr = "case_id"
+            else:
+                target_attr = ""
+
+            clusters: dict[str, list[float]] = defaultdict(list)
+            ci_method = "bootstrap"
+            mean_val: float | None = None
+
+            if target_attr:
+                for trial in result.trials:
+                    m = trial.vector.metric(metric_id)
+                    if m is not None and m.value is not None:
+                        unit_val = getattr(trial, target_attr, "")
+                        if not unit_val:
+                            raise TaskContractError(
+                                f"declared independent_case_unit {declared_unit!r} missing on "
+                                f"trial seed {trial.seed}"
+                            )
+                        clusters[unit_val].append(float(m.value))
+
+                if len(clusters) >= 2:
+                    ci_95 = list(clustered_bootstrap_mean_ci(clusters, seed=0))
+                    ci_method = "clustered_bootstrap"
+                    cluster_level_means = [fmean(v) for v in clusters.values() if v]
+                    mean_val = fmean(cluster_level_means) if cluster_level_means else None
+                else:
+                    ci_95 = list(bootstrap_mean_ci(numeric, seed=0)) if numeric else None
+                    ci_method = "bootstrap"
+                    mean_val = fmean(numeric) if numeric else None
+            else:
+                ci_95 = list(bootstrap_mean_ci(numeric, seed=0)) if numeric else None
+                ci_method = "bootstrap"
+                mean_val = fmean(numeric) if numeric else None
             row.update(
                 {
-                    "mean": fmean(numeric) if numeric else None,
+                    "mean": mean_val,
                     "min": min(numeric) if numeric else None,
                     "max": max(numeric) if numeric else None,
                     "ci_95": ci_95,
+                    "ci_method": ci_method,
+                    "confidence": 0.95,
+                    "resampling_seed": 0,
+                    "draws": 1000,
                 }
             )
         else:
@@ -119,7 +154,11 @@ def scorecard_data(
         metrics.append(row)
     headline_outcome = next((m for m in result.trials[0].vector.metrics if m.headline), None)
     headline_kind = headline_outcome.kind if headline_outcome else MetricKind.BOOLEAN
-
+    headline_direction = (
+        headline_outcome.direction.value
+        if headline_outcome and hasattr(headline_outcome.direction, "value")
+        else (str(headline_outcome.direction) if headline_outcome else "maximize")
+    )
     # Coverage & Risk analysis for abstaining models (Phase D5)
     abstained_count = sum(1 for trial in result.trials if _is_abstained(trial))
     coverage = (result.n - abstained_count) / result.n if result.n > 0 else 0.0
@@ -142,53 +181,107 @@ def scorecard_data(
     }
 
     # Subgroups & Worst-Case Scenario Analysis (Phase D5)
-    # Subgroups must come from declared manifest metadata only; absent metadata reports unavailable.
-    scenario_trials: dict[str, list[TrialRecord]] = defaultdict(list)
+    # Subgroups come strictly from explicit cohort fields (trial.subgroups).
+    # patient_id, site_id, and case_id are reserved SOLELY for clustering.
+    cohort_keys: set[str] = set()
     for trial in result.trials:
-        sg = _trial_subgroup(trial)
-        if sg:
-            scenario_trials[sg].append(trial)
-
-    subgroups = []
+        cohort_keys.update(trial.subgroups.keys())
+    subgroups: list[dict[str, Any]] = []
     worst_case = None
-    if len(scenario_trials) > 1:
-        worst_rate = 1.1
-        for sc_id, s_trials in sorted(scenario_trials.items()):
-            s_count = len(s_trials)
-            if headline_kind is MetricKind.BOOLEAN:
-                s_pass = sum(
-                    1
-                    for t in s_trials
-                    if not t.vector.any_gate_failed and t.vector.headline.value is True
-                )
-                s_rate = s_pass / s_count if s_count > 0 else 0.0
-                ci = list(wilson_score_interval(s_pass, s_count)) if s_count > 0 else [0.0, 1.0]
-            elif headline_kind is MetricKind.CONTINUOUS:
-                s_vals = [
-                    float(t.vector.headline.value)
-                    for t in s_trials
-                    if t.vector.headline.value is not None
-                ]
-                s_rate = fmean(s_vals) if s_vals else 0.0
-                ci = list(bootstrap_mean_ci(s_vals)) if s_vals else [0.0, 0.0]
-                s_pass = sum(1 for t in s_trials if not t.vector.any_gate_failed)
-            else:
-                s_pass = sum(1 for t in s_trials if not t.vector.any_gate_failed)
-                s_rate = s_pass / s_count if s_count > 0 else 0.0
-                ci = list(wilson_score_interval(s_pass, s_count)) if s_count > 0 else [0.0, 1.0]
+    for axis in sorted(cohort_keys):
+        axis_groups: dict[str, list[TrialRecord]] = defaultdict(list)
+        for trial in result.trials:
+            val = trial.subgroups.get(axis)
+            if val:
+                axis_groups[val].append(trial)
 
-            entry = {
-                "subgroup": sc_id,
-                "count": s_count,
-                "pass": s_pass,
-                "rate": round(s_rate, 4),
-                "ci_95": ci,
-                "is_underpowered": s_count < 10,
-            }
-            subgroups.append(entry)
-            if s_rate < worst_rate:
-                worst_rate = s_rate
-                worst_case = entry
+        if len(axis_groups) > 1:
+            for val, s_trials in sorted(axis_groups.items()):
+                s_count = len(s_trials)
+                s_rate: float | None = None
+                ci: list[float] | None = None
+                if headline_kind is MetricKind.BOOLEAN:
+                    assessed_trials = [
+                        t
+                        for t in s_trials
+                        if t.vector.headline.value is not None and not _is_abstained(t)
+                    ]
+                    s_assessed = len(assessed_trials)
+                    s_unassessable = s_count - s_assessed
+                    if s_assessed > 0:
+                        s_pass = sum(
+                            1
+                            for t in assessed_trials
+                            if not t.vector.any_gate_failed and t.vector.headline.value is True
+                        )
+                        s_rate = round(s_pass / s_assessed, 4)
+                        ci = list(wilson_score_interval(s_pass, s_assessed))
+                    else:
+                        s_pass = 0
+                elif headline_kind is MetricKind.CONTINUOUS:
+                    assessed_trials = [
+                        t
+                        for t in s_trials
+                        if t.vector.headline.value is not None and not _is_abstained(t)
+                    ]
+                    s_assessed = len(assessed_trials)
+                    s_unassessable = s_count - s_assessed
+                    if s_assessed > 0:
+                        s_vals = [
+                            float(t.vector.headline.value)
+                            for t in assessed_trials
+                            if isinstance(t.vector.headline.value, int | float)
+                        ]
+                        s_rate = round(fmean(s_vals), 4)
+                        ci = list(bootstrap_mean_ci(s_vals))
+                        s_pass = sum(1 for t in assessed_trials if not t.vector.any_gate_failed)
+                    else:
+                        s_pass = 0
+                else:
+                    assessed_trials = [
+                        t
+                        for t in s_trials
+                        if t.vector.headline.value is not None and not _is_abstained(t)
+                    ]
+                    s_assessed = len(assessed_trials)
+                    s_unassessable = s_count - s_assessed
+                    if s_assessed > 0:
+                        s_pass = sum(1 for t in assessed_trials if not t.vector.any_gate_failed)
+                        s_rate = round(s_pass / s_assessed, 4)
+                        ci = list(wilson_score_interval(s_pass, s_assessed))
+                    else:
+                        s_pass = 0
+
+                entry = {
+                    "axis": axis,
+                    "subgroup": val,
+                    "count": s_count,
+                    "assessed": s_assessed,
+                    "unassessable": s_unassessable,
+                    "pass": s_pass,
+                    "rate": s_rate,
+                    "ci_95": ci,
+                    "is_underpowered": s_assessed < 10,
+                }
+                subgroups.append(entry)
+
+    worst_cases: dict[str, dict[str, Any]] = {}
+    if headline_direction in ("maximize", "minimize"):
+        for axis in sorted(cohort_keys):
+            axis_entries = [sg for sg in subgroups if sg["axis"] == axis and sg["rate"] is not None]
+            if axis_entries:
+                if headline_direction == "minimize":
+                    worst_cases[axis] = max(
+                        axis_entries,
+                        key=lambda sg: (float(str(sg["rate"])), -int(str(sg["assessed"]))),
+                    )
+                else:
+                    worst_cases[axis] = min(
+                        axis_entries,
+                        key=lambda sg: (float(str(sg["rate"])), int(str(sg["assessed"]))),
+                    )
+
+    worst_case = next(iter(worst_cases.values())) if len(worst_cases) == 1 else None
     return {
         "task_id": result.task_id,
         "task_version": result.task_version,
@@ -210,9 +303,10 @@ def scorecard_data(
         "head": result.head,
         "independent_cases": result.independent_cases,
         "split_manifest_digest": result.split_manifest_digest,
+        "worst_cases": worst_cases,
+        "worst_case": worst_case,
         "coverage": coverage_report,
         "subgroups": subgroups,
-        "worst_case": worst_case,
     }
 
 
@@ -327,28 +421,38 @@ def render_markdown(
                 ),
             ]
         )
-    if len(data["subgroups"]) > 1:
+    if data["subgroups"]:
         lines.extend(
             [
                 "",
                 "## Subgroups and worst-case analysis",
                 "",
-                "| Subgroup | Count | Pass rate | 95% CI | Power |",
-                "|---|---:|---:|:---:|:---:|",
+                "| Cohort axis | Subgroup | Count | Assessed | Unassessable | "
+                "Estimate | 95% CI | Power |",
+                "|---|---|---:|---:|---:|---:|:---:|:---:|",
             ]
         )
         for sg in data["subgroups"]:
-            ci_str = f"[{sg['ci_95'][0]:.4f}, {sg['ci_95'][1]:.4f}]"
+            ci_str = f"[{sg['ci_95'][0]:.4f}, {sg['ci_95'][1]:.4f}]" if sg["ci_95"] else "n/a"
             pwr = "underpowered (<10)" if sg["is_underpowered"] else "adequate"
+            rate_str = "n/a" if sg["rate"] is None else f"{sg['rate']:.4f}"
             lines.append(
-                f"| {sg['subgroup']} | {sg['count']} | {sg['rate']:.4f} | {ci_str} | {pwr} |"
+                f"| {sg['axis']} | {sg['subgroup']} | {sg['count']} | "
+                f"{sg['assessed']} | {sg['unassessable']} | "
+                f"{rate_str} | {ci_str} | {pwr} |"
             )
-        if data["worst_case"]:
+        if data.get("worst_case") and data["worst_case"]["rate"] is not None:
             wc = data["worst_case"]
             lines.append(
-                f"\n> **Worst-case subgroup:** `{wc['subgroup']}` "
-                f"with pass rate `{wc['rate']:.4f}`."
+                f"\n> **Worst-case subgroup:** `{wc['axis']}={wc['subgroup']}` "
+                f"with estimate `{wc['rate']:.4f}`."
             )
+        elif data.get("worst_cases"):
+            for axis, wc in sorted(data["worst_cases"].items()):
+                lines.append(
+                    f"\n> **Worst-case subgroup ({axis}):** `{wc['subgroup']}` "
+                    f"with estimate `{wc['rate']:.4f}`."
+                )
     if data["claim_footer"]:
         lines.extend(["", "## Claim boundary", "", data["claim_footer"]])
     lines.extend(

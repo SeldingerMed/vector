@@ -107,23 +107,23 @@ def clustered_bootstrap_mean_ci(
     """Clustered percentile bootstrap resampling by independent cluster key (e.g. patient)."""
     if not clusters:
         raise TaskContractError("clustered bootstrap needs at least one cluster")
-    cluster_keys = sorted(clusters.keys())
-    k = len(cluster_keys)
+    for key, vals in clusters.items():
+        if not vals:
+            raise TaskContractError(
+                f"cluster {key!r} is empty; clustered bootstrap requires non-empty observations"
+            )
+    cluster_means = {key: (sum(vals) / len(vals)) for key, vals in clusters.items()}
+    valid_keys = sorted(cluster_means.keys())
+    k = len(valid_keys)
     if k == 1:
-        single_vals = clusters[cluster_keys[0]]
-        return bootstrap_mean_ci(single_vals, confidence=confidence, draws=draws, seed=seed)
+        val = round(cluster_means[valid_keys[0]], 4)
+        return val, val
 
     rng = random.Random(seed)
     means: list[float] = []
     for _ in range(draws):
-        sampled_keys = rng.choices(cluster_keys, k=k)
-        sampled_values: list[float] = []
-        for key in sampled_keys:
-            sampled_values.extend(clusters[key])
-        if sampled_values:
-            means.append(sum(sampled_values) / len(sampled_values))
-    if not means:
-        raise TaskContractError("all sampled bootstrap clusters were empty")
+        sampled_keys = rng.choices(valid_keys, k=k)
+        means.append(sum(cluster_means[key] for key in sampled_keys) / k)
     means.sort()
 
     lower_idx = int((1.0 - confidence) / 2.0 * draws)

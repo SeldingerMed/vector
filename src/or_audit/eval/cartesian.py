@@ -347,6 +347,7 @@ def run_cartesian_job(
             n=pair_trials,
             gym_factory=gym_factory,
             split=task_split,
+            independent_case_unit=stage.independent_case_unit if stage is not None else None,
         )
         pairs.append(
             PairRecord(

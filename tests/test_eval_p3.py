@@ -189,7 +189,10 @@ prerequisites = ["integration-smoke", "pilot"]
     assert manifest.observed_units == 2
     assert manifest.stage.target_units == sum(pair.n for pair in manifest.pairs)
     assert read_manifest(out).head == manifest.head
-
+    pair_result = json.loads(
+        (out / manifest.pairs[0].dir / "result.json").read_text(encoding="utf-8")
+    )
+    assert pair_result["independent_case_unit"] == "scenario-target seed"
     with pytest.raises(TaskContractError, match="schedules 3"):
         run_cartesian_job(resolved, out=tmp_path / "wrong-n", n=3, gym_factory=_fake)
 
