@@ -8,7 +8,7 @@ import pytest
 
 from or_audit.domain.enums import GateStatus
 from or_audit.errors import TaskContractError
-from or_audit.eval.contracts import MetricKind
+from or_audit.eval.contracts import MetricDirection, MetricKind
 from or_audit.eval.job import JobResult, TrialRecord
 from or_audit.eval.loader import load_agent, load_task
 from or_audit.eval.runner import run_job
@@ -105,13 +105,23 @@ def test_scorecard_data_includes_uncertainty_intervals(tmp_path: Path) -> None:
 
 
 def test_scorecard_coverage_and_subgroup_analysis() -> None:
+    from or_audit.eval.contracts import MetricDirection
+
     vector_pass = TrialVector(
         task_id="test-task",
         task_version="1",
         agent_identity="agent",
         seed=0,
         gates=(GateOutcome(id="g1", status=GateStatus.PASS),),
-        metrics=(MetricOutcome(id="m1", kind=MetricKind.BOOLEAN, headline=True, value=True),),
+        metrics=(
+            MetricOutcome(
+                id="m1",
+                kind=MetricKind.BOOLEAN,
+                headline=True,
+                value=True,
+                direction=MetricDirection.MAXIMIZE,
+            ),
+        ),
     )
     vector_abstained = TrialVector(
         task_id="test-task",
@@ -120,7 +130,13 @@ def test_scorecard_coverage_and_subgroup_analysis() -> None:
         seed=1,
         gates=(GateOutcome(id="g1", status=GateStatus.NOT_ASSESSABLE, abstained=True),),
         metrics=(
-            MetricOutcome(id="m1", kind=MetricKind.BOOLEAN, headline=True, value=None),
+            MetricOutcome(
+                id="m1",
+                kind=MetricKind.BOOLEAN,
+                headline=True,
+                value=None,
+                direction=MetricDirection.MAXIMIZE,
+            ),
             MetricOutcome(id="abstained", kind=MetricKind.BOOLEAN, headline=False, value=True),
         ),
     )
@@ -130,7 +146,15 @@ def test_scorecard_coverage_and_subgroup_analysis() -> None:
         agent_identity="agent",
         seed=2,
         gates=(GateOutcome(id="g1", status=GateStatus.FAIL),),
-        metrics=(MetricOutcome(id="m1", kind=MetricKind.BOOLEAN, headline=True, value=False),),
+        metrics=(
+            MetricOutcome(
+                id="m1",
+                kind=MetricKind.BOOLEAN,
+                headline=True,
+                value=False,
+                direction=MetricDirection.MAXIMIZE,
+            ),
+        ),
     )
 
     step_sc1 = TraceStep.model_validate(
@@ -303,7 +327,8 @@ def test_generated_benchmark_report_fixture(tmp_path: Path) -> None:
     md = scorecard_md_path.read_text(encoding="utf-8")
     assert "| 95% CI |" in md
     assert "## Subgroups and worst-case analysis" in md
-    assert "Worst-case subgroup:" in md
+    assert "Worst-case subgroup (anatomy):" in md
+    assert "Worst-case subgroup (scanner):" in md
 
 
 def test_leaderboard_renders_uncertainty_intervals(tmp_path: Path) -> None:
@@ -453,3 +478,317 @@ def test_corrupt_or_missing_binding_json_refuses(tmp_path: Path) -> None:
     b_path.unlink()
     with pytest.raises(TaskContractError, match=r"missing binding\.json"):
         read_partial_trials(out, "video-nextstep", require_binding=True)
+
+
+def test_subgroup_worst_case_respects_minimize_direction() -> None:
+    from or_audit.eval.contracts import MetricDirection
+
+    m_low = MetricOutcome(
+        id="max_pen",
+        kind=MetricKind.CONTINUOUS,
+        headline=True,
+        value=0.05,
+        direction=MetricDirection.MINIMIZE,
+    )
+    m_high = MetricOutcome(
+        id="max_pen",
+        kind=MetricKind.CONTINUOUS,
+        headline=True,
+        value=0.25,
+        direction=MetricDirection.MINIMIZE,
+    )
+
+    trial_low = TrialRecord(
+        seed=0,
+        vector=TrialVector(
+            task_id="pen-task",
+            task_version="1",
+            agent_identity="agent",
+            seed=0,
+            gates=(),
+            metrics=(m_low,),
+        ),
+        trajectory=ProceduralTrace(()),
+        subgroups={"scanner": "scanner-A"},
+    )
+    trial_high = TrialRecord(
+        seed=1,
+        vector=TrialVector(
+            task_id="pen-task",
+            task_version="1",
+            agent_identity="agent",
+            seed=1,
+            gates=(),
+            metrics=(m_high,),
+        ),
+        trajectory=ProceduralTrace(()),
+        subgroups={"scanner": "scanner-B"},
+    )
+
+    result = JobResult(
+        task_id="pen-task",
+        task_version="1",
+        agent_identity="agent",
+        world_pin="pin",
+        interface_id="intf",
+        interaction_mode="single-turn",
+        task_digest="td",
+        agent_digest="ad",
+        n=2,
+        headline="max_pen",
+        trials=(trial_low, trial_high),
+        headline_true=0,
+        headline_false=0,
+        headline_unassessable=0,
+        any_gate_failed=0,
+    )
+
+    data = scorecard_data(result)
+    assert len(data["subgroups"]) == 2
+    # For a minimize metric, worst-case is the HIGHEST value (scanner-B: 0.25)
+    assert data["worst_case"]["subgroup"] == "scanner-B"
+    assert data["worst_case"]["rate"] == 0.25
+
+
+def test_subgroup_neutral_metric_produces_no_worst_case() -> None:
+    from or_audit.eval.contracts import MetricDirection
+
+    m0 = MetricOutcome(
+        id="neutral_metric",
+        kind=MetricKind.CONTINUOUS,
+        headline=True,
+        value=1.0,
+        direction=MetricDirection.NEUTRAL,
+    )
+    m1 = MetricOutcome(
+        id="neutral_metric",
+        kind=MetricKind.CONTINUOUS,
+        headline=True,
+        value=5.0,
+        direction=MetricDirection.NEUTRAL,
+    )
+    t0 = TrialRecord(
+        seed=0,
+        vector=TrialVector(
+            task_id="t", task_version="1", agent_identity="a", seed=0, gates=(), metrics=(m0,)
+        ),
+        subgroups={"anatomy": "bifurcation"},
+    )
+    t1 = TrialRecord(
+        seed=1,
+        vector=TrialVector(
+            task_id="t", task_version="1", agent_identity="a", seed=1, gates=(), metrics=(m1,)
+        ),
+        subgroups={"anatomy": "straight"},
+    )
+    result = JobResult(
+        task_id="t",
+        task_version="1",
+        agent_identity="a",
+        world_pin="pin",
+        interface_id="intf",
+        interaction_mode="single-turn",
+        task_digest="td",
+        agent_digest="ad",
+        n=2,
+        headline="neutral_metric",
+        trials=(t0, t1),
+        headline_true=0,
+        headline_false=0,
+        headline_unassessable=0,
+        any_gate_failed=0,
+    )
+    data = scorecard_data(result)
+    assert len(data["subgroups"]) == 2
+    # Neutral metric must NOT produce any worst case
+    assert data["worst_cases"] == {}
+    assert data["worst_case"] is None
+
+
+def test_subgroups_multi_axis_ranks_within_each_axis() -> None:
+    m_pass = MetricOutcome(
+        id="m",
+        kind=MetricKind.BOOLEAN,
+        headline=True,
+        value=True,
+        direction=MetricDirection.MAXIMIZE,
+    )
+    m_fail = MetricOutcome(
+        id="m",
+        kind=MetricKind.BOOLEAN,
+        headline=True,
+        value=False,
+        direction=MetricDirection.MAXIMIZE,
+    )
+
+    t0 = TrialRecord(
+        seed=0,
+        vector=TrialVector(
+            task_id="t", task_version="1", agent_identity="a", seed=0, gates=(), metrics=(m_pass,)
+        ),
+        subgroups={"anatomy": "bifurcation", "scanner": "siemens"},
+    )
+    t1 = TrialRecord(
+        seed=1,
+        vector=TrialVector(
+            task_id="t", task_version="1", agent_identity="a", seed=1, gates=(), metrics=(m_fail,)
+        ),
+        subgroups={"anatomy": "straight", "scanner": "ge"},
+    )
+    result = JobResult(
+        task_id="t",
+        task_version="1",
+        agent_identity="a",
+        world_pin="pin",
+        interface_id="intf",
+        interaction_mode="single-turn",
+        task_digest="td",
+        agent_digest="ad",
+        n=2,
+        headline="m",
+        trials=(t0, t1),
+        headline_true=1,
+        headline_false=1,
+        headline_unassessable=0,
+        any_gate_failed=0,
+    )
+    data = scorecard_data(result)
+    assert "anatomy" in data["worst_cases"]
+    assert "scanner" in data["worst_cases"]
+    assert data["worst_cases"]["anatomy"]["subgroup"] == "straight"
+    assert data["worst_cases"]["scanner"]["subgroup"] == "ge"
+    # Legacy worst_case is None when multiple axes exist
+    assert data["worst_case"] is None
+
+
+def test_clustered_bootstrap_rejects_empty_cluster() -> None:
+    clusters = {"patient-A": [1.0, 2.0], "patient-B": []}
+    with pytest.raises(TaskContractError, match="requires non-empty observations"):
+        clustered_bootstrap_mean_ci(clusters)
+
+
+def test_clustered_bootstrap_unequal_size_discriminates_from_pooled() -> None:
+    # 4 clusters with 1 observation of 100.0 (cluster mean = 100.0)
+    # 1 cluster with 20 observations of 0.0 each (cluster mean = 0.0)
+    clusters = {
+        "patient-A1": [100.0],
+        "patient-A2": [100.0],
+        "patient-A3": [100.0],
+        "patient-A4": [100.0],
+        "patient-B1": [0.0] * 20,
+    }
+    # Cluster-level mean estimand is (100 + 100 + 100 + 100 + 0) / 5 = 80.0
+    low_cl, high_cl = clustered_bootstrap_mean_ci(clusters, confidence=0.95, seed=42)
+    assert low_cl >= 40.0
+    assert high_cl <= 100.0
+
+    # Raw pooled bootstrap on all 24 observations: 4 * 100.0 + 20 * 0.0 -> pooled mean is 16.67!
+    pooled_values = [100.0] * 4 + [0.0] * 20
+    _low_pool, high_pool = bootstrap_mean_ci(pooled_values, confidence=0.95, seed=42)
+    assert high_pool < 35.0
+    assert high_pool < low_cl  # Completely discriminates cluster-mean weighting!
+
+
+def test_subgroup_no_assessment_row_reports_na_and_excluded_from_worst_case() -> None:
+    # Subgroup A: all trials unassessable (value=None)
+    # Subgroup B: 1 pass, 1 fail
+    m_unassessable = MetricOutcome(
+        id="m",
+        kind=MetricKind.BOOLEAN,
+        headline=True,
+        value=None,
+        direction=MetricDirection.MAXIMIZE,
+    )
+    m_pass = MetricOutcome(
+        id="m",
+        kind=MetricKind.BOOLEAN,
+        headline=True,
+        value=True,
+        direction=MetricDirection.MAXIMIZE,
+    )
+    m_fail = MetricOutcome(
+        id="m",
+        kind=MetricKind.BOOLEAN,
+        headline=True,
+        value=False,
+        direction=MetricDirection.MAXIMIZE,
+    )
+
+    t_un1 = TrialRecord(
+        seed=0,
+        vector=TrialVector(
+            task_id="t",
+            task_version="1",
+            agent_identity="a",
+            seed=0,
+            gates=(),
+            metrics=(m_unassessable,),
+        ),
+        subgroups={"anatomy": "unassessed-group"},
+    )
+    t_un2 = TrialRecord(
+        seed=1,
+        vector=TrialVector(
+            task_id="t",
+            task_version="1",
+            agent_identity="a",
+            seed=1,
+            gates=(),
+            metrics=(m_unassessable,),
+        ),
+        subgroups={"anatomy": "unassessed-group"},
+    )
+    t_b1 = TrialRecord(
+        seed=2,
+        vector=TrialVector(
+            task_id="t", task_version="1", agent_identity="a", seed=2, gates=(), metrics=(m_pass,)
+        ),
+        subgroups={"anatomy": "assessed-group"},
+    )
+    t_b2 = TrialRecord(
+        seed=3,
+        vector=TrialVector(
+            task_id="t", task_version="1", agent_identity="a", seed=3, gates=(), metrics=(m_fail,)
+        ),
+        subgroups={"anatomy": "assessed-group"},
+    )
+
+    result = JobResult(
+        task_id="t",
+        task_version="1",
+        agent_identity="a",
+        world_pin="pin",
+        interface_id="intf",
+        interaction_mode="single-turn",
+        task_digest="td",
+        agent_digest="ad",
+        n=4,
+        headline="m",
+        trials=(t_un1, t_un2, t_b1, t_b2),
+        headline_true=1,
+        headline_false=1,
+        headline_unassessable=2,
+        any_gate_failed=0,
+    )
+
+    data = scorecard_data(result)
+    assert len(data["subgroups"]) == 2
+    sg_un = next(sg for sg in data["subgroups"] if sg["subgroup"] == "unassessed-group")
+    sg_b = next(sg for sg in data["subgroups"] if sg["subgroup"] == "assessed-group")
+
+    assert sg_un["assessed"] == 0
+    assert sg_un["unassessable"] == 2
+    assert sg_un["rate"] is None
+    assert sg_un["ci_95"] is None
+
+    assert sg_b["assessed"] == 2
+    assert sg_b["unassessable"] == 0
+    assert sg_b["rate"] == 0.5
+
+    # Worst-case must be assessed-group (rate=0.5), NEVER unassessed-group!
+    assert data["worst_case"]["subgroup"] == "assessed-group"
+    assert data["worst_case"]["rate"] == 0.5
+
+    md = render_markdown(result)
+    assert "| unassessed-group | 2 | 0 | 2 | n/a | n/a |" in md
+    assert "**Worst-case subgroup:** `anatomy=assessed-group`" in md
