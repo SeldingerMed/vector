@@ -708,6 +708,7 @@ def _run_closed_loop(
             independent_cases=None,
             split_manifest_digest="",
             split="",
+            independent_case_unit=independent_case_unit,
         ),
         safety,
         provenance,
