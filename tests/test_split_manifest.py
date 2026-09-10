@@ -893,3 +893,52 @@ def test_explicit_split_without_splits_path_refused(tmp_path: Path) -> None:
             n=1,
             split="test",
         )
+
+
+def test_independent_case_unit_counts_patient_cases_when_declared(tmp_path: Path) -> None:
+    import shutil
+
+    from or_audit.eval.loader import load_agent, load_task
+    from or_audit.eval.runner import run_job
+
+    root = Path(__file__).resolve().parents[1]
+    task_src = root / "docs/examples/tasks/video-nextstep"
+    agent_src = root / "docs/examples/agents/example-video-predictor"
+    task_dir = tmp_path / "task-patient-split"
+    shutil.copytree(task_src, task_dir)
+
+    splits_file = task_dir / "splits.json"
+    splits_data = json.loads(splits_file.read_text(encoding="utf-8"))
+    splits_data["entries"][0]["patient_id"] = "pt-shared"
+    splits_data["entries"][1]["patient_id"] = "pt-shared"
+    splits_file.write_text(json.dumps(splits_data), encoding="utf-8")
+
+    task = load_task(task_dir)
+    agent = load_agent(agent_src)
+
+    # 1. When independent_case_unit="patient" -> counts distinct patients (1)
+    res_patient = run_job(
+        task=task,
+        task_dir=task_dir,
+        agent=agent,
+        agent_dir=agent_src,
+        out=tmp_path / "out-patient",
+        n=2,
+        split="test",
+        independent_case_unit="patient",
+    )
+    assert res_patient.independent_case_unit == "patient"
+    assert res_patient.independent_cases == 1
+
+    # 2. When default (unclustered / case unit) -> counts distinct cases (2)
+    res_case = run_job(
+        task=task,
+        task_dir=task_dir,
+        agent=agent,
+        agent_dir=agent_src,
+        out=tmp_path / "out-case",
+        n=2,
+        split="test",
+    )
+    assert res_case.independent_case_unit == ""
+    assert res_case.independent_cases == 2

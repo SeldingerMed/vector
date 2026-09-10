@@ -52,7 +52,7 @@ from or_audit.eval.sim import (
     world_kind_key,
     world_kind_spec,
 )
-from or_audit.eval.split import load_split_manifest
+from or_audit.eval.split import DisjointUnit, load_split_manifest
 from or_audit.eval.task import TaskSpec
 from or_audit.eval.trace import ProceduralTrace
 from or_audit.eval.vector import project
@@ -898,7 +898,16 @@ def _run_predictions(
     independent_cases = None
     if manifest is not None:
         evaluated_ids = {str(item["id"]) for item in inputs[:n]}
-        independent_cases = manifest.independent_case_count_for_items(evaluated_ids, unit="case")
+        count_unit: DisjointUnit = (
+            "patient"
+            if independent_case_unit == "patient"
+            else "site"
+            if independent_case_unit == "site"
+            else "case"
+        )
+        independent_cases = manifest.independent_case_count_for_items(
+            evaluated_ids, unit=count_unit
+        )
     return assemble_job_result(
         task=task,
         agent=agent,
@@ -1119,7 +1128,16 @@ def _run_interactive(
     independent_cases = None
     if manifest is not None:
         evaluated_ids = {str(item["id"]) for item in inputs[:n]}
-        independent_cases = manifest.independent_case_count_for_items(evaluated_ids, unit="case")
+        count_unit: DisjointUnit = (
+            "patient"
+            if independent_case_unit == "patient"
+            else "site"
+            if independent_case_unit == "site"
+            else "case"
+        )
+        independent_cases = manifest.independent_case_count_for_items(
+            evaluated_ids, unit=count_unit
+        )
     return assemble_job_result(
         task=task,
         agent=agent,
