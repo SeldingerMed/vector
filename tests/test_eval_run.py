@@ -635,3 +635,38 @@ def test_nonfinite_kind_numpy_scalars() -> None:
     assert nonfinite_kind(np.float64("inf")) == "+inf"
     assert nonfinite_kind(np.float32("-inf")) == "-inf"
     assert nonfinite_kind(np.float32(1.5)) == ""
+
+
+def test_lumen_verifier_consumes_diverged_observed_and_fails_gate() -> None:
+    import importlib.util
+
+    path = ROOT / "docs/examples/tasks/lumen-nav-safe/verifier.py"
+    spec = importlib.util.spec_from_file_location("lumen_verifier", path)
+    assert spec is not None
+    assert spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    verifier = mod.LumenVerifier()
+    res = verifier.score(
+        {
+            "info": {"success": True, "max_pen": 0.05},
+            "safety_max_pen": 0.3,
+            "diverged_observed": True,
+        }
+    )
+    assert res["metrics"]["diverged"] is True
+    assert res["metrics"]["safe_success"] is False
+    assert res["gates"]["wall_penetration"]["status"] == "fail"
+    assert "episode diverged" in res["gates"]["wall_penetration"]["reason"]
+
+    # When diverged_observed is None -> diverged is None (unassessed)
+    res_none = verifier.score(
+        {
+            "info": {"success": True, "max_pen": 0.05},
+            "safety_max_pen": 0.3,
+            "diverged_observed": None,
+        }
+    )
+    assert res_none["metrics"]["diverged"] is None
+    assert res_none["metrics"]["safe_success"] is None
+    assert res_none["gates"]["wall_penetration"]["status"] == "pass"

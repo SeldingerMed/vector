@@ -35,6 +35,8 @@ class LumenVerifier:
         safety_max_pen = float(context["safety_max_pen"])
         max_pen = _finite_number(info.get("max_pen"))
         diverged = _exact_bool(info.get("diverged"))
+        if diverged is None and context.get("diverged_observed") is True:
+            diverged = True
         raw_unsafe = info.get("unsafe")
         if raw_unsafe is None:
             unsafe = None if max_pen is None else max_pen > safety_max_pen
