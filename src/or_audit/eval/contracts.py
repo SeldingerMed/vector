@@ -93,6 +93,16 @@ class StreamSpec(_Frozen):
     adapter_digest: SHA256Hex
     source: SourceLocator = "$"
     role: Slug | None = None
+    dtype: str = ""
+    shape: tuple[int, ...] = ()
+    unit: str = ""
+    coordinate_frame: str = ""
+    valid_range: tuple[float, float] | None = None
+    controller_id: str = ""
+    camera_calibration: dict[str, Any] = Field(default_factory=dict)
+    joint_order: tuple[str, ...] = ()
+    invalid_depth_encoding: str = ""
+    privileged: bool = False
 
     @model_validator(mode="after")
     def _plugin_needs_schema(self) -> Self:
@@ -155,11 +165,20 @@ class CapabilitySpec(_Frozen):
     features: tuple[Slug, ...] = ()
     modalities: tuple[Slug, ...] = ()
     schema_wildcard: bool = False
+    stream_profiles: tuple[StreamSpec, ...] = ()
+    accepts_privileged: bool = False
 
     @model_validator(mode="after")
-    def _non_empty_modes(self) -> Self:
+    def _validate_capability(self) -> Self:
         if not self.interaction_modes:
             raise TaskContractError(f"capability {self.interface} declares no interaction mode")
+        seen_ids: set[str] = set()
+        for s in self.stream_profiles:
+            if s.id in seen_ids:
+                raise TaskContractError(
+                    f"capability {self.interface} declares duplicate stream_profile id {s.id!r}"
+                )
+            seen_ids.add(s.id)
         return self
 
     def satisfies(self, interface: InterfaceSpec) -> bool:
@@ -175,12 +194,78 @@ class CapabilitySpec(_Frozen):
                 for stream in interface.streams
             )
         )
-        return (
+        if not (
             self.interface == interface.id
             and interface.interaction_mode in self.interaction_modes
             and interface.protocol_version in self.protocol_versions
             and schemas_match
-        )
+        ):
+            return False
+        cap_profiles: dict[Slug, StreamSpec] = {}
+        if self.stream_profiles:
+            for s in self.stream_profiles:
+                if s.schema_id:
+                    cap_profiles[s.schema_id] = s
+                if s.id:
+                    cap_profiles[s.id] = s
+        for intf_stream in interface.streams:
+            has_semantics = bool(
+                intf_stream.unit
+                or intf_stream.coordinate_frame
+                or intf_stream.controller_id
+                or intf_stream.dtype
+                or intf_stream.shape
+                or intf_stream.joint_order
+                or intf_stream.invalid_depth_encoding
+                or intf_stream.valid_range is not None
+                or intf_stream.camera_calibration
+            )
+            if has_semantics:
+                matching_profile = cap_profiles.get(intf_stream.id) or cap_profiles.get(
+                    intf_stream.schema_id
+                )
+                if matching_profile is None:
+                    return False
+                if intf_stream.unit and matching_profile.unit != intf_stream.unit:
+                    return False
+                if (
+                    intf_stream.coordinate_frame
+                    and matching_profile.coordinate_frame != intf_stream.coordinate_frame
+                ):
+                    return False
+                if (
+                    intf_stream.controller_id
+                    and matching_profile.controller_id != intf_stream.controller_id
+                ):
+                    return False
+                if intf_stream.dtype and matching_profile.dtype != intf_stream.dtype:
+                    return False
+                if intf_stream.shape and matching_profile.shape != intf_stream.shape:
+                    return False
+                if (
+                    intf_stream.joint_order
+                    and matching_profile.joint_order != intf_stream.joint_order
+                ):
+                    return False
+                if (
+                    intf_stream.invalid_depth_encoding
+                    and matching_profile.invalid_depth_encoding
+                    != intf_stream.invalid_depth_encoding
+                ):
+                    return False
+                if (
+                    intf_stream.valid_range is not None
+                    and matching_profile.valid_range != intf_stream.valid_range
+                ):
+                    return False
+                if (
+                    intf_stream.camera_calibration
+                    and matching_profile.camera_calibration != intf_stream.camera_calibration
+                ):
+                    return False
+            if intf_stream.privileged and not self.accepts_privileged:
+                return False
+        return True
 
 
 class HarnessSpec(_Frozen):
