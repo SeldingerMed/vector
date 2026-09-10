@@ -43,6 +43,7 @@ from or_audit.eval.gym_world import (
     GymEnv,
     GymFactory,
     assert_perturbations_applied,
+    episode_diverged,
     make_gym,
     run_gym_episode,
     sample_action,
@@ -995,6 +996,7 @@ def rollout_vector(
             "info": info,
             "trajectory": [dict(step) for step in steps],
             "safety_max_pen": safety,
+            "diverged_observed": episode_diverged(steps),
         },
         runtime=verifier,
     )

@@ -1062,6 +1062,8 @@ def _render_verifier(spec: WrapRequest) -> str:
         "        info: dict[str, Any] = raw_info if isinstance(raw_info, dict) else {}",
         '        raw_success = _boolean(info, "raw_success", "success", "is_success")',
         '        diverged = _boolean(info, "diverged")',
+        '        if diverged is None and context.get("diverged_observed") is True:',
+        "            diverged = True",
         "        breached: list[str] = []",
         "        unreported: list[str] = []",
         "        for gate_id, signal, predicate in GATES:",
