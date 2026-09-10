@@ -93,6 +93,16 @@ class StreamSpec(_Frozen):
     adapter_digest: SHA256Hex
     source: SourceLocator = "$"
     role: Slug | None = None
+    dtype: str = ""
+    shape: tuple[int, ...] = ()
+    unit: str = ""
+    coordinate_frame: str = ""
+    valid_range: tuple[float, float] | None = None
+    controller_id: str = ""
+    camera_calibration: dict[str, Any] = Field(default_factory=dict)
+    joint_order: tuple[str, ...] = ()
+    invalid_depth_encoding: str = ""
+    privileged: bool = False
 
     @model_validator(mode="after")
     def _plugin_needs_schema(self) -> Self:
@@ -155,6 +165,8 @@ class CapabilitySpec(_Frozen):
     features: tuple[Slug, ...] = ()
     modalities: tuple[Slug, ...] = ()
     schema_wildcard: bool = False
+    stream_profiles: tuple[StreamSpec, ...] = ()
+    accepts_privileged: bool = False
 
     @model_validator(mode="after")
     def _non_empty_modes(self) -> Self:
@@ -175,12 +187,67 @@ class CapabilitySpec(_Frozen):
                 for stream in interface.streams
             )
         )
-        return (
+        if not (
             self.interface == interface.id
             and interface.interaction_mode in self.interaction_modes
             and interface.protocol_version in self.protocol_versions
             and schemas_match
-        )
+        ):
+            return False
+        if self.stream_profiles:
+            cap_profiles = {s.id: s for s in self.stream_profiles}
+            for intf_stream in interface.streams:
+                matching_profile = cap_profiles.get(intf_stream.id) or cap_profiles.get(
+                    intf_stream.schema_id
+                )
+                if matching_profile is not None:
+                    if (
+                        intf_stream.unit
+                        and matching_profile.unit
+                        and intf_stream.unit != matching_profile.unit
+                    ):
+                        return False
+                    if (
+                        intf_stream.coordinate_frame
+                        and matching_profile.coordinate_frame
+                        and intf_stream.coordinate_frame != matching_profile.coordinate_frame
+                    ):
+                        return False
+                    if (
+                        intf_stream.controller_id
+                        and matching_profile.controller_id
+                        and intf_stream.controller_id != matching_profile.controller_id
+                    ):
+                        return False
+                    if (
+                        intf_stream.dtype
+                        and matching_profile.dtype
+                        and intf_stream.dtype != matching_profile.dtype
+                    ):
+                        return False
+                    if (
+                        intf_stream.shape
+                        and matching_profile.shape
+                        and intf_stream.shape != matching_profile.shape
+                    ):
+                        return False
+                    if (
+                        intf_stream.joint_order
+                        and matching_profile.joint_order
+                        and intf_stream.joint_order != matching_profile.joint_order
+                    ):
+                        return False
+                    if (
+                        intf_stream.invalid_depth_encoding
+                        and matching_profile.invalid_depth_encoding
+                        and intf_stream.invalid_depth_encoding
+                        != matching_profile.invalid_depth_encoding
+                    ):
+                        return False
+        for intf_stream in interface.streams:
+            if intf_stream.privileged and not self.accepts_privileged:
+                return False
+        return True
 
 
 class HarnessSpec(_Frozen):

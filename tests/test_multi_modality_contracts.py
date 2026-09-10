@@ -589,3 +589,75 @@ def test_interactive_history_never_carries_raw_fields(tmp_path: Path) -> None:
     hist_seen = second.output["history"][0]["observation"]
     assert "secret" not in json.dumps(hist_seen)
     assert hist_seen["cam"]["frame_index"] == 7
+
+
+def test_semantic_stream_profile_mismatches_refuse_binding() -> None:
+    base_stream = StreamSpec(
+        id="kinematics-stream",
+        schema_id="kinematic-telemetry",
+        adapter="robotic-kinematics",
+        adapter_digest="a" * 64,
+        unit="mm",
+        coordinate_frame="world",
+        controller_id="delta_pos_v1",
+        joint_order=("j1", "j2", "j3"),
+        dtype="float32",
+        shape=(3,),
+    )
+    interface = InterfaceSpec(
+        id="kinematics-control",
+        interaction_mode=InteractionMode.CLOSED_LOOP,
+        observations=("kinematic-telemetry",),
+        actions=("joint-cmd",),
+        streams=(base_stream,),
+    )
+
+    # 1. Identical semantic profile -> binds
+    matching_cap = CapabilitySpec(
+        interface="kinematics-control",
+        interaction_modes=(InteractionMode.CLOSED_LOOP,),
+        observations=("kinematic-telemetry",),
+        actions=("joint-cmd",),
+        modalities=("robotic-kinematics",),
+        stream_profiles=(base_stream,),
+    )
+    assert matching_cap.satisfies(interface)
+
+    # 2. Unit mismatch ("mm" vs "m") -> does not bind
+    unit_mismatch = matching_cap.model_copy(
+        update={"stream_profiles": (base_stream.model_copy(update={"unit": "m"}),)}
+    )
+    assert not unit_mismatch.satisfies(interface)
+
+    # 3. Coordinate frame mismatch ("world" vs "tool_tip") -> does not bind
+    frame_mismatch = matching_cap.model_copy(
+        update={
+            "stream_profiles": (base_stream.model_copy(update={"coordinate_frame": "tool_tip"}),)
+        }
+    )
+    assert not frame_mismatch.satisfies(interface)
+
+    # 4. Controller mismatch -> does not bind
+    controller_mismatch = matching_cap.model_copy(
+        update={
+            "stream_profiles": (
+                base_stream.model_copy(update={"controller_id": "absolute_pos_v1"}),
+            )
+        }
+    )
+    assert not controller_mismatch.satisfies(interface)
+
+    # 5. Joint order mismatch -> does not bind
+    joint_mismatch = matching_cap.model_copy(
+        update={
+            "stream_profiles": (base_stream.model_copy(update={"joint_order": ("j3", "j2", "j1")}),)
+        }
+    )
+    assert not joint_mismatch.satisfies(interface)
+
+    # 6. Privileged stream rejected unless accepts_privileged=True
+    priv_stream = base_stream.model_copy(update={"privileged": True})
+    priv_interface = interface.model_copy(update={"streams": (priv_stream,)})
+    assert not matching_cap.satisfies(priv_interface)
+    priv_cap = matching_cap.model_copy(update={"accepts_privileged": True})
+    assert priv_cap.satisfies(priv_interface)
