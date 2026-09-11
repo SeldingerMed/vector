@@ -841,6 +841,11 @@ def test_stream_rejects_impossible_geometry() -> None:
     # One-sided ranges are real physics (depth has no ceiling): allowed.
     assert _stream(valid_range=(0.0, float("inf"))).valid_range == (0.0, float("inf"))
     assert _stream(valid_range=(float("-inf"), 0.0)).valid_range == (float("-inf"), 0.0)
+    # Fully finite ranges are the ordinary case; a guard that rejected them
+    # would make valid_range unusable, so pin the happy path explicitly.
+    assert _stream(valid_range=(0.0, 1.0)).valid_range == (0.0, 1.0)
+    assert _stream(valid_range=(-5.0, 5.0)).valid_range == (-5.0, 5.0)
+    assert _stream(valid_range=(2.0, 2.0)).valid_range == (2.0, 2.0)  # degenerate but sound
 
 
 def test_camera_calibration_is_deeply_immutable() -> None:

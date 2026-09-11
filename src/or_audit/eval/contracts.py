@@ -247,14 +247,14 @@ class StreamSpec(_Frozen):
                 raise TaskContractError(
                     f"stream {self.id} valid_range {self.valid_range!r} is reversed"
                 )
+            # A range is a constraint only if it rules something out. Fully
+            # finite ranges are the ordinary case and always admissible.
             # One-sided ranges are legitimate physics (depth has no ceiling, a
-            # joint angle may be open below), so an infinite endpoint is allowed
-            # only when the other side is finite. A range unbounded on both
-            # sides asserts nothing; it must be omitted instead, so that
-            # "declared but vacuous" cannot masquerade as a constraint.
-            if not (math.isfinite(low) and high == math.inf) and not (
-                math.isfinite(high) and low == -math.inf
-            ):
+            # joint angle may be open below), so an infinite endpoint is fine
+            # while the other side is finite. But when *both* endpoints are
+            # infinite the range admits every value: it asserts nothing, so it
+            # must be omitted rather than declared-vacuous.
+            if not math.isfinite(low) and not math.isfinite(high):
                 raise TaskContractError(
                     f"stream {self.id} valid_range {self.valid_range!r} bounds neither side; "
                     "omit valid_range when the value is unconstrained"
