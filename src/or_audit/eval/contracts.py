@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from collections.abc import Mapping
 from enum import StrEnum
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, NoReturn, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from or_audit.errors import TaskContractError
 
@@ -73,6 +82,102 @@ SourceLocator = Annotated[
 ]
 
 
+class _FrozenDict(dict[str, Any]):
+    """Deeply immutable JSON object used for pinned calibration payloads.
+
+    Built only through :func:`_freeze_json`, which recursively replaces nested
+    mappings with this class and nested sequences with tuples, so no mutation
+    path — shallow or deep — survives construction. Equality stays
+    content-based (``dict.__eq__``), so a frozen and a plain mapping with the
+    same content still compare equal.
+    """
+
+    def __setitem__(self, key: str, value: Any) -> NoReturn:
+        raise TypeError("camera_calibration is deeply immutable")
+
+    def __delitem__(self, key: str) -> NoReturn:
+        raise TypeError("camera_calibration is deeply immutable")
+
+    def update(self, *args: Any, **kwargs: Any) -> NoReturn:
+        raise TypeError("camera_calibration is deeply immutable")
+
+    def setdefault(self, key: str, default: Any = None) -> NoReturn:
+        raise TypeError("camera_calibration is deeply immutable")
+
+    def pop(self, *args: Any) -> NoReturn:
+        raise TypeError("camera_calibration is deeply immutable")
+
+    def popitem(self) -> NoReturn:
+        raise TypeError("camera_calibration is deeply immutable")
+
+    def clear(self) -> NoReturn:
+        raise TypeError("camera_calibration is deeply immutable")
+
+    # CPython resolves ``x |= y`` through the C-level ``dict.__ior__``, which
+    # mutates in place and bypasses ``__setitem__`` — the override is required
+    # for soundness. typeshed models ``dict.__or__`` as overloads no raising
+    # override can match, so the misc override diagnostic is suppressed here
+    # (the sibling ``__or__`` is inherited and produces a fresh dict anyway).
+    def __ior__(self, value: Any) -> NoReturn:  # type: ignore[misc]
+        raise TypeError("camera_calibration is deeply immutable")
+
+
+def _calibration_is_declared(value: Mapping[str, Any]) -> bool:
+    """Whether a calibration carries any meaningful calibration data.
+
+    An empty mapping is "not declared". A mapping with keys is declared even
+    if a value is ``0`` or ``False`` — those are real calibration values
+    (e.g. zero principal-point offset, disabled skew), so emptiness is tested
+    by key count rather than by truthiness of the payload.
+    """
+    return len(value) > 0
+
+
+def _calibration_equal(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """Content equality between two calibration trees.
+
+    Re-canonicalizes both sides first: a tree that arrived through
+    ``model_copy(update=...)`` skipped validation and still carries lists
+    where a validated one holds tuples, and raw ``==`` would call that a
+    mismatch. A side that cannot even be canonicalized is not a calibration
+    anyone should bind against, so it compares unequal rather than raising
+    inside a predicate that selection loops (``bind.py``) call casually.
+    """
+    try:
+        left_frozen: Any = _freeze_json(left, where="camera_calibration")
+        right_frozen: Any = _freeze_json(right, where="camera_calibration")
+        return bool(left_frozen == right_frozen)
+    except TaskContractError:
+        return False
+
+
+def _freeze_json(value: Any, *, where: str) -> Any:
+    """Canonicalize ``value`` into a deeply immutable JSON tree.
+
+    Rejects anything a JSON document could not carry: non-string object keys,
+    non-finite floats, and unsupported leaf types. Keys are sorted so two
+    calibrations with the same content canonicalize to the same order.
+    """
+    if value is None or isinstance(value, bool | int | str):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise TaskContractError(f"{where}: non-finite number {value!r} is not valid JSON")
+        return value
+    if isinstance(value, Mapping):
+        items: dict[str, Any] = {}
+        for key, sub in value.items():
+            if not isinstance(key, str):
+                raise TaskContractError(f"{where}: object keys must be strings, got {key!r}")
+            items[key] = _freeze_json(sub, where=f"{where}.{key}")
+        return _FrozenDict(sorted(items.items()))
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_json(item, where=f"{where}[]") for item in value)
+    raise TaskContractError(
+        f"{where}: value of type {type(value).__name__} has no JSON representation"
+    )
+
+
 class StreamSpec(_Frozen):
     """One sensor/data channel a task presents to an agent.
 
@@ -99,10 +204,24 @@ class StreamSpec(_Frozen):
     coordinate_frame: str = ""
     valid_range: tuple[float, float] | None = None
     controller_id: str = ""
-    camera_calibration: dict[str, Any] = Field(default_factory=dict)
+    #: Deeply immutable pinned calibration; see :func:`_freeze_json`. Declared as
+    #: ``Mapping`` so pydantic never hands back a caller-retained mutable dict.
+    camera_calibration: Mapping[str, Any] = Field(default_factory=_FrozenDict)
     joint_order: tuple[str, ...] = ()
     invalid_depth_encoding: str = ""
     privileged: bool = False
+
+    @field_validator("shape", mode="before")
+    def _reject_impossible_shape(cls, value: Any) -> Any:
+        # ``tuple[int, ...]`` is lax in pydantic: ``True`` launders into ``1``
+        # and a zero/negative extent passes the type check, so the raw input
+        # must be screened before coercion. A bool is not a dimension, and a
+        # non-positive axis is a buffer no tensor can be allocated against.
+        if isinstance(value, list | tuple):
+            for dim in value:
+                if isinstance(dim, bool) or (isinstance(dim, int) and dim <= 0):
+                    raise TaskContractError(f"stream declares non-positive shape dimension {dim!r}")
+        return value
 
     @model_validator(mode="after")
     def _plugin_needs_schema(self) -> Self:
@@ -110,6 +229,69 @@ class StreamSpec(_Frozen):
             raise TaskContractError(f"stream {self.id} requires an adapter plugin id")
         if not self.schema_id:
             raise TaskContractError(f"stream {self.id} requires an observation schema_id")
+        return self
+
+    @model_validator(mode="after")
+    def _geometry_is_sane(self) -> Self:
+        # Shape soundness (bool laundering, non-positive axes) is screened on
+        # the raw input by ``_reject_impossible_shape`` before pydantic can
+        # coerce; what is left here is range semantics.
+        if self.valid_range is not None:
+            low, high = self.valid_range
+            if math.isnan(low) or math.isnan(high):
+                raise TaskContractError(
+                    f"stream {self.id} valid_range {self.valid_range!r} contains a NaN bound; "
+                    "every comparison against it is False, so the range could never be enforced"
+                )
+            if low > high:
+                raise TaskContractError(
+                    f"stream {self.id} valid_range {self.valid_range!r} is reversed"
+                )
+            # One-sided ranges are legitimate physics (depth has no ceiling, a
+            # joint angle may be open below), so an infinite endpoint is allowed
+            # only when the other side is finite. A range unbounded on both
+            # sides asserts nothing; it must be omitted instead, so that
+            # "declared but vacuous" cannot masquerade as a constraint.
+            if not (math.isfinite(low) and high == math.inf) and not (
+                math.isfinite(high) and low == -math.inf
+            ):
+                raise TaskContractError(
+                    f"stream {self.id} valid_range {self.valid_range!r} bounds neither side; "
+                    "omit valid_range when the value is unconstrained"
+                )
+        return self
+
+    @field_validator("camera_calibration", mode="before")
+    def _pin_calibration(cls, value: Any) -> Any:
+        # A pinned calibration a caller can still mutate is not a pin: digest
+        # the stream, ship it, then edit the dict, and a binding that was
+        # refused now holds. Freeze deep, and reject anything JSON could not
+        # round-trip so the pinned form survives serialization unchanged.
+        # Screening happens before pydantic's own ``Mapping[str, Any]`` check
+        # so every malformed calibration surfaces as one TaskContractError,
+        # not sometimes-a-ValidationError depending on which field is bad.
+        if not isinstance(value, Mapping):
+            raise TaskContractError(
+                f"camera_calibration must be a mapping, got {type(value).__name__}"
+            )
+        if type(value) is _FrozenDict:
+            return value
+        return _freeze_json(value, where="camera_calibration")
+
+    @model_validator(mode="after")
+    def _refreeze_after_field_validation(self) -> Self:
+        # Safety net under the before-validator: ``Mapping[str, Any]`` field
+        # validation rebuilds the top-level container, so pydantic can hand
+        # back a plain dict even when the input was already canonical (the
+        # default_factory path also never runs the before-validator). Any
+        # container that is not the frozen type is re-canonicalized here, so
+        # a stored stream never exposes a mutable calibration — which is the
+        # whole point of pinning it.
+        if type(self.camera_calibration) is not _FrozenDict:
+            frozen: Any = _freeze_json(
+                self.camera_calibration, where=f"stream {self.id}.camera_calibration"
+            )
+            object.__setattr__(self, "camera_calibration", frozen)
         return self
 
 
@@ -181,6 +363,21 @@ class CapabilitySpec(_Frozen):
             seen_ids.add(s.id)
         return self
 
+    def _profile_index(self) -> tuple[dict[Slug, StreamSpec], dict[Slug, list[StreamSpec]]]:
+        """Index profiles by exact stream id and by schema id.
+
+        Two maps, never one merged: keying a single dict by both ``s.id`` and
+        ``s.schema_id`` lets one channel's profile satisfy another channel's
+        requirements whenever a stream id collides with some schema name, which
+        is legal because both namespaces are open slugs.
+        """
+        by_id: dict[Slug, StreamSpec] = {}
+        by_schema: dict[Slug, list[StreamSpec]] = {}
+        for s in self.stream_profiles:
+            by_id[s.id] = s
+            by_schema.setdefault(s.schema_id, []).append(s)
+        return by_id, by_schema
+
     def satisfies(self, interface: InterfaceSpec) -> bool:
         """Return whether this declaration satisfies every task requirement."""
         own_schemas = set(self.observations) | set(self.features)
@@ -201,14 +398,12 @@ class CapabilitySpec(_Frozen):
             and schemas_match
         ):
             return False
-        cap_profiles: dict[Slug, StreamSpec] = {}
-        if self.stream_profiles:
-            for s in self.stream_profiles:
-                if s.schema_id:
-                    cap_profiles[s.schema_id] = s
-                if s.id:
-                    cap_profiles[s.id] = s
+
+        by_id, by_schema = self._profile_index()
+        interface_stream_ids = {stream.id for stream in interface.streams}
         for intf_stream in interface.streams:
+            if intf_stream.privileged and not self.accepts_privileged:
+                return False
             has_semantics = bool(
                 intf_stream.unit
                 or intf_stream.coordinate_frame
@@ -218,52 +413,77 @@ class CapabilitySpec(_Frozen):
                 or intf_stream.joint_order
                 or intf_stream.invalid_depth_encoding
                 or intf_stream.valid_range is not None
-                or intf_stream.camera_calibration
+                or _calibration_is_declared(intf_stream.camera_calibration)
             )
-            if has_semantics:
-                matching_profile = cap_profiles.get(intf_stream.id) or cap_profiles.get(
-                    intf_stream.schema_id
-                )
-                if matching_profile is None:
+            # Resolve the declaration that speaks for this channel. Exact channel
+            # identity wins. A schema-level route is admissible only under
+            # declared semantics and only when it cannot be confused with
+            # another channel, because profiles are declared per data shape and
+            # two channels may legitimately share one shape — guessing which
+            # channel a shape referred to is how a probe's profile ends up
+            # vouching for a camera.
+            matching_profile = by_id.get(intf_stream.id)
+            if matching_profile is None:
+                if not has_semantics:
+                    continue
+                candidates = by_schema.get(intf_stream.schema_id)
+                if not candidates or len(candidates) != 1:
                     return False
-                if intf_stream.unit and matching_profile.unit != intf_stream.unit:
+                candidate = candidates[0]
+                # A profile named for a *different* channel of this same
+                # interface is that channel's declaration, not this one's.
+                if candidate.id != intf_stream.id and candidate.id in interface_stream_ids:
                     return False
-                if (
-                    intf_stream.coordinate_frame
-                    and matching_profile.coordinate_frame != intf_stream.coordinate_frame
-                ):
-                    return False
-                if (
-                    intf_stream.controller_id
-                    and matching_profile.controller_id != intf_stream.controller_id
-                ):
-                    return False
-                if intf_stream.dtype and matching_profile.dtype != intf_stream.dtype:
-                    return False
-                if intf_stream.shape and matching_profile.shape != intf_stream.shape:
-                    return False
-                if (
-                    intf_stream.joint_order
-                    and matching_profile.joint_order != intf_stream.joint_order
-                ):
-                    return False
-                if (
-                    intf_stream.invalid_depth_encoding
-                    and matching_profile.invalid_depth_encoding
-                    != intf_stream.invalid_depth_encoding
-                ):
-                    return False
-                if (
-                    intf_stream.valid_range is not None
-                    and matching_profile.valid_range != intf_stream.valid_range
-                ):
-                    return False
-                if (
-                    intf_stream.camera_calibration
-                    and matching_profile.camera_calibration != intf_stream.camera_calibration
-                ):
-                    return False
-            if intf_stream.privileged and not self.accepts_privileged:
+                matching_profile = candidate
+
+            # Channel identity is compared unconditionally: adapter + digest
+            # are required fields on both sides, so "I serve this channel"
+            # means "through this pinned plugin content". A differing digest
+            # is a different plugin build, i.e. a different contract.
+            if (
+                matching_profile.schema_id != intf_stream.schema_id
+                or matching_profile.adapter != intf_stream.adapter
+                or matching_profile.adapter_digest != intf_stream.adapter_digest
+            ):
+                return False
+            if matching_profile.source != intf_stream.source:
+                # ``source`` locates the observation slice the channel carries;
+                # whole-observation ("$") vs a pointer are different channels
+                # even under one id, so compare it on both sides.
+                return False
+            if intf_stream.role is not None and matching_profile.role != intf_stream.role:
+                return False
+            if intf_stream.unit and matching_profile.unit != intf_stream.unit:
+                return False
+            if (
+                intf_stream.coordinate_frame
+                and matching_profile.coordinate_frame != intf_stream.coordinate_frame
+            ):
+                return False
+            if (
+                intf_stream.controller_id
+                and matching_profile.controller_id != intf_stream.controller_id
+            ):
+                return False
+            if intf_stream.dtype and matching_profile.dtype != intf_stream.dtype:
+                return False
+            if intf_stream.shape and matching_profile.shape != intf_stream.shape:
+                return False
+            if intf_stream.joint_order and matching_profile.joint_order != intf_stream.joint_order:
+                return False
+            if (
+                intf_stream.invalid_depth_encoding
+                and matching_profile.invalid_depth_encoding != intf_stream.invalid_depth_encoding
+            ):
+                return False
+            if (
+                intf_stream.valid_range is not None
+                and matching_profile.valid_range != intf_stream.valid_range
+            ):
+                return False
+            if _calibration_is_declared(intf_stream.camera_calibration) and not _calibration_equal(
+                matching_profile.camera_calibration, intf_stream.camera_calibration
+            ):
                 return False
         return True
 

@@ -690,17 +690,75 @@ def test_semantic_stream_profile_mismatches_refuse_binding() -> None:
     )
     assert wildcard_matching_profile.satisfies(interface)
 
-    # 11. Profile keyed by schema_id (not stream id) matches when stream id differs
-    schema_keyed_profile = base_stream.model_copy(update={"id": "different-stream-id"})
-    schema_cap = CapabilitySpec(
+    # 11. Schema-keyed lookup must not let a *different channel's* profile
+    # vouch for this channel. Interface declares two channels whose stream ids
+    # and schema names cross-reference each other (legal: both namespaces are
+    # open slugs). Under a merged id/schema index, B's profile is reachable
+    # through A's schema name, so A would bind on B's semantics.
+    chan_a = StreamSpec(
+        id="cam",
+        schema_id="probe-schema",
+        adapter="robotic-kinematics",
+        adapter_digest="a" * 64,
+        unit="mm",
+        coordinate_frame="world",
+    )
+    chan_b = StreamSpec(
+        id="probe",
+        schema_id="cam",
+        adapter="robotic-kinematics",
+        adapter_digest="a" * 64,
+        unit="mm",
+        coordinate_frame="world",
+    )
+    crossed = InterfaceSpec(
+        id="kinematics-control",
+        interaction_mode=InteractionMode.CLOSED_LOOP,
+        observations=("probe-schema", "cam"),
+        actions=("joint-cmd",),
+        streams=(chan_a, chan_b),
+    )
+    # Capability declares only B's profile (correct for B). It carries no
+    # declaration for A at all, so A must refuse to bind.
+    only_b = CapabilitySpec(
+        interface="kinematics-control",
+        interaction_modes=(InteractionMode.CLOSED_LOOP,),
+        observations=("probe-schema", "cam"),
+        actions=("joint-cmd",),
+        modalities=("robotic-kinematics",),
+        stream_profiles=(chan_b,),
+    )
+    assert not only_b.satisfies(crossed)
+
+    # 11b. Legitimate schema-keyed fallback: exactly one profile carries this
+    # channel's schema and none of the interface's other channel ids collides
+    # with it, so the profile is unambiguously about this channel.
+    solo = InterfaceSpec(
+        id="kinematics-control",
+        interaction_mode=InteractionMode.CLOSED_LOOP,
+        observations=("kinematic-telemetry",),
+        actions=("joint-cmd",),
+        streams=(base_stream.model_copy(update={"id": "an-alternate-channel-name"}),),
+    )
+    schema_keyed_cap = CapabilitySpec(
         interface="kinematics-control",
         interaction_modes=(InteractionMode.CLOSED_LOOP,),
         observations=("kinematic-telemetry",),
         actions=("joint-cmd",),
         modalities=("robotic-kinematics",),
-        stream_profiles=(schema_keyed_profile,),
+        stream_profiles=(base_stream,),
     )
-    assert schema_cap.satisfies(interface)
+    assert schema_keyed_cap.satisfies(solo)
+
+    # 11c. Two profiles competing for one schema make the schema-keyed route
+    # ambiguous; guessing either would bind on an unverified declaration.
+    twin = base_stream.model_copy(update={"id": "other-channel-name"})
+    assert not schema_keyed_cap.model_copy(
+        update={"stream_profiles": (base_stream, twin)},
+    ).satisfies(solo)
+    assert schema_keyed_cap.model_copy(
+        update={"stream_profiles": (twin,)},
+    ).satisfies(solo)  # "other-channel-name" is not an interface channel; schema route ok
 
     # 12. camera_calibration mismatch refuses binding, matching satisfies
     calib_stream = base_stream.model_copy(update={"camera_calibration": {"focal_length": 50.0}})
@@ -724,3 +782,148 @@ def test_semantic_stream_profile_mismatches_refuse_binding() -> None:
             observations=("kinematic-telemetry",),
             stream_profiles=(base_stream, base_stream),
         )
+
+
+def _stream(**kw: Any) -> StreamSpec:
+    base: dict[str, Any] = {
+        "id": "cam",
+        "schema_id": "video-obs",
+        "adapter": "video-laparoscopic",
+        "adapter_digest": "a" * 64,
+    }
+    base.update(kw)
+    return StreamSpec(**base)
+
+
+def _cap(profiles: tuple[StreamSpec, ...], **kw: Any) -> CapabilitySpec:
+    base: dict[str, Any] = {
+        "interface": "k",
+        "interaction_modes": (InteractionMode.SINGLE_TURN,),
+        "observations": ("video-obs",),
+        "outputs": ("pred",),
+        "modalities": ("video-laparoscopic",),
+        "stream_profiles": profiles,
+    }
+    base.update(kw)
+    return CapabilitySpec(**base)
+
+
+def _iface(streams: tuple[StreamSpec, ...]) -> InterfaceSpec:
+    return InterfaceSpec(
+        id="k",
+        interaction_mode=InteractionMode.SINGLE_TURN,
+        observations=("video-obs",),
+        outputs=("pred",),
+        streams=streams,
+    )
+
+
+def test_stream_rejects_impossible_geometry() -> None:
+    # A zero/negative axis is not a buffer anyone can allocate; a bool is not
+    # a dimension. pydantic's tuple[int, ...] silently coerces True -> 1, so
+    # the contract layer must reject it, not launder it.
+    with pytest.raises(TaskContractError, match="non-positive shape dimension"):
+        _stream(shape=(0,))
+    with pytest.raises(TaskContractError, match="non-positive shape dimension"):
+        _stream(shape=(-1,))
+    with pytest.raises(TaskContractError, match="non-positive shape dimension"):
+        _stream(shape=(True,))
+    # NaN bounds make every comparison False: the range could never be
+    # enforced, so "declared" would be a lie.
+    with pytest.raises(TaskContractError, match="NaN"):
+        _stream(valid_range=(float("nan"), 2.0))
+    # Reversed and fully unbounded ranges assert nothing; they must be
+    # omitted, not declared-vacuous.
+    with pytest.raises(TaskContractError, match="reversed"):
+        _stream(valid_range=(5.0, 1.0))
+    with pytest.raises(TaskContractError, match="bounds neither side"):
+        _stream(valid_range=(float("-inf"), float("inf")))
+    # One-sided ranges are real physics (depth has no ceiling): allowed.
+    assert _stream(valid_range=(0.0, float("inf"))).valid_range == (0.0, float("inf"))
+    assert _stream(valid_range=(float("-inf"), 0.0)).valid_range == (float("-inf"), 0.0)
+
+
+def test_camera_calibration_is_deeply_immutable() -> None:
+    # A pinned calibration a caller can still edit is not a pin: digest the
+    # stream, ship it, then mutate the dict and the refused binding holds.
+    stream = _stream(camera_calibration={"intrinsics": {"fx": 50.0, "dist": [0.1, 0.2]}})
+    # ``Any`` alias: the declared type is Mapping (read-only), but the whole
+    # point of this test is that mutation attempts raise even when attempted
+    # through the object the caller still holds.
+    cal: Any = stream.camera_calibration
+    assert isinstance(cal, dict)  # it really is a dict subclass, so these are live paths
+    with pytest.raises(TypeError, match="deeply immutable"):
+        cal["fx"] = 999.0
+    with pytest.raises(TypeError, match="deeply immutable"):
+        cal["intrinsics"]["fx"] = 999.0
+    with pytest.raises(TypeError, match="deeply immutable"):
+        cal.update({"fx": 1.0})
+    with pytest.raises(TypeError, match="deeply immutable"):
+        cal |= {"fx": 1.0}
+    with pytest.raises(TypeError, match="deeply immutable"):
+        del cal["intrinsics"]
+    with pytest.raises(TypeError, match="deeply immutable"):
+        cal.setdefault("fx", 1.0)
+    with pytest.raises(TypeError, match="deeply immutable"):
+        cal.pop("intrinsics")
+    with pytest.raises(TypeError, match="deeply immutable"):
+        cal.popitem()
+    with pytest.raises(TypeError, match="deeply immutable"):
+        cal.clear()
+    # Nothing leaked through the failed mutations, and equality stays
+    # content-based. The canonical form holds tuples where JSON has arrays
+    # (that is what makes it deep-immutable), so compare against that.
+    assert cal == {"intrinsics": {"fx": 50.0, "dist": (0.1, 0.2)}}
+    assert isinstance(cal["intrinsics"]["dist"], tuple)
+    # ``|`` without assignment stays available from dict and yields a fresh,
+    # ordinary dict — the pin itself is untouched either way.
+    merged = cal | {"extra": 1.0}
+    assert merged["extra"] == 1.0
+    assert "extra" not in cal
+
+
+def test_camera_calibration_rejects_non_json_values() -> None:
+    bad_values: list[Any] = [
+        {"fx": float("nan")},
+        {"fx": float("inf")},
+        {1: "x"},
+        {"ok": {"nested": {2.5: 1}}},
+    ]
+    for bad in bad_values:
+        with pytest.raises(TaskContractError):
+            _stream(camera_calibration=bad)
+
+
+def test_zero_valued_calibration_counts_as_declared() -> None:
+    # fx=0 / skew=False are real calibration values. Truthiness of the payload
+    # would read them as "not declared" and let an undeclared profile bind.
+    zeroed = _stream(camera_calibration={"fx": 0.0})
+    iface = _iface((zeroed,))
+    assert not _cap((_stream(),)).satisfies(iface)  # profile declares nothing
+    assert _cap((_stream(camera_calibration={"fx": 0.0}),)).satisfies(iface)
+
+
+def test_calibration_equality_ignores_key_order_and_uses_content() -> None:
+    a = _stream(camera_calibration={"a": 1.0, "b": {"c": [1, 2]}})
+    b = _stream(camera_calibration={"b": {"c": [1, 2]}, "a": 1.0})
+    iface = _iface((a,))
+    assert _cap((b,)).satisfies(iface)  # same content, different insertion order
+    c = _stream(camera_calibration={"a": 1.0, "b": {"c": [1, 3]}})
+    assert not _cap((c,)).satisfies(iface)  # deep content differs
+
+
+def test_stream_identity_adapter_digest_and_source_are_enforced() -> None:
+    plain = _stream()
+    iface = _iface((plain,))
+    # Same channel, same pinned plugin: binds.
+    assert _cap((plain,)).satisfies(iface)
+    # Different plugin build under the same channel is a different contract.
+    assert not _cap((_stream(adapter_digest="b" * 64),)).satisfies(iface)
+    assert not _cap((_stream(adapter="other-adapter"),)).satisfies(iface)
+    # ``source`` selects the observation slice the channel carries: "$" vs a
+    # pointer are different channels even under one id, and it is compared on
+    # both sides so neither party can silently re-locate the data.
+    assert not _cap((_stream(source="depth"),)).satisfies(iface)
+    pointer_iface = _iface((_stream(source="depth"),))
+    assert _cap((_stream(source="depth"),)).satisfies(pointer_iface)
+    assert not _cap((_stream(),)).satisfies(pointer_iface)
