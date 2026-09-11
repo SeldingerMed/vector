@@ -15,6 +15,12 @@ from or_audit.eval.adapters import (
 )
 from or_audit.eval.agent import AgentPackage
 from or_audit.eval.bind import assert_bind
+from or_audit.eval.branching import (
+    BranchEvidence,
+    branch_from,
+    measure_branch_support,
+    require_branch_support,
+)
 from or_audit.eval.cartesian import CartesianManifest, replay_cartesian, run_cartesian_job
 from or_audit.eval.contracts import (
     CapabilitySpec,
@@ -98,9 +104,11 @@ from or_audit.eval.uncertainty import (
 from or_audit.eval.vector import TrialVector, project
 from or_audit.eval.worlds import (
     WORLD_KIND_ENTRY_POINT_GROUP,
+    BranchingSupport,
     DeterminismClass,
     WorldCapabilities,
     WorldKindSpec,
+    branching_at_least,
     determinism_at_least,
     list_world_kinds,
     require_world_kind,
@@ -117,6 +125,8 @@ __all__ = [
     "AttestationLevel",
     "BaseModalityAdapter",
     "BaseSimulationBridge",
+    "BranchEvidence",
+    "BranchingSupport",
     "CapabilitySpec",
     "CartesianManifest",
     "DatasetSpec",
@@ -172,6 +182,8 @@ __all__ = [
     "assemble_job_result",
     "assert_bind",
     "bootstrap_mean_ci",
+    "branch_from",
+    "branching_at_least",
     "builtin_random_agent",
     "clear_adapter_registry",
     "clear_simulation_registry",
@@ -193,6 +205,7 @@ __all__ = [
     "make_isaac_bridge",
     "make_sofa_bridge",
     "make_warp_bridge",
+    "measure_branch_support",
     "preprocess_observation",
     "project",
     "reconstitute_trial_vector",
@@ -202,6 +215,7 @@ __all__ = [
     "replay_cartesian",
     "replay_job",
     "require_adapter",
+    "require_branch_support",
     "require_simulation_engine",
     "require_world_kind",
     "reset_default_simulation_engines",

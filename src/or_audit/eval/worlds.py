@@ -27,9 +27,9 @@ import inspect
 from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator, model_validator
 
 from or_audit.errors import TaskContractError
 from or_audit.eval.enums import WorldKind
@@ -77,6 +77,49 @@ def determinism_at_least(measured: DeterminismClass, declared: DeterminismClass)
     return _DETERMINISM_STRENGTH[measured] >= _DETERMINISM_STRENGTH[declared]
 
 
+class BranchingSupport(StrEnum):
+    """How a branch at a shared prefix is backed. Ordered by strength.
+
+    :data:`_BRANCHING_STRENGTH` is the order. The kernel has never verified a
+    ``snapshot/restore`` round-trip on any adapter, so no level here is named
+    for one: the only claimed mechanisms are one the pinned stack proves
+    (:attr:`PREFIX_REPLAY`, see ``tests/test_lumen_branch.py``) and one a
+    measurement can earn (:attr:`MEASURED_FORK`, see
+    :func:`or_audit.eval.branching.measure_branch_support`).
+    """
+
+    UNSPECIFIED = "unspecified"
+    #: The adapter *author* asserts the fork is exact. A declaration, not a
+    #: measurement: it earns no branch-equivalence claim on its own.
+    DECLARED = "declared"
+    #: Replaying the same seed and the same action prefix reproduces the
+    #: prefix — the mechanism the pinned Lumen stack demonstrates.
+    PREFIX_REPLAY = "prefix_replay"
+    #: Two forks of one seed measured byte-identical. The only level that may
+    #: certify branch equivalence, and only from attached evidence.
+    MEASURED_FORK = "measured_fork"
+    #: The world cannot replay a prefix at all; counterfactual branches on it
+    #: must be refused, not silently compared.
+    NOT_SUPPORTED = "not_supported"
+
+
+#: Rank for each :class:`BranchingSupport`; absent means unsupported. Higher
+#: is stronger, so a measurement can never be talked into a claim a louder
+#: declaration made — the :data:`_DETERMINISM_STRENGTH` rule again.
+_BRANCHING_STRENGTH: dict[BranchingSupport, int] = {
+    BranchingSupport.NOT_SUPPORTED: -1,
+    BranchingSupport.UNSPECIFIED: 0,
+    BranchingSupport.DECLARED: 1,
+    BranchingSupport.PREFIX_REPLAY: 2,
+    BranchingSupport.MEASURED_FORK: 3,
+}
+
+
+def branching_at_least(actual: BranchingSupport, required: BranchingSupport) -> bool:
+    """Whether ``actual`` branching support is at least as strong as ``required``."""
+    return _BRANCHING_STRENGTH[actual] >= _BRANCHING_STRENGTH[required]
+
+
 class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -105,6 +148,38 @@ class WorldCapabilities(_Frozen):
     #: ``WorldSpec.metrics_only`` and verified per env by the conformance
     #: suite's gate-state availability check (§2.2).
     determinism_class: DeterminismClass = DeterminismClass.UNMEASURED
+    #: How a counterfactual branch at a shared prefix is backed for this world
+    #: kind. ``unspecified`` until an adapter declares a mechanism or a
+    #: measurement earns one, because the kernel has never verified a
+    #: ``snapshot/restore`` round-trip on any adapter it ships: the bridges'
+    #: ``snapshot()`` methods are read-only reports of live state, not
+    #: restorable checkpoints. A world whose forkability is unproven must stay
+    #: ``unspecified`` — the :attr:`DeterminismClass.UNMEASURED` rule again.
+    branching: BranchingSupport = BranchingSupport.UNSPECIFIED
+
+    @model_validator(mode="after")
+    def _branching_needs_a_stepped_world(self) -> Self:
+        """Every branching mechanism this kernel knows replays a live episode.
+
+        ``prefix_replay`` re-steps a shared action prefix and ``measured_fork``
+        compares two such replays, so both are meaningless on a world the
+        runner cannot step. A dataset-backed world (frame source, recorded
+        counterfactual) claiming either would be a contradiction that silently
+        upgrades its own eligibility, so it is refused at construction.
+        """
+        if self.branching is not BranchingSupport.UNSPECIFIED and not self.closed_loop:
+            raise TaskContractError(
+                f"branching support {self.branching.value!r} requires closed_loop=True: "
+                "forking a trajectory needs a world the runner can step, and a "
+                "dataset-backed world has no state to branch from"
+            )
+        if self.branching is BranchingSupport.MEASURED_FORK and not self.physics:
+            raise TaskContractError(
+                "branching support 'measured_fork' requires physics=True: a forked "
+                "rollout that carries no dynamics has no fork to measure, so the "
+                "measurement could not certify anything"
+            )
+        return self
 
     def gates(self) -> tuple[bool, ...]:
         """The eligibility flags a declaration must not overstate."""
@@ -115,6 +190,11 @@ class WorldCapabilities(_Frozen):
             self.requires_gym_id,
             self.requires_world_pin,
             self.requires_contract,
+            # Branching rides the same positional cross-check as every other
+            # gate: a task may not declare a fork mechanism the installed
+            # adapter withholds, and the strength itself is compared
+            # separately by ``require_branch_support``.
+            self.branching is not BranchingSupport.UNSPECIFIED,
         )
 
 
@@ -204,6 +284,12 @@ BUILTIN_WORLD_CAPABILITIES: dict[WorldKind, WorldCapabilities] = {
         closed_loop=True,
         requires_gym_id=True,
         requires_world_pin=True,
+        # The only fork mechanism the pinned stack actually demonstrates:
+        # identical seed plus identical action prefix reproduces identical
+        # trajectories (tests/test_lumen_branch.py). ``measured_fork`` stays
+        # unclaimed here — that rung is earned per adapter at run time by
+        # ``measure_branch_support``, never declared from a table.
+        branching=BranchingSupport.PREFIX_REPLAY,
     ),
     WorldKind.LUMEN_REPLAY: WorldCapabilities(physics=True, closed_loop=True),
     WorldKind.GYM: WorldCapabilities(
