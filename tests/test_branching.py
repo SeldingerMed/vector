@@ -132,6 +132,47 @@ class ThirdInstanceDriftEnv(DeterministicEnv):
         return {"x": value}, value * 0.1, False, False, {"h": value}
 
 
+class ObsJitterEnv(DeterministicEnv):
+    """Twins differ only in the *observation* channel: reward and info are fixed.
+
+    The observation-only sibling of ``JitterEnv``: an engine whose
+    nondeterminism is visible nowhere but in the bytes the policy actually
+    conditions on. If a probe measured only reward/info it would certify a
+    fork this world cannot provide.
+    """
+
+    counter: ClassVar[list[int]] = [0]
+
+    def step(self, action):
+        self.history.append(tuple(float(v) for v in action))
+        ObsJitterEnv.counter[0] += 1
+        return (
+            {"x": 1e-9 * ObsJitterEnv.counter[0]},
+            0.5,
+            False,
+            False,
+            {"h": 0.0},
+        )
+
+
+class ObsBlindProbeEnv(DeterministicEnv):
+    """Identical reward/info streams; the observation scales by a class knob.
+
+    Two instances configured with different multipliers are, from the
+    reward/info side, the *same world*: any difference in what the policy can
+    see lives in the observation. If arm digests were blind to observations,
+    these two runs would digest identically and a probe would be certifying
+    equality of worlds the policy can tell apart.
+    """
+
+    multiplier: ClassVar[float] = 1.0
+
+    def step(self, action):
+        self.history.append(tuple(float(v) for v in action))
+        value = _score(self.history)
+        return {"x": self.multiplier * value}, 0.5, False, False, {"h": 0.0}
+
+
 PREFIX: list[list[float]] = [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
 CAND_A: list[list[float]] = [[0.9, 0.9]]
 CAND_B: list[list[float]] = [[0.1, 0.1]]
@@ -162,6 +203,31 @@ def test_hidden_state_at_reset_defeats_the_fork() -> None:
     assert not evidence.prefix_equal
     assert not evidence.identical_fork_digests
     assert "seed" in evidence.first_difference
+
+
+def test_observation_only_nondeterminism_cannot_certify_a_fork() -> None:
+    """The false-certification hole: noise hidden in the observation channel.
+
+    Reward and info are constants here, so a probe that ignored the
+    observation would see byte-equal traces and hand out ``measured_fork`` to
+    a world whose policy input differs between twins run to run. With the
+    observation recorded, the digest mismatch is caught; and even under a
+    generous tolerance the world stops at ``prefix_replay`` — the noisy rung
+    never earns the equality-certifying rung.
+    """
+    ObsJitterEnv.counter[0] = 0
+    strict = measure_branch_support(ObsJitterEnv, seed=3, prefix_actions=PREFIX[:2])
+    assert strict.support is BranchingSupport.NOT_SUPPORTED
+    assert not strict.identical_fork_digests
+    assert strict.max_float_delta == pytest.approx(2e-9, abs=1e-12)
+    assert "diverged in observation" in strict.first_difference
+
+    ObsJitterEnv.counter[0] = 0
+    lenient = measure_branch_support(
+        ObsJitterEnv, seed=3, prefix_actions=PREFIX[:2], tolerance=1e-6
+    )
+    assert lenient.support is BranchingSupport.PREFIX_REPLAY
+    assert not lenient.identical_fork_digests
 
 
 def test_within_tolerance_is_prefix_replay_not_measured_fork() -> None:
@@ -284,6 +350,44 @@ def test_identical_candidate_plans_measure_nothing() -> None:
     )
     assert result["supported"]
     assert not result["evidence"].candidate_diverged
+
+
+def test_arm_digests_are_sensitive_to_the_observation_channel() -> None:
+    """Same plan, two worlds distinguishable only through the observation.
+
+    Reward and info are constant and action-independent in both variants, so
+    an observation-blind digest would hash the two arms the same and certify
+    cross-world equality the policy could refute. The digests must therefore
+    track what the policy actually conditions on.
+    """
+    ObsBlindProbeEnv.multiplier = 1.0
+    plain = branch_from(ObsBlindProbeEnv, seed=7, prefix_actions=PREFIX, candidates=[CAND_A])
+    ObsBlindProbeEnv.multiplier = 4.0
+    scaled = branch_from(ObsBlindProbeEnv, seed=7, prefix_actions=PREFIX, candidates=[CAND_A])
+    assert plain["supported"]
+    assert scaled["supported"]
+    assert plain["arms"][0]["digest"] != scaled["arms"][0]["digest"]
+
+
+def test_observation_only_replay_drift_is_refused_not_certified() -> None:
+    """The false-certification hole on the arm side of ``branch_from``.
+
+    Each replay pass of a candidate plan jitters only the observation (reward
+    and info are constants). If the trace ignored observations, the two passes
+    would digest byte-equal, every arm would report ``replayed_equal``, and
+    the branch set would be certified ``measured_fork`` although the policy
+    input differs run to run. With the observation in the digest, the arm's
+    prefix fails the byte-strict replay against the reference and the whole
+    comparison is refused with zero arms — the only honest outcome.
+    """
+    ObsJitterEnv.counter[0] = 0
+    result = branch_from(
+        ObsJitterEnv, seed=7, prefix_actions=PREFIX, candidates=[CAND_A], tolerance=1e-6
+    )
+    assert not result["supported"]
+    assert result["arms"] == []
+    assert result["evidence"].support is BranchingSupport.NOT_SUPPORTED
+    assert "replay" in result["refused"]
 
 
 def test_arm_traces_are_json_safe() -> None:

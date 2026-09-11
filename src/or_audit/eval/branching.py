@@ -212,20 +212,29 @@ def _rollout(
     bookkeeping meant for *scoring*. A probe must observe the engine's own
     bytes — anything sanitized before the digest is measured can hide the very
     nondeterminism being tested, and an injected perturbation would compare
-    perturbation schedules instead of worlds. The reset record is part of the
-    trace, because hidden state chosen at reset is exactly what "a seed
-    restores the state" would smuggle past a prefix-only comparison.
-    Termination honours ``terminated``/``truncated`` the way the runner does.
+    perturbation schedules instead of worlds. The reset record and every step
+    entry carry the *observation* the engine returned, not just reward and
+    info: a fork that hides its nondeterminism in the observation channel — the
+    only channel many real worlds expose state through — must not digest
+    byte-equal and be certified ``measured_fork``. Termination honours
+    ``terminated``/``truncated`` the way the runner does.
     """
-    _, reset_info = env.reset(seed=seed, options=options)
-    trace: list[dict[str, Any]] = [{"reset_info": jsonable(reset_info), "seed": seed}]
+    observation, reset_info = env.reset(seed=seed, options=options)
+    trace: list[dict[str, Any]] = [
+        {
+            "observation": jsonable(observation),
+            "reset_info": jsonable(reset_info),
+            "seed": seed,
+        }
+    ]
     for index, action in enumerate(actions):
         if index >= max_steps:
             break
-        _, reward, terminated, truncated, info = env.step(action)
+        observation, reward, terminated, truncated, info = env.step(action)
         trace.append(
             {
                 "action": jsonable(_normalize_action(action)),
+                "observation": jsonable(observation),
                 "reward": jsonable(reward),
                 "terminated": bool(terminated),
                 "truncated": bool(truncated),
@@ -275,12 +284,25 @@ def _fresh_rollout(
 
 
 def _first_difference(first: Sequence[dict[str, Any]], second: Sequence[dict[str, Any]]) -> str:
-    """Canonical summary of the first step where two traces part company."""
+    """Canonical summary of the first step where two traces part company.
+
+    Names the *channel* that differs, not just the step: a divergence hidden in
+    the observation must be reported as an observation divergence, so the
+    refusal tells the author which stream their state restore is failing to
+    reproduce.
+    """
     for index, (a, b) in enumerate(zip(first, second, strict=False)):
-        if canonical_digest(a) != canonical_digest(b):
-            if "action" in a:
-                return f"step {index} action {a['action']!r}"
+        if canonical_digest(a) == canonical_digest(b):
+            continue
+        if "action" not in a:
             return f"reset record of step {index}"
+        channels = [
+            key
+            for key in ("observation", "reward", "terminated", "truncated", "info")
+            if canonical_digest(a.get(key)) != canonical_digest(b.get(key))
+        ]
+        where = "/".join(channels) if channels else "step flags"
+        return f"step {index} action {a['action']!r} diverged in {where}"
     if len(first) != len(second):
         return f"traces end at different steps ({len(first)} vs {len(second)})"
     return "traces differ"
